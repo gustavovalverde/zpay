@@ -1,0 +1,21 @@
+[package]
+name = "zpay-core"
+description = "Protocol-neutral domain types and payment lifecycle for zpay."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "x402", "facilitator", "payments", "zpay"]
+categories = ["network-programming", "api-bindings"]
+
+[lints]
+workspace = true
+
+[dependencies]
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+thiserror.workspace = true
+ulid = { workspace = true, features = ["serde"] }

@@ -1,0 +1,38 @@
+[package]
+name = "zpay-runtime"
+description = "Composition root binary for zpay: HTTP listener, ops listener, env-driven config."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "facilitator", "axum", "x402", "zpay"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zpay-runtime"
+path = "src/main.rs"
+
+[features]
+default = []
+# Mount the MPP wire adapter at /mpp/v1/*. Off by default until PRD-42 Phase 5.
+mpp = ["dep:zpay-mpp"]
+
+[dependencies]
+axum.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zpay-core.workspace = true
+zpay-mpp = { workspace = true, optional = true }
+zpay-store.workspace = true
+zpay-x402.workspace = true

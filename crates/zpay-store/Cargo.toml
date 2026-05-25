@@ -1,0 +1,19 @@
+[package]
+name = "zpay-store"
+description = "libSQL persistence for the prepared-tx cache and settlement ledger."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "x402", "libsql", "facilitator", "zpay"]
+categories = ["database", "network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+zpay-core.workspace = true

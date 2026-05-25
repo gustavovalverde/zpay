@@ -1,0 +1,24 @@
+# Nextest profile configuration for zpay.
+#
+# Default `cargo nextest run` matches the `ci` profile: T0 unit + T1 integration
+# tests only. T2 perf and T3 live tests are excluded by `default-filter` so they
+# never run accidentally.
+
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 3 }
+failure-output = "immediate-final"
+final-status-level = "fail"
+default-filter = "not test(/^live::/) and not test(/^perf::/)"
+
+[profile.ci]
+inherits = "default"
+retries = 1
+fail-fast = false
+
+[profile.ci-live]
+inherits = "default"
+slow-timeout = { period = "120s", terminate-after = 2 }
+retries = 0
+fail-fast = true
+test-threads = 1
+default-filter = "test(/^live::/)"
