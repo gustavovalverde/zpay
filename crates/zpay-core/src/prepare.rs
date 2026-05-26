@@ -16,6 +16,7 @@
 //! trait surface.
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,12 @@ use serde::{Deserialize, Serialize};
 use crate::types::{
     EvidencePackHash, MerchantId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
 };
+
+/// Default validity window for a prepared transaction.
+///
+/// Five minutes matches the PRD-42 prepared-tx cache TTL default. Callers
+/// can override per-request via [`PrepareRequest::validity_seconds`].
+pub const DEFAULT_VALIDITY_SECONDS: u64 = 300;
 
 /// Length of the protocol-defined ZIP-302 memo prefix in bytes.
 ///
@@ -75,6 +82,10 @@ pub struct PrepareRequest {
     pub evidence_pack_hash: EvidencePackHash,
     /// Block height after which the prepared transaction cannot settle.
     pub expiry_height: u32,
+    /// Wall-clock validity window in seconds. Defaults to
+    /// [`DEFAULT_VALIDITY_SECONDS`] when omitted.
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
 }
 
 /// Output of [`propose`]. The agent passes `payment_uri` and `memo_bytes`
@@ -154,6 +165,8 @@ pub struct PreparedTxEntry {
     pub recipient_unified_address: String,
     /// Amount the user's wallet must pay.
     pub amount_zat: Zatoshis,
+    /// Wall-clock deadline after which the sweeper removes the entry.
+    pub expires_at_unix_seconds: u64,
 }
 
 impl PreparedTxCache {
@@ -193,6 +206,16 @@ impl PreparedTxCache {
     pub fn entry_count(&self) -> usize {
         let guard = self.entries.lock();
         guard.len()
+    }
+
+    /// Remove every entry whose `expires_at_unix_seconds` is at or before
+    /// `now_unix_seconds`. Returns the number of entries dropped so a
+    /// background sweeper can record useful telemetry.
+    pub fn sweep_expired(&self, now_unix_seconds: u64) -> usize {
+        let mut guard = self.entries.lock();
+        let before = guard.len();
+        guard.retain(|_, entry| entry.expires_at_unix_seconds > now_unix_seconds);
+        before - guard.len()
     }
 }
 
@@ -241,15 +264,28 @@ pub fn propose(
         expiry_height: request.expiry_height,
     };
 
+    let validity_seconds = request
+        .validity_seconds
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_VALIDITY_SECONDS);
+    let expires_at_unix_seconds = current_unix_seconds().saturating_add(validity_seconds);
+
     cache.insert(PreparedTxEntry {
         preparation: preparation.clone(),
         merchant_id: request.merchant_id,
         network: request.network,
         recipient_unified_address: request.recipient_unified_address,
         amount_zat: request.amount_zat,
+        expires_at_unix_seconds,
     });
 
     Ok(preparation)
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Compose a minimal ZIP-321 URI for the recipient and amount.
@@ -302,6 +338,7 @@ mod tests {
             resource_hash: ResourceHash([0x22; 32]),
             evidence_pack_hash: EvidencePackHash([0x33; 32]),
             expiry_height: 3_217_900,
+            validity_seconds: None,
         }
     }
 
@@ -393,5 +430,28 @@ mod tests {
         assert_eq!(format_zec_from_zat(Zatoshis(1)), "0.00000001");
         assert_eq!(format_zec_from_zat(Zatoshis(0)), "0");
         assert_eq!(format_zec_from_zat(Zatoshis(150_000_000)), "1.5");
+    }
+
+    #[test]
+    fn sweep_drops_expired_entries_and_keeps_active_ones() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let mut short_lived = valid_request();
+        short_lived.validity_seconds = Some(1);
+        let mut long_lived = valid_request();
+        long_lived.validity_seconds = Some(3600);
+
+        let short = propose(short_lived, &cache).map_err(|_| "short propose must succeed")?;
+        let long = propose(long_lived, &cache).map_err(|_| "long propose must succeed")?;
+        assert_eq!(cache.entry_count(), 2);
+
+        // Pick a "now" that is past the short-lived entry's expiry but not
+        // the long-lived one's. The short entry uses validity_seconds = 1
+        // so its expiry sits about now+1; sweep at now+5 drops it.
+        let now_plus_five = super::current_unix_seconds().saturating_add(5);
+        let dropped = cache.sweep_expired(now_plus_five);
+        assert_eq!(dropped, 1);
+        assert!(cache.find(&short.payment_id).is_none());
+        assert!(cache.find(&long.payment_id).is_some());
+        Ok(())
     }
 }

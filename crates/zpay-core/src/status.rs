@@ -130,13 +130,21 @@ pub fn lookup_payment_status(
             settled_at_unix_seconds: Some(entry.settled_at_unix_seconds),
         };
     }
-    if prepared.find(payment_id).is_some() {
-        return PaymentStatusSnapshot {
-            payment_id: payment_id.clone(),
-            status: PaymentStatus::Prepared,
-            broadcast_outcome: None,
-            settled_at_unix_seconds: None,
-        };
+    if let Some(entry) = prepared.find(payment_id) {
+        // An expired-but-not-yet-swept entry must look the same as an
+        // unknown one to callers. Otherwise an agent would build a tx
+        // against a stale preparation that settle will refuse.
+        let now_unix_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        if entry.expires_at_unix_seconds > now_unix_seconds {
+            return PaymentStatusSnapshot {
+                payment_id: payment_id.clone(),
+                status: PaymentStatus::Prepared,
+                broadcast_outcome: None,
+                settled_at_unix_seconds: None,
+            };
+        }
     }
     PaymentStatusSnapshot {
         payment_id: payment_id.clone(),
@@ -166,6 +174,7 @@ mod tests {
             resource_hash: ResourceHash([0x22; 32]),
             evidence_pack_hash: EvidencePackHash([0x33; 32]),
             expiry_height: 3_217_900,
+            validity_seconds: None,
         }
     }
 

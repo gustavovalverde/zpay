@@ -81,7 +81,9 @@ async fn main() -> Result<(), StartupError> {
         return Ok(());
     }
 
-    let app_router = build_app_router(&config)?;
+    let app_plane = build_app_router(&config)?;
+    let app_router = app_plane.router;
+    spawn_prepared_tx_sweeper(Arc::clone(&app_plane.cache));
     let ops_router = build_ops_router();
 
     let app_listener = tokio::net::TcpListener::bind(config.app_bind_addr)
@@ -125,11 +127,17 @@ fn install_tracing() -> Result<(), StartupError> {
         .map_err(|source| StartupError::Tracing { source })
 }
 
-fn build_app_router(config: &ResolvedConfig) -> Result<Router, StartupError> {
+struct AppPlane {
+    router: Router,
+    cache: Arc<PreparedTxCache>,
+}
+
+fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
     let merchants = load_merchant_registry(config)?;
+    let cache = Arc::new(PreparedTxCache::new());
     let state = AppState::new(
-        Arc::new(PreparedTxCache::new()),
+        Arc::clone(&cache),
         Arc::new(SettlementLedger::new()),
         Arc::new(merchants),
         Arc::new(chain),
@@ -139,7 +147,36 @@ fn build_app_router(config: &ResolvedConfig) -> Result<Router, StartupError> {
     #[cfg(feature = "mpp")]
     let router = router.nest("/mpp/v1", zpay_mpp::router());
 
-    Ok(router.layer(tower_http::trace::TraceLayer::new_for_http()))
+    Ok(AppPlane {
+        router: router.layer(tower_http::trace::TraceLayer::new_for_http()),
+        cache,
+    })
+}
+
+/// Interval at which the prepared-tx sweeper drops expired entries.
+const PREPARED_TX_SWEEP_INTERVAL_SECONDS: u64 = 30;
+
+fn spawn_prepared_tx_sweeper(cache: Arc<PreparedTxCache>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            PREPARED_TX_SWEEP_INTERVAL_SECONDS,
+        ));
+        // Tick once at start, then on every interval boundary.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now_unix_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            let dropped = cache.sweep_expired(now_unix_seconds);
+            if dropped > 0 {
+                tracing::info!(
+                    dropped_count = dropped,
+                    "prepared-tx sweeper dropped expired entries",
+                );
+            }
+        }
+    });
 }
 
 fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient, StartupError> {
