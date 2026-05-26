@@ -5053,6 +5053,7 @@ dependencies = [
 name = "zpay-runtime"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "clap",
  "hex",
@@ -5062,10 +5063,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tonic",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "zinder-client",
+ "zinder-proto",
  "zpay-core",
  "zpay-mpp",
  "zpay-store",

@@ -29,12 +29,15 @@ hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+arc-swap = "1.7.1"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml.workspace = true
+tonic.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zinder-client.workspace = true
+zinder-proto.workspace = true
 zpay-core.workspace = true
 zpay-mpp = { workspace = true, optional = true }
 zpay-store.workspace = true

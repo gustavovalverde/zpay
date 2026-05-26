@@ -8,6 +8,7 @@
 
 mod zinder_broadcast;
 mod zinder_oracle;
+mod zinder_verify;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,12 +21,14 @@ use clap::Parser;
 use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
 use zinder_oracle::ZinderConfirmationOracle;
+use zinder_verify::ZinderDisclosureVerifier;
 use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
 use zpay_core::prepare::PreparedTxCache;
 use zpay_core::status::SettlementLedger;
 use zpay_core::types::MerchantId;
+use zpay_core::verify::{DisclosureVerdict, DisclosureVerifier, Verdict, VerifyError};
 use zpay_x402::AppState;
 
 /// zpay facilitator runtime.
@@ -139,6 +142,7 @@ struct AppPlane {
 
 fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
+    let verifier = build_disclosure_verifier(config)?;
     let merchants = load_merchant_registry(config)?;
     let cache = Arc::new(PreparedTxCache::new());
     let ledger = Arc::new(SettlementLedger::new());
@@ -147,6 +151,7 @@ fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
         Arc::clone(&ledger),
         Arc::new(merchants),
         Arc::new(chain),
+        Arc::new(verifier),
     );
     let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
 
@@ -363,6 +368,53 @@ impl BroadcastClient for AnyBroadcastClient {
     }
 }
 
+/// Concrete disclosure-verifier variant chosen at startup.
+enum AnyDisclosureVerifier {
+    /// Placeholder when no explorer endpoint is configured. Returns
+    /// `Verdict::CapabilityUnavailable` so the `/verify` handler surfaces
+    /// 503 `capability_unavailable`.
+    CapabilityUnavailable,
+    /// Production verifier backed by zinder's
+    /// `ExplorerQuery.VerifyPaymentDisclosure`.
+    Zinder(Box<ZinderDisclosureVerifier>),
+}
+
+impl DisclosureVerifier for AnyDisclosureVerifier {
+    async fn verify_disclosure(
+        &self,
+        disclosure_bytes: &[u8],
+    ) -> Result<DisclosureVerdict, VerifyError> {
+        match self {
+            Self::CapabilityUnavailable => Ok(DisclosureVerdict {
+                verdict: Verdict::CapabilityUnavailable,
+                transaction_id: None,
+                payment_id: None,
+                disclosed_value_zat: None,
+            }),
+            Self::Zinder(verifier) => verifier.verify_disclosure(disclosure_bytes).await,
+        }
+    }
+}
+
+fn build_disclosure_verifier(
+    config: &ResolvedConfig,
+) -> Result<AnyDisclosureVerifier, StartupError> {
+    let Some(endpoint) = config.explorer_grpc_addr.clone() else {
+        tracing::warn!(
+            "ZPAY_NODE__EXPLORER_GRPC_ADDR unset; /x402/v2/verify returns capability_unavailable until an explorer plane is configured",
+        );
+        return Ok(AnyDisclosureVerifier::CapabilityUnavailable);
+    };
+    let verifier = ZinderDisclosureVerifier::connect(endpoint.clone()).map_err(|source| {
+        StartupError::BroadcastClient {
+            endpoint,
+            source: Box::new(source),
+        }
+    })?;
+    tracing::info!("zinder disclosure verifier wired");
+    Ok(AnyDisclosureVerifier::Zinder(Box::new(verifier)))
+}
+
 fn build_ops_router() -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -391,6 +443,7 @@ struct ResolvedConfig {
     ops_bind_addr: SocketAddr,
     network: String,
     indexer_grpc_addr: Option<String>,
+    explorer_grpc_addr: Option<String>,
     merchants_config_path: Option<String>,
 }
 
@@ -402,6 +455,9 @@ impl ResolvedConfig {
             std::env::var("ZPAY_OPS__BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9295".to_string());
         let network = std::env::var("ZPAY_NETWORK").unwrap_or_else(|_| "regtest".to_string());
         let indexer_grpc_addr = std::env::var("ZPAY_NODE__INDEXER_GRPC_ADDR")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty());
+        let explorer_grpc_addr = std::env::var("ZPAY_NODE__EXPLORER_GRPC_ADDR")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
         let merchants_config_path = std::env::var("ZPAY_MERCHANTS__CONFIG_PATH")
@@ -427,6 +483,7 @@ impl ResolvedConfig {
             ops_bind_addr,
             network,
             indexer_grpc_addr,
+            explorer_grpc_addr,
             merchants_config_path,
         })
     }
