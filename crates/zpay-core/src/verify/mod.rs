@@ -1,10 +1,14 @@
 //! Verify a ZIP-311 payment disclosure against on-chain state.
 //!
-//! zpay delegates the cryptography to zinder's `VerifyPaymentDisclosure`
-//! RPC. This module composes the typed request, interprets the typed
-//! response, and exposes a [`DisclosureVerifier`] abstraction so the
-//! runtime can plug a real zinder-backed verifier behind it while
-//! tests use an in-memory fake.
+//! The public surface is the [`DisclosureVerifier`] trait plus the
+//! [`verify`] driver that wraps an implementation with the merchant's
+//! expected-amount reconciliation step. Two implementations live in
+//! the runtime crate: a zinder-backed verifier and (when zinder M2+
+//! is not yet available) a local fallback that re-implements ZIP-311
+//! verification in-process using [`parse`], [`transparent`], and
+//! [`sapling`] from this module.
+
+pub mod parse;
 
 use std::future::Future;
 
