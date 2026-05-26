@@ -85,6 +85,14 @@ fn map_broadcast_result(broadcast_result: &TransactionBroadcastResult) -> Broadc
         TransactionBroadcastResult::Duplicate(duplicate) => BroadcastOutcome::Duplicate {
             upstream_message: duplicate.message.clone(),
         },
+        // Surfaced as Duplicate (a success kind) per zinder's
+        // `BroadcastQueued` contract: the upstream already has the
+        // bytes in its download or verification queue and will mine
+        // the locally-computed tx_id eventually. The agent retries
+        // settle as a no-op because the cache entry is already gone.
+        TransactionBroadcastResult::Queued(queued) => BroadcastOutcome::Duplicate {
+            upstream_message: queued.message.clone(),
+        },
         TransactionBroadcastResult::InvalidEncoding(invalid) => BroadcastOutcome::InvalidEncoding {
             upstream_message: invalid.message.clone(),
         },
@@ -143,6 +151,7 @@ mod tests {
     #[test]
     fn rejected_is_not_a_success_kind() {
         let broadcast_result = TransactionBroadcastResult::Rejected(BroadcastRejected {
+            kind: zinder_client::BroadcastRejectionReason::Unknown,
             error_code: Some(-26),
             message: "policy: dust output".to_owned(),
         });
