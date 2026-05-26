@@ -1,0 +1,281 @@
+//! libSQL implementation of [`SettlementLedgerStore`].
+
+use libsql::params;
+
+use zpay_core::broadcast::BroadcastOutcome;
+use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore};
+use zpay_core::store::StoreError;
+use zpay_core::types::PaymentId;
+
+use crate::connection::StoreConnection;
+
+/// libSQL-backed settlement ledger.
+///
+/// The `(broadcast_outcome_kind, transaction_id, upstream_message)`
+/// triple flatten-encodes the [`BroadcastOutcome`] enum so the
+/// upstream column shape stays SQL-readable for operators.
+#[derive(Clone)]
+pub struct LibsqlSettlementLedgerStore {
+    connection: StoreConnection,
+}
+
+impl LibsqlSettlementLedgerStore {
+    /// Wrap an open [`StoreConnection`].
+    #[must_use]
+    pub const fn new(connection: StoreConnection) -> Self {
+        Self { connection }
+    }
+}
+
+impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
+    async fn record(
+        &self,
+        payment_id: PaymentId,
+        entry: SettlementLedgerEntry,
+    ) -> Result<(), StoreError> {
+        let (kind, transaction_id, upstream_message) = encode_broadcast_outcome(&entry.broadcast_outcome);
+        let confirmation_count = entry
+            .confirmation_count
+            .map(i64::from);
+        let mined_block_height = entry
+            .mined_block_height
+            .map(|height| i64::try_from(height).unwrap_or(i64::MAX));
+
+        self.connection
+            .execute(
+                "INSERT INTO settlement_ledger (\
+                    payment_id, broadcast_outcome_kind, transaction_id, upstream_message, \
+                    settled_at_unix_seconds, confirmation_count, mined_block_height, \
+                    last_confirmation_check_at_unix_seconds\
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) \
+                ON CONFLICT(payment_id) DO UPDATE SET \
+                    broadcast_outcome_kind = excluded.broadcast_outcome_kind, \
+                    transaction_id = excluded.transaction_id, \
+                    upstream_message = excluded.upstream_message, \
+                    settled_at_unix_seconds = excluded.settled_at_unix_seconds, \
+                    confirmation_count = excluded.confirmation_count, \
+                    mined_block_height = excluded.mined_block_height, \
+                    last_confirmation_check_at_unix_seconds = NULL",
+                params![
+                    payment_id.0,
+                    kind,
+                    transaction_id,
+                    upstream_message,
+                    entry.settled_at_unix_seconds,
+                    confirmation_count,
+                    mined_block_height,
+                ],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<SettlementLedgerEntry>, StoreError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT broadcast_outcome_kind, transaction_id, upstream_message, \
+                    settled_at_unix_seconds, confirmation_count, mined_block_height \
+                FROM settlement_ledger WHERE payment_id = ?",
+                params![payment_id.0.clone()],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? else {
+            return Ok(None);
+        };
+        Ok(Some(row_to_settlement_ledger_entry(&row)?))
+    }
+
+    async fn entry_count(&self) -> Result<usize, StoreError> {
+        let mut rows = self
+            .connection
+            .query("SELECT COUNT(*) FROM settlement_ledger", params![])
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+            .ok_or_else(|| StoreError::Unavailable {
+                reason: "count query returned no row".to_owned(),
+            })?;
+        let raw: i64 = row.get(0).map_err(|err| StoreError::RowMalformed {
+            reason: format!("count column non-integer: {err}"),
+        })?;
+        usize::try_from(raw).map_err(|_| StoreError::RowMalformed {
+            reason: "count overflowed usize".to_owned(),
+        })
+    }
+
+    async fn success_kind_transactions(
+        &self,
+    ) -> Result<Vec<(PaymentId, String)>, StoreError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT payment_id, transaction_id \
+                FROM settlement_ledger \
+                WHERE broadcast_outcome_kind IN ('accepted', 'duplicate') \
+                  AND transaction_id IS NOT NULL",
+                params![],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        let mut pairs = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? {
+            let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
+                reason: format!("payment_id read failed: {err}"),
+            })?;
+            let transaction_id: String =
+                row.get(1).map_err(|err| StoreError::RowMalformed {
+                    reason: format!("transaction_id read failed: {err}"),
+                })?;
+            pairs.push((PaymentId(payment_id), transaction_id));
+        }
+        Ok(pairs)
+    }
+
+    async fn record_confirmation(
+        &self,
+        payment_id: &PaymentId,
+        confirmation_count: u32,
+        mined_block_height: Option<u64>,
+    ) -> Result<bool, StoreError> {
+        let confirmation_count_i64 = i64::from(confirmation_count);
+        let mined_block_height_i64 =
+            mined_block_height.map(|height| i64::try_from(height).unwrap_or(i64::MAX));
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs()),
+        )
+        .unwrap_or(i64::MAX);
+        // When the caller does not know the mined block height (e.g.
+        // the tx is in mempool) we must not overwrite a previously
+        // recorded height. COALESCE(?, mined_block_height) preserves
+        // the prior value on a NULL update.
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE settlement_ledger SET \
+                    confirmation_count = ?, \
+                    mined_block_height = COALESCE(?, mined_block_height), \
+                    last_confirmation_check_at_unix_seconds = ? \
+                WHERE payment_id = ?",
+                params![
+                    confirmation_count_i64,
+                    mined_block_height_i64,
+                    now,
+                    payment_id.0.clone(),
+                ],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        Ok(affected > 0)
+    }
+}
+
+fn encode_broadcast_outcome(
+    outcome: &BroadcastOutcome,
+) -> (&'static str, Option<String>, Option<String>) {
+    match outcome {
+        BroadcastOutcome::Accepted { transaction_id } => {
+            ("accepted", Some(transaction_id.clone()), None)
+        }
+        BroadcastOutcome::Duplicate { upstream_message } => {
+            ("duplicate", None, Some(upstream_message.clone()))
+        }
+        BroadcastOutcome::InvalidEncoding { upstream_message } => {
+            ("invalid_encoding", None, Some(upstream_message.clone()))
+        }
+        BroadcastOutcome::Rejected { upstream_message } => {
+            ("rejected", None, Some(upstream_message.clone()))
+        }
+        BroadcastOutcome::Unknown { upstream_message } => {
+            ("unknown", None, Some(upstream_message.clone()))
+        }
+        #[allow(
+            clippy::wildcard_enum_match_arm,
+            reason = "BroadcastOutcome is #[non_exhaustive]; future variants persist as Unknown until they have an explicit row shape"
+        )]
+        _ => (
+            "unknown",
+            None,
+            Some("unrecognised broadcast outcome variant".to_owned()),
+        ),
+    }
+}
+
+fn row_to_settlement_ledger_entry(
+    row: &libsql::Row,
+) -> Result<SettlementLedgerEntry, StoreError> {
+    let kind: String = row.get(0).map_err(|err| StoreError::RowMalformed {
+        reason: format!("broadcast_outcome_kind read failed: {err}"),
+    })?;
+    let transaction_id: Option<String> =
+        row.get(1).map_err(|err| StoreError::RowMalformed {
+            reason: format!("transaction_id read failed: {err}"),
+        })?;
+    let upstream_message: Option<String> =
+        row.get(2).map_err(|err| StoreError::RowMalformed {
+            reason: format!("upstream_message read failed: {err}"),
+        })?;
+    let settled_at_unix_seconds: i64 = row.get(3).map_err(|err| StoreError::RowMalformed {
+        reason: format!("settled_at_unix_seconds read failed: {err}"),
+    })?;
+    let confirmation_count: Option<i64> =
+        row.get(4).map_err(|err| StoreError::RowMalformed {
+            reason: format!("confirmation_count read failed: {err}"),
+        })?;
+    let mined_block_height: Option<i64> =
+        row.get(5).map_err(|err| StoreError::RowMalformed {
+            reason: format!("mined_block_height read failed: {err}"),
+        })?;
+
+    let broadcast_outcome = match kind.as_str() {
+        "accepted" => BroadcastOutcome::Accepted {
+            transaction_id: transaction_id.ok_or_else(|| StoreError::RowMalformed {
+                reason: "accepted row missing transaction_id".to_owned(),
+            })?,
+        },
+        "duplicate" => BroadcastOutcome::Duplicate {
+            upstream_message: upstream_message.unwrap_or_default(),
+        },
+        "invalid_encoding" => BroadcastOutcome::InvalidEncoding {
+            upstream_message: upstream_message.unwrap_or_default(),
+        },
+        "rejected" => BroadcastOutcome::Rejected {
+            upstream_message: upstream_message.unwrap_or_default(),
+        },
+        "unknown" => BroadcastOutcome::Unknown {
+            upstream_message: upstream_message.unwrap_or_default(),
+        },
+        other => {
+            return Err(StoreError::RowMalformed {
+                reason: format!("unknown broadcast_outcome_kind: {other}"),
+            });
+        }
+    };
+
+    Ok(SettlementLedgerEntry {
+        broadcast_outcome,
+        settled_at_unix_seconds,
+        confirmation_count: confirmation_count
+            .map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
+        mined_block_height: mined_block_height
+            .map(|raw| u64::try_from(raw).unwrap_or(0)),
+    })
+}
+
+fn libsql_to_store_error(err: &libsql::Error) -> StoreError {
+    let message = err.to_string();
+    if message.contains("UNIQUE") {
+        return StoreError::IntegrityViolation { constraint: message };
+    }
+    StoreError::Unavailable { reason: message }
+}

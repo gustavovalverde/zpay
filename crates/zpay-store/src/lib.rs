@@ -1,44 +1,49 @@
 //! libSQL persistence for the prepared-tx cache and settlement ledger.
 //!
-//! See [ADR-0004][adr] for the choice of libSQL over alternatives.
+//! See [ADR-0004][adr] for the persistence decision.
 //!
-//! Schema migrations live under `migrations/` numbered from `0001` and
-//! applied in order. The current schema version is exported as
-//! [`SCHEMA_VERSION`].
+//! The crate exposes two implementations of zpay-core's storage
+//! traits: [`LibsqlPreparedTxStore`] for [`zpay_core::prepare::PreparedTxStore`]
+//! and [`LibsqlSettlementLedgerStore`] for
+//! [`zpay_core::status::SettlementLedgerStore`]. Both share a single
+//! [`StoreConnection`] that auto-reconnects on Turso Hrana stream
+//! expiry.
 //!
-//! Implementation lands in M1; this scaffold only declares the typed
-//! surface and ships migration `0001_initial.sql`.
+//! Schema migrations live under `migrations/`, numbered from `0001`
+//! and applied in order via [`run_migrations`]. The current schema
+//! version is exported as [`SCHEMA_VERSION`].
 //!
 //! [adr]: https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0004-libsql-prepared-tx-cache.md
 
-/// Current schema version produced by applying every file in `migrations/`.
+pub mod connection;
+pub mod migration;
+pub mod prepared_tx;
+pub mod settlement_ledger;
+
+pub use connection::StoreConnection;
+pub use migration::run_migrations;
+pub use prepared_tx::LibsqlPreparedTxStore;
+pub use settlement_ledger::LibsqlSettlementLedgerStore;
+pub use zpay_core::store::StoreError;
+
+/// Schema version produced by applying every file in `migrations/`.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Name of the bookkeeping table that records applied migrations.
 pub const MIGRATION_TABLE: &str = "zpay_schema_migrations";
 
-/// Errors that can arise during store operations.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum StoreError {
-    /// libSQL pool exhausted or remote unreachable. Retry posture: `retryable`.
-    #[error("connection failed")]
-    ConnectionFailed,
-
-    /// Operator must run `zpay-ops migrate` before the store can be used.
-    /// Retry posture: `requires_operator`.
-    #[error("migration pending: current={current_version}, required={required_version}")]
-    MigrationPending {
-        /// Schema version observed on the connected libSQL database.
-        current_version: u32,
-        /// Schema version the running binary expects.
-        required_version: u32,
-    },
-
-    /// Application invariant violated. Retry posture: `not_retryable`.
-    #[error("integrity violation: {constraint}")]
-    IntegrityViolation {
-        /// Name of the violated SQL constraint or invariant.
-        constraint: String,
-    },
+/// Convenience: open a [`StoreConnection`] and run the migrations the
+/// current binary requires. Returns the live connection on success.
+///
+/// # Errors
+///
+/// Forwards every failure from [`StoreConnection::open`] and
+/// [`run_migrations`].
+pub async fn open_and_migrate(
+    store_url: &str,
+    auth_token: Option<&str>,
+) -> Result<StoreConnection, StoreError> {
+    let connection = StoreConnection::open(store_url, auth_token).await?;
+    run_migrations(&connection).await?;
+    Ok(connection)
 }

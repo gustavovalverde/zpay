@@ -38,7 +38,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zinder-client.workspace = true
 zinder-proto.workspace = true
-zpay-core.workspace = true
+zpay-core = { workspace = true, features = ["in_memory"] }
 zpay-mpp = { workspace = true, optional = true }
 zpay-store.workspace = true
 zpay-x402.workspace = true

@@ -154,3 +154,40 @@ becomes a debugging nightmare under partial failure.
 - Multi-region replication beyond Turso's built-in replica model.
 - Encryption at rest beyond the deployment's underlying disk encryption.
   Bearer keys are hashed; nothing else at rest is sensitive.
+
+## Revision history
+
+### 2026-05-26: Schema 0001 reconciliation
+
+The 0001 migration shipped now matches the typed values in zpay-core
+exactly. Three adjustments against the scaffold:
+
+- **Drop `agent_dpop_jkt` from `prepared_tx`.** DPoP-bound idempotency
+  is PRD-42 Phase 4 work that has not landed yet, so requiring a NOT
+  NULL column for a value zpay does not produce would force callers
+  to invent a placeholder. The idempotency uniqueness narrows to
+  `(merchant_id, idempotency_key)` enforced by a partial UNIQUE
+  index (`prepared_tx_idempotency_idx WHERE idempotency_key IS NOT
+  NULL`). The DPoP join key arrives with its own migration when the
+  Phase 4 middleware lands.
+- **`settlement_ledger` carries `broadcast_outcome_kind`,
+  `transaction_id` (nullable), `upstream_message` (nullable),
+  `confirmation_count` (nullable), `mined_block_height` (nullable),
+  `last_confirmation_check_at_unix_seconds` (nullable).** The
+  flattened triple replaces `txid NOT NULL` because failure-kind
+  outcomes (`Rejected`, `InvalidEncoding`, `Unknown`) do not carry a
+  txid. `mined_block_height` and the per-confirmation timestamp are
+  the columns the confirmation oracle updates on every tick.
+- **Defer `evidence_pack_hash` and `watch_id` columns on
+  `settlement_ledger`.** Neither is produced by today's broadcast or
+  oracle paths; both follow when PRD-42 Phase 6 (`evidence_pack_hash`
+  delivery from the MCP bridge) and Phase 4 (`watch_id` for per-txid
+  push subscriptions) ship.
+
+The migration runner in `zpay-store::migration` applies these scripts
+through `execute_transactional_batch` and tracks state in
+`zpay_schema_migrations`. The runtime composes between an in-memory
+`PreparedTxCache` / `SettlementLedger` (via `zpay-core`'s `in_memory`
+feature, default-on for tests) and the libSQL implementations via
+the `ZPAY_STORE__BACKEND` env var (`memory` or `libsql`; defaults to
+`libsql` with `ZPAY_STORE__URL` defaulting to `file:./zpay.libsql`).

@@ -25,10 +25,14 @@ use zinder_verify::ZinderDisclosureVerifier;
 use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
-use zpay_core::prepare::{PreparedTxCache, PreparedTxStore};
-use zpay_core::status::{SettlementLedger, SettlementLedgerStore};
-use zpay_core::types::MerchantId;
+use zpay_core::prepare::{PreparedTxCache, PreparedTxEntry, PreparedTxStore};
+use zpay_core::status::{
+    SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
+};
+use zpay_core::store::StoreError;
+use zpay_core::types::{MerchantId, PaymentId};
 use zpay_core::verify::{DisclosureVerdict, DisclosureVerifier, Verdict, VerifyError};
+use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
 use zpay_x402::AppState;
 
 /// zpay facilitator runtime.
@@ -73,6 +77,14 @@ enum StartupError {
     },
     #[error("merchant registry config read failed: {path}: {reason}")]
     MerchantsConfig { path: String, reason: String },
+    #[error("store backend {backend:?} initialisation failed: {source}")]
+    StoreBackend {
+        backend: String,
+        #[source]
+        source: StoreError,
+    },
+    #[error("invalid store backend {backend:?}: expected 'memory' or 'libsql'")]
+    StoreBackendInvalid { backend: String },
 }
 
 #[tokio::main]
@@ -87,9 +99,9 @@ async fn main() -> Result<(), StartupError> {
         return Ok(());
     }
 
-    let app_plane = build_app_router(&config)?;
+    let app_plane = build_app_router(&config).await?;
     let app_router = app_plane.router;
-    spawn_prepared_tx_sweeper(Arc::clone(&app_plane.cache));
+    spawn_prepared_tx_sweeper(Arc::clone(&app_plane.prepared_store));
     spawn_confirmation_oracle(&config, Arc::clone(&app_plane.ledger))?;
     let ops_router = build_ops_router();
 
@@ -136,18 +148,18 @@ fn install_tracing() -> Result<(), StartupError> {
 
 struct AppPlane {
     router: Router,
-    cache: Arc<PreparedTxCache>,
-    ledger: Arc<SettlementLedger>,
+    prepared_store: Arc<AnyPreparedTxStore>,
+    ledger: Arc<AnySettlementLedgerStore>,
 }
 
-fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
+async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
     let verifier = build_disclosure_verifier(config)?;
     let merchants = load_merchant_registry(config)?;
-    let cache = Arc::new(PreparedTxCache::new());
-    let ledger = Arc::new(SettlementLedger::new());
+    let (prepared_store, ledger) = build_stores(config).await?;
+
     let state = AppState::new(
-        Arc::clone(&cache),
+        Arc::clone(&prepared_store),
         Arc::clone(&ledger),
         Arc::new(merchants),
         Arc::new(chain),
@@ -160,9 +172,175 @@ fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
 
     Ok(AppPlane {
         router: router.layer(tower_http::trace::TraceLayer::new_for_http()),
-        cache,
+        prepared_store,
         ledger,
     })
+}
+
+async fn build_stores(
+    config: &ResolvedConfig,
+) -> Result<(Arc<AnyPreparedTxStore>, Arc<AnySettlementLedgerStore>), StartupError> {
+    match config.store_backend.as_str() {
+        "memory" => {
+            tracing::info!(backend = "memory", "store backend wired (no persistence)");
+            Ok((
+                Arc::new(AnyPreparedTxStore::Memory(PreparedTxCache::new())),
+                Arc::new(AnySettlementLedgerStore::Memory(SettlementLedger::new())),
+            ))
+        }
+        "libsql" => {
+            let connection = open_and_migrate(
+                &config.store_url,
+                config.store_auth_token.as_deref(),
+            )
+            .await
+            .map_err(|source| StartupError::StoreBackend {
+                backend: "libsql".to_owned(),
+                source,
+            })?;
+            tracing::info!(
+                backend = "libsql",
+                store_url = %config.store_url,
+                "store backend wired (libsql migrations applied)",
+            );
+            Ok((
+                Arc::new(AnyPreparedTxStore::Libsql(LibsqlPreparedTxStore::new(
+                    connection.clone(),
+                ))),
+                Arc::new(AnySettlementLedgerStore::Libsql(
+                    LibsqlSettlementLedgerStore::new(connection),
+                )),
+            ))
+        }
+        other => Err(StartupError::StoreBackendInvalid {
+            backend: other.to_owned(),
+        }),
+    }
+}
+
+/// Runtime-time discriminator over the configured prepared-tx store.
+enum AnyPreparedTxStore {
+    Memory(PreparedTxCache),
+    Libsql(LibsqlPreparedTxStore),
+}
+
+impl PreparedTxStore for AnyPreparedTxStore {
+    async fn insert(&self, entry: PreparedTxEntry) -> Result<(), StoreError> {
+        match self {
+            Self::Memory(inner) => inner.insert(entry).await,
+            Self::Libsql(inner) => inner.insert(entry).await,
+        }
+    }
+
+    async fn find_by_payment_id(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<PreparedTxEntry>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.find_by_payment_id(payment_id).await,
+            Self::Libsql(inner) => inner.find_by_payment_id(payment_id).await,
+        }
+    }
+
+    async fn find_by_idempotency(
+        &self,
+        merchant_id: &MerchantId,
+        idempotency_key: &str,
+    ) -> Result<Option<PreparedTxEntry>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.find_by_idempotency(merchant_id, idempotency_key).await,
+            Self::Libsql(inner) => inner.find_by_idempotency(merchant_id, idempotency_key).await,
+        }
+    }
+
+    async fn remove(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<PreparedTxEntry>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.remove(payment_id).await,
+            Self::Libsql(inner) => inner.remove(payment_id).await,
+        }
+    }
+
+    async fn sweep_expired(&self, now_unix_seconds: u64) -> Result<usize, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.sweep_expired(now_unix_seconds).await,
+            Self::Libsql(inner) => inner.sweep_expired(now_unix_seconds).await,
+        }
+    }
+
+    async fn entry_count(&self) -> Result<usize, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.entry_count().await,
+            Self::Libsql(inner) => inner.entry_count().await,
+        }
+    }
+}
+
+/// Runtime-time discriminator over the configured settlement ledger.
+enum AnySettlementLedgerStore {
+    Memory(SettlementLedger),
+    Libsql(LibsqlSettlementLedgerStore),
+}
+
+impl SettlementLedgerStore for AnySettlementLedgerStore {
+    async fn record(
+        &self,
+        payment_id: PaymentId,
+        entry: SettlementLedgerEntry,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Memory(inner) => inner.record(payment_id, entry).await,
+            Self::Libsql(inner) => inner.record(payment_id, entry).await,
+        }
+    }
+
+    async fn find(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<SettlementLedgerEntry>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.find(payment_id).await,
+            Self::Libsql(inner) => inner.find(payment_id).await,
+        }
+    }
+
+    async fn entry_count(&self) -> Result<usize, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.entry_count().await,
+            Self::Libsql(inner) => inner.entry_count().await,
+        }
+    }
+
+    async fn success_kind_transactions(
+        &self,
+    ) -> Result<Vec<(PaymentId, String)>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.success_kind_transactions().await,
+            Self::Libsql(inner) => inner.success_kind_transactions().await,
+        }
+    }
+
+    async fn record_confirmation(
+        &self,
+        payment_id: &PaymentId,
+        confirmation_count: u32,
+        mined_block_height: Option<u64>,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Self::Memory(inner) => {
+                inner
+                    .record_confirmation(payment_id, confirmation_count, mined_block_height)
+                    .await
+            }
+            Self::Libsql(inner) => {
+                inner
+                    .record_confirmation(payment_id, confirmation_count, mined_block_height)
+                    .await
+            }
+        }
+    }
 }
 
 /// Interval at which the prepared-tx sweeper drops expired entries.
@@ -174,7 +352,7 @@ const PREPARED_TX_SWEEP_INTERVAL_SECONDS: u64 = 30;
 /// a minute; long enough not to thrash the chain plane.
 const CONFIRMATION_ORACLE_POLL_SECONDS: u64 = 60;
 
-fn spawn_prepared_tx_sweeper(store: Arc<PreparedTxCache>) {
+fn spawn_prepared_tx_sweeper(store: Arc<AnyPreparedTxStore>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
             PREPARED_TX_SWEEP_INTERVAL_SECONDS,
@@ -204,7 +382,7 @@ fn spawn_prepared_tx_sweeper(store: Arc<PreparedTxCache>) {
 
 fn spawn_confirmation_oracle(
     config: &ResolvedConfig,
-    ledger: Arc<SettlementLedger>,
+    ledger: Arc<AnySettlementLedgerStore>,
 ) -> Result<(), StartupError> {
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
@@ -467,6 +645,9 @@ struct ResolvedConfig {
     indexer_grpc_addr: Option<String>,
     explorer_grpc_addr: Option<String>,
     merchants_config_path: Option<String>,
+    store_backend: String,
+    store_url: String,
+    store_auth_token: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -483,6 +664,20 @@ impl ResolvedConfig {
             .ok()
             .filter(|raw| !raw.trim().is_empty());
         let merchants_config_path = std::env::var("ZPAY_MERCHANTS__CONFIG_PATH")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty());
+
+        // Persistence: `libsql` is the default to match ADR-0004. Set
+        // `ZPAY_STORE__BACKEND=memory` for ephemeral runs (no
+        // persistence across restarts; useful for unit-style smoke
+        // tests). `ZPAY_STORE__URL` accepts `file:<path>` for local
+        // SQLite and `libsql://<host>` for Turso; the auth token only
+        // applies to the remote shape.
+        let store_backend = std::env::var("ZPAY_STORE__BACKEND")
+            .unwrap_or_else(|_| "libsql".to_string());
+        let store_url = std::env::var("ZPAY_STORE__URL")
+            .unwrap_or_else(|_| "file:./zpay.libsql".to_string());
+        let store_auth_token = std::env::var("ZPAY_STORE__AUTH_TOKEN")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
 
@@ -507,6 +702,9 @@ impl ResolvedConfig {
             indexer_grpc_addr,
             explorer_grpc_addr,
             merchants_config_path,
+            store_backend,
+            store_url,
+            store_auth_token,
         })
     }
 }

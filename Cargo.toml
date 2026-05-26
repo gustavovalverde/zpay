@@ -58,7 +58,7 @@ zcash_protocol = "0.7.2"
 
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.
-zpay-core = { version = "0.1.0", path = "crates/zpay-core" }
+zpay-core = { version = "0.1.0", path = "crates/zpay-core", default-features = false }
 zpay-e2e = { version = "0.1.0", path = "crates/zpay-e2e" }
 zpay-mpp = { version = "0.1.0", path = "crates/zpay-mpp" }
 zpay-runtime = { version = "0.1.0", path = "crates/zpay-runtime" }
