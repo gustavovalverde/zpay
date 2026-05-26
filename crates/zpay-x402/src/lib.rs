@@ -274,6 +274,12 @@ fn settle_error_response(err: &SettleError) -> Response {
             502,
             "chain plane is currently unavailable",
         ),
+        SettleError::MemoMismatch => problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid Argument",
+            422,
+            "raw_tx_hex does not contain the prepared protocol memo; the wallet may have signed a different transaction",
+        ),
         #[allow(
             clippy::wildcard_enum_match_arm,
             reason = "SettleError is #[non_exhaustive]; future variants need an explicit mapping but must not break the wire surface"

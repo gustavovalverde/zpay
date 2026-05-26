@@ -63,6 +63,13 @@ pub enum SettleError {
         /// the error source chain.
         reason: String,
     },
+    /// The prepared `memo_bytes` do not appear inside the supplied
+    /// `raw_tx_hex`. Indicates the wallet either dropped the protocol
+    /// memo or signed a different transaction than the one we prepared.
+    /// Retry posture: `not_retryable`. The cache entry is preserved so
+    /// the agent can fix the wallet payload and call settle again.
+    #[error("raw_tx_hex does not contain the prepared protocol memo")]
+    MemoMismatch,
 }
 
 /// Submit a prepared payment to the chain plane.
@@ -89,10 +96,20 @@ pub async fn submit_settlement<C: BroadcastClient>(
 ) -> Result<SettlementOutcome, SettleError> {
     validate_raw_tx_hex(&request.raw_tx_hex)?;
 
-    if cache.find(&request.payment_id).is_none() {
+    let Some(prepared) = cache.find(&request.payment_id) else {
         return Err(SettleError::PreparationNotFound {
             payment_id: request.payment_id,
         });
+    };
+
+    // Pragmatic settle-time check: the prepared 98-byte protocol memo
+    // must appear in the user-signed transaction. A full v5 parse that
+    // also verifies recipient + amount + expiry is a follow-up; this
+    // single subsequence check already catches "wallet swallowed the
+    // memo" and "agent broadcast the wrong tx" regressions without
+    // pulling zcash_primitives into the facilitator.
+    if !raw_tx_contains_protocol_memo(&request.raw_tx_hex, &prepared.preparation.memo_bytes) {
+        return Err(SettleError::MemoMismatch);
     }
 
     let outcome = chain
@@ -142,6 +159,31 @@ fn validate_raw_tx_hex(raw_tx_hex: &str) -> Result<(), SettleError> {
         return Err(SettleError::RawTxHexInvalid);
     }
     Ok(())
+}
+
+const HEX_NIBBLES: &[u8; 16] = b"0123456789abcdef";
+
+/// Case-insensitive substring check between the prepared memo and the
+/// user-signed raw transaction hex.
+///
+/// Returns `true` when the memo appears anywhere in the tx; the caller
+/// treats `false` as [`SettleError::MemoMismatch`].
+fn raw_tx_contains_protocol_memo(raw_tx_hex: &str, memo_bytes: &[u8]) -> bool {
+    if memo_bytes.is_empty() {
+        return true;
+    }
+    let memo_hex = hex_encode(memo_bytes);
+    let haystack = raw_tx_hex.to_ascii_lowercase();
+    haystack.contains(&memo_hex)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX_NIBBLES[(byte >> 4) as usize] as char);
+        out.push(HEX_NIBBLES[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -212,7 +254,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id.clone(),
-                raw_tx_hex: "0500000080".to_owned(),
+                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
             },
             &cache,
             &ledger,
@@ -241,7 +283,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id.clone(),
-                raw_tx_hex: "0500000080".to_owned(),
+                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
             },
             &cache,
             &ledger,
@@ -268,7 +310,7 @@ mod tests {
         });
         let request = SettleRequest {
             payment_id: crate::types::PaymentId("unknown".to_owned()),
-            raw_tx_hex: "0500000080".to_owned(),
+            raw_tx_hex: "0500".to_owned(),
         };
 
         let outcome = submit_settlement(request, &cache, &ledger, &chain).await;
@@ -339,7 +381,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id,
-                raw_tx_hex: "0500000080".to_owned(),
+                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
             },
             &cache,
             &ledger,
@@ -350,5 +392,43 @@ mod tests {
         assert!(matches!(outcome, Err(SettleError::ChainUnavailable { .. })));
         assert_eq!(cache.entry_count(), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tx_without_protocol_memo_returns_memo_mismatch() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
+        let preparation = propose(valid_prepare_request(), &cache)
+            .map_err(|_| "propose must accept valid input")?;
+        let chain = FakeChain::new(BroadcastOutcome::Accepted {
+            transaction_id: "deadbeef".to_owned(),
+        });
+
+        // Tx hex deliberately omits the prepared memo, simulating a
+        // wallet that signed a different transaction.
+        let outcome = submit_settlement(
+            SettleRequest {
+                payment_id: preparation.payment_id.clone(),
+                raw_tx_hex: "deadbeefdeadbeef".to_owned(),
+            },
+            &cache,
+            &ledger,
+            &chain,
+        )
+        .await;
+
+        assert!(matches!(outcome, Err(SettleError::MemoMismatch)));
+        // Cache entry preserved so the wallet can retry with the
+        // correct payload.
+        assert_eq!(cache.entry_count(), 1);
+        Ok(())
+    }
+
+    fn raw_tx_hex_with_memo_of(memo_bytes: &[u8]) -> String {
+        // A real tx wraps the memo in Sapling output ciphertext, but the
+        // settle-time check is a substring match — any envelope that
+        // sandwiches the memo bytes between filler is enough for tests.
+        let memo_hex = super::hex_encode(memo_bytes);
+        format!("0500000080{memo_hex}deadbeef")
     }
 }
