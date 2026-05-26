@@ -13,10 +13,18 @@ categories = ["network-programming", "api-bindings"]
 [lints]
 workspace = true
 
+[features]
+default = ["in_memory"]
+# Bundles the in-memory `PreparedTxStore` and `SettlementLedgerStore`
+# implementations used by unit tests and by ad-hoc local dev. Disable
+# (`default-features = false`) when shipping a production binary that
+# exclusively uses libSQL through `zpay-store`.
+in_memory = ["dep:parking_lot"]
+
 [dependencies]
 base64.workspace = true
 hex.workspace = true
-parking_lot.workspace = true
+parking_lot = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 thiserror.workspace = true
@@ -25,4 +33,5 @@ zcash_primitives.workspace = true
 zcash_protocol.workspace = true
 
 [dev-dependencies]
+parking_lot.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -25,8 +25,8 @@ use zinder_verify::ZinderDisclosureVerifier;
 use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
-use zpay_core::prepare::PreparedTxCache;
-use zpay_core::status::SettlementLedger;
+use zpay_core::prepare::{PreparedTxCache, PreparedTxStore};
+use zpay_core::status::{SettlementLedger, SettlementLedgerStore};
 use zpay_core::types::MerchantId;
 use zpay_core::verify::{DisclosureVerdict, DisclosureVerifier, Verdict, VerifyError};
 use zpay_x402::AppState;
@@ -174,7 +174,7 @@ const PREPARED_TX_SWEEP_INTERVAL_SECONDS: u64 = 30;
 /// a minute; long enough not to thrash the chain plane.
 const CONFIRMATION_ORACLE_POLL_SECONDS: u64 = 60;
 
-fn spawn_prepared_tx_sweeper(cache: Arc<PreparedTxCache>) {
+fn spawn_prepared_tx_sweeper(store: Arc<PreparedTxCache>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
             PREPARED_TX_SWEEP_INTERVAL_SECONDS,
@@ -186,12 +186,17 @@ fn spawn_prepared_tx_sweeper(cache: Arc<PreparedTxCache>) {
             let now_unix_seconds = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_secs());
-            let dropped = cache.sweep_expired(now_unix_seconds);
-            if dropped > 0 {
-                tracing::info!(
-                    dropped_count = dropped,
-                    "prepared-tx sweeper dropped expired entries",
-                );
+            match store.sweep_expired(now_unix_seconds).await {
+                Ok(dropped) if dropped > 0 => {
+                    tracing::info!(
+                        dropped_count = dropped,
+                        "prepared-tx sweeper dropped expired entries",
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "prepared-tx sweep failed");
+                }
             }
         }
     });
@@ -228,8 +233,18 @@ fn spawn_confirmation_oracle(
     Ok(())
 }
 
-async fn poll_oracle_once<O: ConfirmationOracle>(oracle: &O, ledger: &SettlementLedger) {
-    let entries = ledger.success_kind_transactions();
+async fn poll_oracle_once<O, L>(oracle: &O, ledger: &L)
+where
+    O: ConfirmationOracle,
+    L: SettlementLedgerStore + ?Sized,
+{
+    let entries = match ledger.success_kind_transactions().await {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(error = %err, "ledger lookup for oracle tick failed");
+            return;
+        }
+    };
     if entries.is_empty() {
         return;
     }
@@ -239,10 +254,17 @@ async fn poll_oracle_once<O: ConfirmationOracle>(oracle: &O, ledger: &Settlement
                 block_height,
                 confirmation_count,
             }) => {
-                ledger.record_confirmation(&payment_id, confirmation_count, Some(block_height));
+                if let Err(err) = ledger
+                    .record_confirmation(&payment_id, confirmation_count, Some(block_height))
+                    .await
+                {
+                    tracing::warn!(error = %err, "record_confirmation failed");
+                }
             }
             Ok(ConfirmationOutcome::InMempool) => {
-                ledger.record_confirmation(&payment_id, 0, None);
+                if let Err(err) = ledger.record_confirmation(&payment_id, 0, None).await {
+                    tracing::warn!(error = %err, "record_confirmation failed");
+                }
             }
             Ok(ConfirmationOutcome::NotFound | ConfirmationOutcome::ConflictingChain) => {
                 // Leave confirmation_count untouched; an Accepted broadcast
@@ -531,7 +553,9 @@ mod tests {
     use parking_lot::Mutex;
     use zpay_core::broadcast::BroadcastOutcome;
     use zpay_core::oracle::OracleError;
-    use zpay_core::status::{SettlementLedger, SettlementLedgerEntry, lookup_payment_status};
+    use zpay_core::status::{
+        SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status,
+    };
     use zpay_core::prepare::PreparedTxCache;
     use zpay_core::types::PaymentId;
 
@@ -567,20 +591,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_oracle_records_confirmations_for_mined_txs() {
+    async fn poll_oracle_records_confirmations_for_mined_txs() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("p1".to_owned());
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "abcd".to_owned(),
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Accepted {
+                        transaction_id: "abcd".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
+            )
+            .await
+            .map_err(|_| "ledger record failed")?;
         let oracle = ScriptedOracle::new(&[(
             "abcd",
             ConfirmationOutcome::Mined {
@@ -592,29 +619,36 @@ mod tests {
         poll_oracle_once(&oracle, &ledger).await;
 
         let cache = PreparedTxCache::new();
-        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.confirmation_count, Some(5));
         assert_eq!(snapshot.mined_block_height, Some(1_234_567));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn poll_oracle_leaves_failed_outcomes_alone() {
+    async fn poll_oracle_leaves_failed_outcomes_alone() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
-        ledger.record(
-            PaymentId("rejected".to_owned()),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Rejected {
-                    upstream_message: "policy".to_owned(),
+        ledger
+            .record(
+                PaymentId("rejected".to_owned()),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Rejected {
+                        upstream_message: "policy".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
+            )
+            .await
+            .map_err(|_| "ledger record failed")?;
         // No outcomes scripted; the oracle returns Unavailable for any
         // txid. The Rejected entry should be skipped before the oracle is
         // even consulted because it carries no transaction_id.
         let oracle = ScriptedOracle::new(&[]);
         poll_oracle_once(&oracle, &ledger).await;
+        Ok(())
     }
 }

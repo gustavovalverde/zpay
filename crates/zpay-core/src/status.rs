@@ -1,23 +1,28 @@
 //! Settlement ledger and payment-status lookup.
 //!
 //! After a settle call broadcasts, the resulting outcome is inserted into
-//! [`SettlementLedger`] so a later `GET /x402/v2/payments/{payment_id}`
+//! the [`SettlementLedgerStore`] so a later `GET /x402/v2/payments/{payment_id}`
 //! call can report what happened. The ledger holds every settle attempt
 //! (success or failure); a retried settle overwrites the previous entry,
 //! so callers see the latest known outcome rather than a stale one.
 //!
-//! [`lookup_payment_status`] combines a [`PreparedTxCache`] read with a
-//! [`SettlementLedger`] read into a single [`PaymentStatusSnapshot`]
+//! [`lookup_payment_status`] combines a [`PreparedTxStore`] read with a
+//! [`SettlementLedgerStore`] read into a single [`PaymentStatusSnapshot`]
 //! callers can serialize to JSON.
 
-use std::collections::HashMap;
+use std::future::Future;
 
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::broadcast::BroadcastOutcome;
-use crate::prepare::PreparedTxCache;
+use crate::prepare::PreparedTxStore;
+use crate::store::StoreError;
 use crate::types::PaymentId;
+
+#[cfg(feature = "in_memory")]
+use std::collections::HashMap;
+#[cfg(feature = "in_memory")]
+use parking_lot::Mutex;
 
 /// Lifecycle phase of a payment from zpay's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,18 +63,6 @@ pub struct PaymentStatusSnapshot {
     pub mined_block_height: Option<u64>,
 }
 
-/// Append-mostly ledger of settle outcomes keyed by [`PaymentId`].
-///
-/// "Append-mostly" because a retried settle overwrites the prior entry
-/// for the same `payment_id`; the ledger never grows beyond the active
-/// payment set unless retried payments stack up. The implementation is
-/// in-memory; a future swap to libSQL will follow the same trait shape
-/// (see [`PreparedTxCache`] for the precedent).
-#[derive(Debug, Default)]
-pub struct SettlementLedger {
-    entries: Mutex<HashMap<PaymentId, SettlementLedgerEntry>>,
-}
-
 /// Stored snapshot of a single settle attempt.
 #[derive(Debug, Clone)]
 pub struct SettlementLedgerEntry {
@@ -85,42 +78,98 @@ pub struct SettlementLedgerEntry {
     pub mined_block_height: Option<u64>,
 }
 
+/// Storage trait for the settle outcome ledger.
+///
+/// Append-mostly: a retried settle overwrites the prior row for the
+/// same `payment_id`. The ledger never grows beyond the active
+/// payment set unless retried payments stack up.
+pub trait SettlementLedgerStore: Send + Sync {
+    /// Record a settle outcome for `payment_id`. Overwrites any prior
+    /// entry under the same identifier.
+    fn record(
+        &self,
+        payment_id: PaymentId,
+        entry: SettlementLedgerEntry,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Look up the recorded outcome for `payment_id`, or `None` if no
+    /// settle attempt has been recorded.
+    fn find(
+        &self,
+        payment_id: &PaymentId,
+    ) -> impl Future<Output = Result<Option<SettlementLedgerEntry>, StoreError>> + Send;
+
+    /// Number of recorded settle outcomes. Useful for tests and
+    /// operator-side metrics.
+    fn entry_count(&self) -> impl Future<Output = Result<usize, StoreError>> + Send;
+
+    /// Collect `(payment_id, transaction_id)` pairs for every entry
+    /// whose broadcast outcome was a success kind. The background
+    /// confirmation oracle iterates this list each tick.
+    fn success_kind_transactions(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(PaymentId, String)>, StoreError>> + Send;
+
+    /// Update the confirmation count and mined block height for an
+    /// existing ledger entry. Returns `true` when an entry was found
+    /// and updated, `false` when the `payment_id` was not in the
+    /// ledger.
+    fn record_confirmation(
+        &self,
+        payment_id: &PaymentId,
+        confirmation_count: u32,
+        mined_block_height: Option<u64>,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+}
+
+/// In-memory implementation of [`SettlementLedgerStore`].
+///
+/// Suitable for unit tests and ad-hoc local development. Production
+/// runtimes compose the libSQL implementation from `zpay-store`.
+#[cfg(feature = "in_memory")]
+#[derive(Debug, Default)]
+pub struct SettlementLedger {
+    entries: Mutex<HashMap<PaymentId, SettlementLedgerEntry>>,
+}
+
+#[cfg(feature = "in_memory")]
 impl SettlementLedger {
     /// Create a fresh, empty ledger.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Record a settle outcome for `payment_id`. Overwrites any prior
-    /// entry under the same identifier.
-    pub fn record(&self, payment_id: PaymentId, entry: SettlementLedgerEntry) {
+#[cfg(feature = "in_memory")]
+impl SettlementLedgerStore for SettlementLedger {
+    async fn record(
+        &self,
+        payment_id: PaymentId,
+        entry: SettlementLedgerEntry,
+    ) -> Result<(), StoreError> {
         let mut guard = self.entries.lock();
         guard.insert(payment_id, entry);
+        drop(guard);
+        Ok(())
     }
 
-    /// Look up the recorded outcome for `payment_id`, or `None` if no
-    /// settle attempt has been recorded.
-    #[must_use]
-    pub fn find(&self, payment_id: &PaymentId) -> Option<SettlementLedgerEntry> {
+    async fn find(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<SettlementLedgerEntry>, StoreError> {
         let guard = self.entries.lock();
-        guard.get(payment_id).cloned()
+        Ok(guard.get(payment_id).cloned())
     }
 
-    /// Number of recorded settle outcomes.
-    #[must_use]
-    pub fn entry_count(&self) -> usize {
+    async fn entry_count(&self) -> Result<usize, StoreError> {
         let guard = self.entries.lock();
-        guard.len()
+        Ok(guard.len())
     }
 
-    /// Collect (`payment_id`, `transaction_id`) pairs for every entry
-    /// whose broadcast outcome was a success kind. The background
-    /// confirmation oracle iterates this list each tick.
-    #[must_use]
-    pub fn success_kind_transactions(&self) -> Vec<(PaymentId, String)> {
+    async fn success_kind_transactions(&self) -> Result<Vec<(PaymentId, String)>, StoreError> {
         let guard = self.entries.lock();
-        guard
+        let pairs: Vec<(PaymentId, String)> = guard
             .iter()
             .filter_map(|(payment_id, entry)| {
                 entry
@@ -128,26 +177,25 @@ impl SettlementLedger {
                     .transaction_id()
                     .map(|txid| (payment_id.clone(), txid.to_owned()))
             })
-            .collect()
+            .collect();
+        drop(guard);
+        Ok(pairs)
     }
 
-    /// Update the confirmation count and mined block height for an
-    /// existing ledger entry. Returns `true` when an entry was found and
-    /// updated, `false` when the `payment_id` was not in the ledger.
-    pub fn record_confirmation(
+    async fn record_confirmation(
         &self,
         payment_id: &PaymentId,
         confirmation_count: u32,
         mined_block_height: Option<u64>,
-    ) -> bool {
+    ) -> Result<bool, StoreError> {
         let mut guard = self.entries.lock();
-        guard.get_mut(payment_id).is_some_and(|entry| {
+        Ok(guard.get_mut(payment_id).is_some_and(|entry| {
             entry.confirmation_count = Some(confirmation_count);
             if mined_block_height.is_some() {
                 entry.mined_block_height = mined_block_height;
             }
             true
-        })
+        }))
     }
 }
 
@@ -157,30 +205,37 @@ impl SettlementLedger {
 /// over a still-cached preparation in the rare case both exist; settle
 /// removes the prepared entry on success-kind outcomes but failure-kind
 /// outcomes leave both populated until the agent retries or the
-/// preparation expires). Falls back to the prepared-tx cache, then to
+/// preparation expires). Falls back to the prepared-tx store, then to
 /// `Unknown`.
-#[must_use]
-pub fn lookup_payment_status(
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when either underlying store fails to read.
+pub async fn lookup_payment_status<P, L>(
     payment_id: &PaymentId,
-    prepared: &PreparedTxCache,
-    ledger: &SettlementLedger,
-) -> PaymentStatusSnapshot {
-    if let Some(entry) = ledger.find(payment_id) {
+    prepared: &P,
+    ledger: &L,
+) -> Result<PaymentStatusSnapshot, StoreError>
+where
+    P: PreparedTxStore + ?Sized,
+    L: SettlementLedgerStore + ?Sized,
+{
+    if let Some(entry) = ledger.find(payment_id).await? {
         let status = if entry.broadcast_outcome.is_success_kind() {
             PaymentStatus::Settled
         } else {
             PaymentStatus::Failed
         };
-        return PaymentStatusSnapshot {
+        return Ok(PaymentStatusSnapshot {
             payment_id: payment_id.clone(),
             status,
             broadcast_outcome: Some(entry.broadcast_outcome),
             settled_at_unix_seconds: Some(entry.settled_at_unix_seconds),
             confirmation_count: entry.confirmation_count,
             mined_block_height: entry.mined_block_height,
-        };
+        });
     }
-    if let Some(entry) = prepared.find(payment_id) {
+    if let Some(entry) = prepared.find_by_payment_id(payment_id).await? {
         // An expired-but-not-yet-swept entry must look the same as an
         // unknown one to callers. Otherwise an agent would build a tx
         // against a stale preparation that settle will refuse.
@@ -188,29 +243,32 @@ pub fn lookup_payment_status(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs());
         if entry.expires_at_unix_seconds > now_unix_seconds {
-            return PaymentStatusSnapshot {
+            return Ok(PaymentStatusSnapshot {
                 payment_id: payment_id.clone(),
                 status: PaymentStatus::Prepared,
                 broadcast_outcome: None,
                 settled_at_unix_seconds: None,
                 confirmation_count: None,
                 mined_block_height: None,
-            };
+            });
         }
     }
-    PaymentStatusSnapshot {
+    Ok(PaymentStatusSnapshot {
         payment_id: payment_id.clone(),
         status: PaymentStatus::Unknown,
         broadcast_outcome: None,
         settled_at_unix_seconds: None,
         confirmation_count: None,
         mined_block_height: None,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PaymentStatus, SettlementLedger, SettlementLedgerEntry, lookup_payment_status};
+    use super::{
+        PaymentStatus, SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
+        lookup_payment_status,
+    };
     use crate::broadcast::BroadcastOutcome;
     use crate::prepare::{ChallengeHash, PrepareRequest, PreparedTxCache, ResourceHash, propose};
     use crate::types::{
@@ -233,103 +291,130 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_payment_returns_unknown_status() {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn unknown_payment_returns_unknown_status() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let snapshot =
-            lookup_payment_status(&PaymentId("does-not-exist".to_owned()), &cache, &ledger);
+            lookup_payment_status(&PaymentId("does-not-exist".to_owned()), &store, &ledger)
+                .await
+                .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Unknown);
         assert!(snapshot.broadcast_outcome.is_none());
+        Ok(())
     }
 
-    #[test]
-    fn prepared_payment_returns_prepared_status() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn prepared_payment_returns_prepared_status() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let preparation = propose(valid_prepare_request(), &store)
+            .await
             .map_err(|_| "propose must accept valid input")?;
-        let snapshot = lookup_payment_status(&preparation.payment_id, &cache, &ledger);
+        let snapshot = lookup_payment_status(&preparation.payment_id, &store, &ledger)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Prepared);
         assert!(snapshot.broadcast_outcome.is_none());
         Ok(())
     }
 
-    #[test]
-    fn ledger_entry_with_accepted_outcome_is_settled() {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn ledger_entry_with_accepted_outcome_is_settled() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("settled-id".to_owned());
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "deadbeef".to_owned(),
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Accepted {
+                        transaction_id: "deadbeef".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
-        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+            )
+            .await
+            .map_err(|_| "record failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Settled);
         match snapshot.broadcast_outcome {
             Some(BroadcastOutcome::Accepted { transaction_id }) => {
                 assert_eq!(transaction_id, "deadbeef");
             }
-            _ => unreachable!("ledger entry was Accepted; lookup must surface it"),
+            _ => return Err("ledger entry was Accepted; lookup must surface it"),
         }
         assert_eq!(snapshot.settled_at_unix_seconds, Some(1_700_000_000));
+        Ok(())
     }
 
-    #[test]
-    fn ledger_entry_with_rejected_outcome_is_failed() {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn ledger_entry_with_rejected_outcome_is_failed() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("failed-id".to_owned());
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Rejected {
-                    upstream_message: "policy: dust output".to_owned(),
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Rejected {
+                        upstream_message: "policy: dust output".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_001,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_001,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
-        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+            )
+            .await
+            .map_err(|_| "record failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Failed);
+        Ok(())
     }
 
-    #[test]
-    fn ledger_record_overwrites_prior_entry() {
+    #[tokio::test]
+    async fn ledger_record_overwrites_prior_entry() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("retried-id".to_owned());
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Rejected {
-                    upstream_message: "first attempt".to_owned(),
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Rejected {
+                        upstream_message: "first attempt".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "feedface".to_owned(),
+            )
+            .await
+            .map_err(|_| "first record failed")?;
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Accepted {
+                        transaction_id: "feedface".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_100,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_100,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
+            )
+            .await
+            .map_err(|_| "second record failed")?;
+        assert_eq!(
+            ledger.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
         );
-        assert_eq!(ledger.entry_count(), 1);
-        let entry = ledger.find(&payment_id);
+        let entry = ledger.find(&payment_id).await.map_err(|_| "find failed")?;
         assert!(matches!(
             entry,
             Some(SettlementLedgerEntry {
@@ -337,66 +422,94 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
     }
 
-    #[test]
-    fn record_confirmation_updates_existing_entry() {
+    #[tokio::test]
+    async fn record_confirmation_updates_existing_entry() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("watch-me".to_owned());
-        ledger.record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "feedface".to_owned(),
+        ledger
+            .record(
+                payment_id.clone(),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Accepted {
+                        transaction_id: "feedface".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
+            )
+            .await
+            .map_err(|_| "record failed")?;
 
-        let cache = PreparedTxCache::new();
-        assert!(ledger.record_confirmation(&payment_id, 3, Some(1_234_567)));
-        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+        let store = PreparedTxCache::new();
+        assert!(
+            ledger
+                .record_confirmation(&payment_id, 3, Some(1_234_567))
+                .await
+                .map_err(|_| "record_confirmation failed")?
+        );
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.confirmation_count, Some(3));
         assert_eq!(snapshot.mined_block_height, Some(1_234_567));
+        Ok(())
     }
 
-    #[test]
-    fn record_confirmation_returns_false_for_missing_entry() {
+    #[tokio::test]
+    async fn record_confirmation_returns_false_for_missing_entry() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("not-recorded".to_owned());
-        assert!(!ledger.record_confirmation(&payment_id, 1, None));
+        assert!(
+            !ledger
+                .record_confirmation(&payment_id, 1, None)
+                .await
+                .map_err(|_| "record_confirmation failed")?
+        );
+        Ok(())
     }
 
-    #[test]
-    fn success_kind_transactions_skips_failure_outcomes() {
+    #[tokio::test]
+    async fn success_kind_transactions_skips_failure_outcomes() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
-        ledger.record(
-            PaymentId("ok".to_owned()),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "abcd".to_owned(),
+        ledger
+            .record(
+                PaymentId("ok".to_owned()),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Accepted {
+                        transaction_id: "abcd".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_000,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
-        ledger.record(
-            PaymentId("fail".to_owned()),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Rejected {
-                    upstream_message: "no".to_owned(),
+            )
+            .await
+            .map_err(|_| "record failed")?;
+        ledger
+            .record(
+                PaymentId("fail".to_owned()),
+                SettlementLedgerEntry {
+                    broadcast_outcome: BroadcastOutcome::Rejected {
+                        upstream_message: "no".to_owned(),
+                    },
+                    settled_at_unix_seconds: 1_700_000_001,
+                    confirmation_count: None,
+                    mined_block_height: None,
                 },
-                settled_at_unix_seconds: 1_700_000_001,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        );
-        let pairs = ledger.success_kind_transactions();
+            )
+            .await
+            .map_err(|_| "record failed")?;
+        let pairs = ledger
+            .success_kind_transactions()
+            .await
+            .map_err(|_| "success_kind_transactions failed")?;
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0, PaymentId("ok".to_owned()));
         assert_eq!(pairs[0].1, "abcd");
+        Ok(())
     }
 }

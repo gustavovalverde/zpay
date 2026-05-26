@@ -34,38 +34,38 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::BroadcastClient;
-use zpay_core::prepare::{Preparation, PrepareError, PrepareRequest, PreparedTxCache, propose};
+use zpay_core::prepare::{Preparation, PrepareError, PrepareRequest, PreparedTxStore, propose};
 use zpay_core::settle::{SettleError, SettleRequest, SettlementOutcome, submit_settlement};
-use zpay_core::status::{PaymentStatusSnapshot, SettlementLedger, lookup_payment_status};
+use zpay_core::status::{PaymentStatusSnapshot, SettlementLedgerStore, lookup_payment_status};
 use zpay_core::types::{MerchantId, PaymentId};
 use zpay_core::verify::{DisclosureVerdict, DisclosureVerifier, VerifyError, VerifyRequest, verify};
 
 /// Shared application state injected into every x402 v2 handler.
-pub struct AppState<C, V> {
-    /// Cache holding prepared transactions awaiting settlement.
-    pub cache: Arc<PreparedTxCache>,
-    /// Settlement ledger holding the last broadcast outcome per
-    /// `payment_id`. Read by `GET /payments/{id}` and written by `settle`.
-    pub ledger: Arc<SettlementLedger>,
+pub struct AppState<C, V, P, L> {
+    /// Prepared-tx store. Reads happen on `/prepare`, `/settle`, and
+    /// `/payments/{id}`; writes happen on `/prepare` and on the
+    /// success-kind branch of `/settle`. The trait abstracts over the
+    /// in-memory variant used by tests and the libSQL variant used in
+    /// production.
+    pub prepared_store: Arc<P>,
+    /// Settlement ledger. Reads happen on `/payments/{id}`; writes
+    /// happen on `/settle` and on every oracle confirmation tick.
+    pub ledger: Arc<L>,
     /// Registered merchants and their `accepts[]` templates. Read by
     /// `GET /accepts?merchant_id=…`.
     pub merchants: Arc<MerchantRegistry>,
-    /// Chain plane abstraction used for broadcast. Wrapped in `Arc` so the
-    /// state stays `Clone`; the underlying client is `Send + Sync` per the
-    /// [`BroadcastClient`] contract.
+    /// Chain plane abstraction used for broadcast.
     pub chain: Arc<C>,
-    /// ZIP-311 disclosure verifier. Wrapped in `Arc` for the same reason
-    /// as `chain`.
+    /// ZIP-311 disclosure verifier.
     pub verifier: Arc<V>,
 }
 
-// Manual `Clone` impl: `Arc<C>` and `Arc<V>` clone the reference count
-// regardless of `C: Clone` or `V: Clone`, so the derive's bounds would
-// be incorrect.
-impl<C, V> Clone for AppState<C, V> {
+// Manual `Clone` impl: every field is already an `Arc`, so cloning a
+// reference is independent of whether the inner type implements `Clone`.
+impl<C, V, P, L> Clone for AppState<C, V, P, L> {
     fn clone(&self) -> Self {
         Self {
-            cache: Arc::clone(&self.cache),
+            prepared_store: Arc::clone(&self.prepared_store),
             ledger: Arc::clone(&self.ledger),
             merchants: Arc::clone(&self.merchants),
             chain: Arc::clone(&self.chain),
@@ -74,20 +74,20 @@ impl<C, V> Clone for AppState<C, V> {
     }
 }
 
-impl<C, V> AppState<C, V> {
-    /// Build a fresh shared state from the supplied cache, settlement
-    /// ledger, merchant registry, broadcast client, and disclosure
-    /// verifier.
+impl<C, V, P, L> AppState<C, V, P, L> {
+    /// Build a fresh shared state from the supplied prepared-tx store,
+    /// settlement ledger, merchant registry, broadcast client, and
+    /// disclosure verifier.
     #[must_use]
     pub fn new(
-        cache: Arc<PreparedTxCache>,
-        ledger: Arc<SettlementLedger>,
+        prepared_store: Arc<P>,
+        ledger: Arc<L>,
         merchants: Arc<MerchantRegistry>,
         chain: Arc<C>,
         verifier: Arc<V>,
     ) -> Self {
         Self {
-            cache,
+            prepared_store,
             ledger,
             merchants,
             chain,
@@ -101,23 +101,36 @@ impl<C, V> AppState<C, V> {
 /// Returns a fully-configured `Router<()>` after binding the supplied
 /// [`AppState`] via `with_state`. Callers do not see the state type at
 /// the mount point.
-pub fn router<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    state: AppState<C, V>,
-) -> Router {
+pub fn router<C, V, P, L>(state: AppState<C, V, P, L>) -> Router
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
     Router::new()
-        .route("/accepts", get(accepts_handler::<C, V>))
-        .route("/prepare", post(prepare_handler::<C, V>))
-        .route("/settle", post(settle_handler::<C, V>))
-        .route("/verify", post(verify_handler::<C, V>))
-        .route("/payments/{payment_id}", get(payment_status_handler::<C, V>))
+        .route("/accepts", get(accepts_handler::<C, V, P, L>))
+        .route("/prepare", post(prepare_handler::<C, V, P, L>))
+        .route("/settle", post(settle_handler::<C, V, P, L>))
+        .route("/verify", post(verify_handler::<C, V, P, L>))
+        .route(
+            "/payments/{payment_id}",
+            get(payment_status_handler::<C, V, P, L>),
+        )
         .with_state(state)
 }
 
-async fn prepare_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    State(state): State<AppState<C, V>>,
+async fn prepare_handler<C, V, P, L>(
+    State(state): State<AppState<C, V, P, L>>,
     headers: HeaderMap,
     Json(mut body): Json<PrepareRequest>,
-) -> Response {
+) -> Response
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
     // Header takes precedence over body field. RFC-draft `Idempotency-Key`
     // is the conventional surface; we accept the body field as a fallback
     // for clients that cannot set custom headers (e.g. constrained MCP
@@ -130,34 +143,74 @@ async fn prepare_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + '
     {
         body.idempotency_key = Some(header_value.to_owned());
     }
-    match propose(body, &state.cache) {
+    match propose(body, state.prepared_store.as_ref()).await {
         Ok(preparation) => json_ok(&PrepareResponseBody { data: preparation }),
         Err(err) => prepare_error_response(&err),
     }
 }
 
-async fn settle_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    State(state): State<AppState<C, V>>,
+async fn settle_handler<C, V, P, L>(
+    State(state): State<AppState<C, V, P, L>>,
     Json(body): Json<SettleRequest>,
-) -> Response {
-    match submit_settlement(body, &state.cache, &state.ledger, state.chain.as_ref()).await {
+) -> Response
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
+    match submit_settlement(
+        body,
+        state.prepared_store.as_ref(),
+        state.ledger.as_ref(),
+        state.chain.as_ref(),
+    )
+    .await
+    {
         Ok(outcome) => json_ok(&SettleResponseBody { data: outcome }),
         Err(err) => settle_error_response(&err),
     }
 }
 
-async fn payment_status_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    State(state): State<AppState<C, V>>,
+async fn payment_status_handler<C, V, P, L>(
+    State(state): State<AppState<C, V, P, L>>,
     Path(payment_id): Path<String>,
-) -> Response {
-    let snapshot = lookup_payment_status(&PaymentId(payment_id), &state.cache, &state.ledger);
-    json_ok(&PaymentStatusResponseBody { data: snapshot })
+) -> Response
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
+    lookup_payment_status(
+        &PaymentId(payment_id),
+        state.prepared_store.as_ref(),
+        state.ledger.as_ref(),
+    )
+    .await
+    .map_or_else(
+        |_| {
+            problem_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                503,
+                "payment status store is currently unavailable",
+            )
+        },
+        |snapshot| json_ok(&PaymentStatusResponseBody { data: snapshot }),
+    )
 }
 
-async fn accepts_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    State(state): State<AppState<C, V>>,
+async fn accepts_handler<C, V, P, L>(
+    State(state): State<AppState<C, V, P, L>>,
     Query(query): Query<AcceptsQuery>,
-) -> Response {
+) -> Response
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
     let Some(merchant_id) = query.merchant_id else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -216,10 +269,16 @@ struct VerifyResponseBody {
     data: DisclosureVerdict,
 }
 
-async fn verify_handler<C: BroadcastClient + 'static, V: DisclosureVerifier + 'static>(
-    State(state): State<AppState<C, V>>,
+async fn verify_handler<C, V, P, L>(
+    State(state): State<AppState<C, V, P, L>>,
     Json(body): Json<VerifyRequest>,
-) -> Response {
+) -> Response
+where
+    C: BroadcastClient + 'static,
+    V: DisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+{
     match verify(body, state.verifier.as_ref()).await {
         Ok(verdict) => json_ok(&VerifyResponseBody { data: verdict }),
         Err(err) => verify_error_response(&err),
@@ -300,6 +359,12 @@ fn prepare_error_response(err: &PrepareError) -> Response {
             422,
             "expiry_height must be greater than zero",
         ),
+        PrepareError::Storage(_) => problem_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            503,
+            "prepared-tx store is currently unavailable",
+        ),
         #[allow(
             clippy::wildcard_enum_match_arm,
             reason = "PrepareError is #[non_exhaustive]; future variants need an explicit mapping but must not break the wire surface"
@@ -344,6 +409,12 @@ fn settle_error_response(err: &SettleError) -> Response {
             "Invalid Argument",
             422,
             "expiry_height in the signed transaction does not match the prepared row",
+        ),
+        SettleError::Storage(_) => problem_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            503,
+            "settle store is currently unavailable",
         ),
         #[allow(
             clippy::wildcard_enum_match_arm,

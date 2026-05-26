@@ -34,8 +34,9 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
 use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
-use crate::prepare::PreparedTxCache;
-use crate::status::{SettlementLedger, SettlementLedgerEntry};
+use crate::prepare::PreparedTxStore;
+use crate::status::{SettlementLedgerEntry, SettlementLedgerStore};
+use crate::store::StoreError;
 use crate::types::{PaymentId, WatchId};
 
 /// Input to [`submit_settlement`].
@@ -106,6 +107,10 @@ pub enum SettleError {
         /// `expiry_height` observed in the user-signed transaction.
         signed_expiry_height: u32,
     },
+    /// One of the underlying stores (prepared-tx cache or settlement
+    /// ledger) surfaced a [`StoreError`]. Retry posture: inherits.
+    #[error("settle store failure: {0}")]
+    Storage(#[from] StoreError),
 }
 
 /// Submit a prepared payment to the chain plane.
@@ -124,15 +129,20 @@ pub enum SettleError {
 ///   the basic alphabet check.
 /// - [`SettleError::ChainUnavailable`] when [`BroadcastClient::broadcast`]
 ///   itself errors. The cache entry is preserved on this path.
-pub async fn submit_settlement<C: BroadcastClient>(
+pub async fn submit_settlement<C, P, L>(
     request: SettleRequest,
-    cache: &PreparedTxCache,
-    ledger: &SettlementLedger,
+    prepared_store: &P,
+    ledger: &L,
     chain: &C,
-) -> Result<SettlementOutcome, SettleError> {
+) -> Result<SettlementOutcome, SettleError>
+where
+    C: BroadcastClient + ?Sized,
+    P: PreparedTxStore + ?Sized,
+    L: SettlementLedgerStore + ?Sized,
+{
     validate_raw_tx_hex(&request.raw_tx_hex)?;
 
-    let Some(prepared) = cache.find(&request.payment_id) else {
+    let Some(prepared) = prepared_store.find_by_payment_id(&request.payment_id).await? else {
         return Err(SettleError::PreparationNotFound {
             payment_id: request.payment_id,
         });
@@ -156,18 +166,20 @@ pub async fn submit_settlement<C: BroadcastClient>(
             }
         })?;
 
-    ledger.record(
-        request.payment_id.clone(),
-        SettlementLedgerEntry {
-            broadcast_outcome: outcome.clone(),
-            settled_at_unix_seconds: current_unix_seconds(),
-            confirmation_count: None,
-            mined_block_height: None,
-        },
-    );
+    ledger
+        .record(
+            request.payment_id.clone(),
+            SettlementLedgerEntry {
+                broadcast_outcome: outcome.clone(),
+                settled_at_unix_seconds: current_unix_seconds(),
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        )
+        .await?;
 
     let watch_id = if outcome.is_success_kind() {
-        cache.remove(&request.payment_id);
+        prepared_store.remove(&request.payment_id).await?;
         Some(WatchId(format!("watch_{}", request.payment_id)))
     } else {
         None
@@ -220,7 +232,9 @@ mod tests {
 
     use super::{SettleError, SettleRequest, submit_settlement};
     use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
-    use crate::prepare::{ChallengeHash, PrepareRequest, PreparedTxCache, ResourceHash, propose};
+    use crate::prepare::{
+        ChallengeHash, PrepareRequest, PreparedTxCache, PreparedTxStore, ResourceHash, propose,
+    };
     use crate::status::SettlementLedger;
     use crate::types::{EvidencePackHash, MerchantId, PaymentNetwork, PaymentScheme, Zatoshis};
 
@@ -274,6 +288,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
@@ -294,7 +309,10 @@ mod tests {
         assert_eq!(outcome.payment_id, preparation.payment_id);
         assert_eq!(outcome.broadcast_outcome.transaction_id(), Some("deadbeef"));
         assert!(outcome.watch_id.is_some());
-        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            0
+        );
         Ok(())
     }
 
@@ -303,6 +321,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Rejected {
             upstream_message: "policy: dust output".to_owned(),
@@ -325,7 +344,10 @@ mod tests {
             BroadcastOutcome::Rejected { .. }
         ));
         assert!(outcome.watch_id.is_none());
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
         Ok(())
     }
 
@@ -353,6 +375,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
@@ -378,6 +401,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
@@ -403,6 +427,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = UnavailableChain;
 
@@ -418,7 +443,10 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, Err(SettleError::ChainUnavailable { .. })));
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
         Ok(())
     }
 
@@ -427,6 +455,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
@@ -450,7 +479,10 @@ mod tests {
             outcome,
             Err(SettleError::ExpiryHeightMismatch { .. })
         ));
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
         Ok(())
     }
 
@@ -459,6 +491,7 @@ mod tests {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
+            .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
@@ -480,7 +513,10 @@ mod tests {
             outcome,
             Err(SettleError::TransactionMalformed { .. })
         ));
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
         Ok(())
     }
 

@@ -23,5 +23,6 @@ pub mod oracle;
 pub mod prepare;
 pub mod settle;
 pub mod status;
+pub mod store;
 pub mod types;
 pub mod verify;

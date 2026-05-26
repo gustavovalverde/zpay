@@ -15,15 +15,20 @@
 //! libSQL-backed implementation without touching the [`PreparedTxCache`]
 //! trait surface.
 
-use std::collections::HashMap;
+use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::store::StoreError;
 use crate::types::{
     EvidencePackHash, MerchantId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
 };
+
+#[cfg(feature = "in_memory")]
+use std::collections::HashMap;
+#[cfg(feature = "in_memory")]
+use parking_lot::Mutex;
 
 /// Default validity window for a prepared transaction.
 ///
@@ -136,6 +141,10 @@ pub enum PrepareError {
     /// `not_retryable`.
     #[error("expiry_height must be greater than zero")]
     ExpiryHeightInvalid,
+    /// The prepared-tx store could not complete the read or write.
+    /// Retry posture: inherits from the surfaced [`StoreError`] variant.
+    #[error("prepared-tx store failure: {0}")]
+    Storage(#[from] StoreError),
 }
 
 /// Compose the 98-byte ZIP-302 memo prefix that binds the payment to the
@@ -159,24 +168,12 @@ pub fn compose_protocol_memo(
     bytes
 }
 
-/// In-memory cache for prepared transactions awaiting settlement.
-///
-/// Storage is keyed by [`PaymentId`] with a secondary `(merchant_id,
-/// idempotency_key)` index so a retried prepare returns the same
-/// preparation instead of allocating a new one. Both maps live behind a
-/// single mutex to make insert / sweep transitions atomic.
-#[derive(Debug, Default)]
-pub struct PreparedTxCache {
-    inner: Mutex<CacheInner>,
-}
-
-#[derive(Debug, Default)]
-struct CacheInner {
-    by_payment_id: HashMap<PaymentId, PreparedTxEntry>,
-    by_idempotency: HashMap<(MerchantId, String), PaymentId>,
-}
-
 /// Cached prepared transaction.
+///
+/// Values flow through every [`PreparedTxStore`] implementation: an
+/// in-memory store, a libSQL store, or any future backend. The store
+/// trait stays free of backend-specific types so the same row shape
+/// reads and writes against any of them.
 #[derive(Debug, Clone)]
 pub struct PreparedTxEntry {
     /// The full preparation returned to the agent.
@@ -191,63 +188,136 @@ pub struct PreparedTxEntry {
     pub amount_zat: Zatoshis,
     /// Wall-clock deadline after which the sweeper removes the entry.
     pub expires_at_unix_seconds: u64,
-    /// Caller-supplied idempotency key, scoped to `merchant_id`. Empty
+    /// Caller-supplied idempotency key, scoped to `merchant_id`. None
     /// when the prepare request did not carry one.
     pub idempotency_key: Option<String>,
 }
 
+/// Storage trait for prepared transactions awaiting settlement.
+///
+/// Implementations live behind the trait so the wire layer, the TTL
+/// sweeper, and the settle path do not see whether they are talking to
+/// an in-memory `HashMap` or a libSQL row.
+pub trait PreparedTxStore: Send + Sync {
+    /// Persist a prepared-tx entry. Replaces any existing entry under
+    /// the same `payment_id`. When `idempotency_key` is set, the
+    /// implementation also indexes the entry under the
+    /// `(merchant_id, idempotency_key)` pair so a retried prepare
+    /// returns the original entry instead of allocating a new one.
+    fn insert(
+        &self,
+        entry: PreparedTxEntry,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Look up a prepared-tx entry by `payment_id`.
+    fn find_by_payment_id(
+        &self,
+        payment_id: &PaymentId,
+    ) -> impl Future<Output = Result<Option<PreparedTxEntry>, StoreError>> + Send;
+
+    /// Resolve a `(merchant_id, idempotency_key)` to the prepared entry
+    /// the first call produced. Returns `None` when no entry exists or
+    /// the prior entry has already expired.
+    fn find_by_idempotency(
+        &self,
+        merchant_id: &MerchantId,
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<Option<PreparedTxEntry>, StoreError>> + Send;
+
+    /// Remove the prepared-tx entry for `payment_id`. The success-kind
+    /// settle path calls this to enforce fire-once semantics. Returns
+    /// the removed entry when present.
+    fn remove(
+        &self,
+        payment_id: &PaymentId,
+    ) -> impl Future<Output = Result<Option<PreparedTxEntry>, StoreError>> + Send;
+
+    /// Remove every entry whose `expires_at_unix_seconds` is at or
+    /// before `now_unix_seconds`. Returns the count of entries dropped
+    /// so the sweeper can record telemetry.
+    fn sweep_expired(
+        &self,
+        now_unix_seconds: u64,
+    ) -> impl Future<Output = Result<usize, StoreError>> + Send;
+
+    /// Number of prepared-tx entries currently in the store. Useful for
+    /// tests and operator-side metrics; not required on a hot path.
+    fn entry_count(&self) -> impl Future<Output = Result<usize, StoreError>> + Send;
+}
+
+/// In-memory implementation of [`PreparedTxStore`].
+///
+/// Storage is keyed by [`PaymentId`] with a secondary `(merchant_id,
+/// idempotency_key)` index so a retried prepare returns the same
+/// preparation. Both maps live behind a single mutex to make insert
+/// and sweep transitions atomic.
+///
+/// Suitable for unit tests and ad-hoc local development; not durable
+/// across process restarts. Production runtimes compose the libSQL
+/// implementation from `zpay-store`.
+#[cfg(feature = "in_memory")]
+#[derive(Debug, Default)]
+pub struct PreparedTxCache {
+    inner: Mutex<CacheInner>,
+}
+
+#[cfg(feature = "in_memory")]
+#[derive(Debug, Default)]
+struct CacheInner {
+    by_payment_id: HashMap<PaymentId, PreparedTxEntry>,
+    by_idempotency: HashMap<(MerchantId, String), PaymentId>,
+}
+
+#[cfg(feature = "in_memory")]
 impl PreparedTxCache {
     /// Create a fresh empty cache.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Insert a prepared-tx entry. Replaces any existing entry under the
-    /// same `payment_id`. When `idempotency_key` is set, also writes the
-    /// secondary index so `find_by_idempotency` can return the same
-    /// preparation on retry.
-    pub fn insert(&self, entry: PreparedTxEntry) {
+#[cfg(feature = "in_memory")]
+impl PreparedTxStore for PreparedTxCache {
+    async fn insert(&self, entry: PreparedTxEntry) -> Result<(), StoreError> {
         let mut guard = self.inner.lock();
         if let Some(key) = entry.idempotency_key.clone() {
-            guard
-                .by_idempotency
-                .insert((entry.merchant_id.clone(), key), entry.preparation.payment_id.clone());
+            guard.by_idempotency.insert(
+                (entry.merchant_id.clone(), key),
+                entry.preparation.payment_id.clone(),
+            );
         }
         guard
             .by_payment_id
             .insert(entry.preparation.payment_id.clone(), entry);
+        drop(guard);
+        Ok(())
     }
 
-    /// Look up a prepared-tx entry by `payment_id`. Returns `None` when the
-    /// entry has been removed by settle or expired by a sweep.
-    #[must_use]
-    pub fn find(&self, payment_id: &PaymentId) -> Option<PreparedTxEntry> {
+    async fn find_by_payment_id(
+        &self,
+        payment_id: &PaymentId,
+    ) -> Result<Option<PreparedTxEntry>, StoreError> {
         let guard = self.inner.lock();
-        guard.by_payment_id.get(payment_id).cloned()
+        Ok(guard.by_payment_id.get(payment_id).cloned())
     }
 
-    /// Resolve a `(merchant_id, idempotency_key)` to the prepared entry
-    /// the first call produced. Returns `None` when no entry exists or
-    /// the prior entry has already expired.
-    #[must_use]
-    pub fn find_by_idempotency(
+    async fn find_by_idempotency(
         &self,
         merchant_id: &MerchantId,
         idempotency_key: &str,
-    ) -> Option<PreparedTxEntry> {
+    ) -> Result<Option<PreparedTxEntry>, StoreError> {
         let guard = self.inner.lock();
-        let payment_id = guard
+        let Some(payment_id) = guard
             .by_idempotency
-            .get(&(merchant_id.clone(), idempotency_key.to_owned()))?;
-        guard.by_payment_id.get(payment_id).cloned()
+            .get(&(merchant_id.clone(), idempotency_key.to_owned()))
+        else {
+            return Ok(None);
+        };
+        Ok(guard.by_payment_id.get(payment_id).cloned())
     }
 
-    /// Remove the prepared-tx entry for `payment_id`. Returns the removed
-    /// entry when present; settle calls this on the success path to enforce
-    /// fire-once semantics. Also clears the matching idempotency-index row
-    /// so a retry after settle does not resurrect the spent preparation.
-    pub fn remove(&self, payment_id: &PaymentId) -> Option<PreparedTxEntry> {
+    async fn remove(&self, payment_id: &PaymentId) -> Result<Option<PreparedTxEntry>, StoreError> {
         let mut guard = self.inner.lock();
         let removed = guard.by_payment_id.remove(payment_id);
         if let Some(ref entry) = removed
@@ -258,21 +328,10 @@ impl PreparedTxCache {
                 .remove(&(entry.merchant_id.clone(), key.clone()));
         }
         drop(guard);
-        removed
+        Ok(removed)
     }
 
-    /// Number of entries currently cached.
-    #[must_use]
-    pub fn entry_count(&self) -> usize {
-        let guard = self.inner.lock();
-        guard.by_payment_id.len()
-    }
-
-    /// Remove every entry whose `expires_at_unix_seconds` is at or before
-    /// `now_unix_seconds`. Returns the number of entries dropped so a
-    /// background sweeper can record useful telemetry. Also prunes
-    /// orphaned rows from the idempotency index.
-    pub fn sweep_expired(&self, now_unix_seconds: u64) -> usize {
+    async fn sweep_expired(&self, now_unix_seconds: u64) -> Result<usize, StoreError> {
         let mut guard = self.inner.lock();
         let before = guard.by_payment_id.len();
         guard
@@ -280,15 +339,18 @@ impl PreparedTxCache {
             .retain(|_, entry| entry.expires_at_unix_seconds > now_unix_seconds);
         let live_ids: std::collections::HashSet<PaymentId> =
             guard.by_payment_id.keys().cloned().collect();
-        guard
-            .by_idempotency
-            .retain(|_, pid| live_ids.contains(pid));
-        before - guard.by_payment_id.len()
+        guard.by_idempotency.retain(|_, pid| live_ids.contains(pid));
+        Ok(before - guard.by_payment_id.len())
+    }
+
+    async fn entry_count(&self) -> Result<usize, StoreError> {
+        let guard = self.inner.lock();
+        Ok(guard.by_payment_id.len())
     }
 }
 
-/// Compose a [`Preparation`] from a [`PrepareRequest`] and insert it into the
-/// cache.
+/// Compose a [`Preparation`] from a [`PrepareRequest`] and insert it into
+/// the store.
 ///
 /// The returned `payment_id` is a fresh ULID; the caller pairs it with the
 /// agent's DPoP thumbprint at the wire boundary. The composed `memo_bytes`
@@ -297,12 +359,15 @@ impl PreparedTxCache {
 ///
 /// # Errors
 ///
-/// Returns [`PrepareError::RecipientInvalid`] when `recipient_unified_address`
-/// is empty, [`PrepareError::AmountZero`] when `amount_zat` is zero, and
-/// [`PrepareError::ExpiryHeightInvalid`] when `expiry_height` is zero.
-pub fn propose(
+/// - [`PrepareError::RecipientInvalid`] when `recipient_unified_address`
+///   is empty.
+/// - [`PrepareError::AmountZero`] when `amount_zat` is zero.
+/// - [`PrepareError::ExpiryHeightInvalid`] when `expiry_height` is zero.
+/// - [`PrepareError::Storage`] when the underlying
+///   [`PreparedTxStore`] surfaces a [`crate::store::StoreError`].
+pub async fn propose<S: PreparedTxStore + ?Sized>(
     request: PrepareRequest,
-    cache: &PreparedTxCache,
+    store: &S,
 ) -> Result<Preparation, PrepareError> {
     if request.recipient_unified_address.trim().is_empty() {
         return Err(PrepareError::RecipientInvalid);
@@ -315,14 +380,17 @@ pub fn propose(
     }
 
     // Idempotency replay: if a prior prepare with the same (merchant,
-    // idempotency_key) is still in the cache, hand the agent the same
+    // idempotency_key) is still in the store, hand the agent the same
     // preparation. Expiry sweep already drops stale entries so a hit here
     // is always within the validity window.
     if let Some(key) = request
         .idempotency_key
         .as_ref()
         .filter(|raw| !raw.trim().is_empty())
-        && let Some(prior) = cache.find_by_idempotency(&request.merchant_id, key)
+        && let Some(prior) = store
+            .find_by_idempotency(&request.merchant_id, key)
+            .await
+            .map_err(PrepareError::Storage)?
     {
         return Ok(prior.preparation);
     }
@@ -351,17 +419,20 @@ pub fn propose(
         .unwrap_or(DEFAULT_VALIDITY_SECONDS);
     let expires_at_unix_seconds = current_unix_seconds().saturating_add(validity_seconds);
 
-    cache.insert(PreparedTxEntry {
-        preparation: preparation.clone(),
-        merchant_id: request.merchant_id,
-        network: request.network,
-        recipient_unified_address: request.recipient_unified_address,
-        amount_zat: request.amount_zat,
-        expires_at_unix_seconds,
-        idempotency_key: request
-            .idempotency_key
-            .filter(|raw| !raw.trim().is_empty()),
-    });
+    store
+        .insert(PreparedTxEntry {
+            preparation: preparation.clone(),
+            merchant_id: request.merchant_id,
+            network: request.network,
+            recipient_unified_address: request.recipient_unified_address,
+            amount_zat: request.amount_zat,
+            expires_at_unix_seconds,
+            idempotency_key: request
+                .idempotency_key
+                .filter(|raw| !raw.trim().is_empty()),
+        })
+        .await
+        .map_err(PrepareError::Storage)?;
 
     Ok(preparation)
 }
@@ -406,8 +477,8 @@ fn format_zec_from_zat(amount_zat: Zatoshis) -> String {
 mod tests {
     use super::{
         ChallengeHash, PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_TAG, PROTOCOL_MEMO_VERSION,
-        PrepareError, PrepareRequest, PreparedTxCache, ResourceHash, compose_protocol_memo,
-        format_zec_from_zat, propose,
+        PrepareError, PrepareRequest, PreparedTxCache, PreparedTxStore, ResourceHash,
+        compose_protocol_memo, format_zec_from_zat, propose,
     };
     use crate::types::{EvidencePackHash, MerchantId, PaymentNetwork, PaymentScheme, Zatoshis};
 
@@ -442,11 +513,13 @@ mod tests {
         assert_eq!(&memo[66..98], &[3u8; 32]);
     }
 
-    #[test]
-    fn propose_inserts_into_cache_and_returns_full_preparation() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
-        let preparation =
-            propose(valid_request(), &cache).map_err(|_| "propose must accept valid input")?;
+    #[tokio::test]
+    async fn propose_inserts_into_store_and_returns_full_preparation()
+    -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
+        let preparation = propose(valid_request(), &store)
+            .await
+            .map_err(|_| "propose must accept valid input")?;
 
         assert_eq!(preparation.memo_bytes.len(), PROTOCOL_MEMO_BYTE_COUNT);
         assert_eq!(preparation.expiry_height, 3_217_900);
@@ -457,54 +530,84 @@ mod tests {
         );
         assert!(preparation.payment_uri.contains("amount=0.0005"));
         assert!(preparation.payment_uri.contains("memo="));
-        assert_eq!(cache.entry_count(), 1);
-        let cached = cache
-            .find(&preparation.payment_id)
-            .ok_or("cache must echo the prepared payment_id")?;
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
+        let cached = store
+            .find_by_payment_id(&preparation.payment_id)
+            .await
+            .map_err(|_| "find failed")?
+            .ok_or("store must echo the prepared payment_id")?;
         assert_eq!(cached.amount_zat, Zatoshis(50_000));
         assert_eq!(cached.recipient_unified_address, "utest1exampleaddress");
         Ok(())
     }
 
-    #[test]
-    fn propose_refuses_empty_recipient() {
+    #[tokio::test]
+    async fn propose_refuses_empty_recipient() -> Result<(), &'static str> {
         let mut request = valid_request();
         request.recipient_unified_address = "   ".to_owned();
-        let cache = PreparedTxCache::new();
-        let outcome = propose(request, &cache);
+        let store = PreparedTxCache::new();
+        let outcome = propose(request, &store).await;
         assert!(matches!(outcome, Err(PrepareError::RecipientInvalid)));
-        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            0
+        );
+        Ok(())
     }
 
-    #[test]
-    fn propose_refuses_zero_amount() {
+    #[tokio::test]
+    async fn propose_refuses_zero_amount() -> Result<(), &'static str> {
         let mut request = valid_request();
         request.amount_zat = Zatoshis(0);
-        let cache = PreparedTxCache::new();
-        let outcome = propose(request, &cache);
+        let store = PreparedTxCache::new();
+        let outcome = propose(request, &store).await;
         assert!(matches!(outcome, Err(PrepareError::AmountZero)));
-        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            0
+        );
+        Ok(())
     }
 
-    #[test]
-    fn propose_refuses_zero_expiry_height() {
+    #[tokio::test]
+    async fn propose_refuses_zero_expiry_height() -> Result<(), &'static str> {
         let mut request = valid_request();
         request.expiry_height = 0;
-        let cache = PreparedTxCache::new();
-        let outcome = propose(request, &cache);
+        let store = PreparedTxCache::new();
+        let outcome = propose(request, &store).await;
         assert!(matches!(outcome, Err(PrepareError::ExpiryHeightInvalid)));
-        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            0
+        );
+        Ok(())
     }
 
-    #[test]
-    fn cache_remove_makes_payment_id_unfindable() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
-        let preparation =
-            propose(valid_request(), &cache).map_err(|_| "propose must accept valid input")?;
-        let removed = cache.remove(&preparation.payment_id);
+    #[tokio::test]
+    async fn store_remove_makes_payment_id_unfindable() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
+        let preparation = propose(valid_request(), &store)
+            .await
+            .map_err(|_| "propose must accept valid input")?;
+        let removed = store
+            .remove(&preparation.payment_id)
+            .await
+            .map_err(|_| "remove failed")?;
         assert!(removed.is_some());
-        assert_eq!(cache.entry_count(), 0);
-        assert!(cache.find(&preparation.payment_id).is_none());
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            0
+        );
+        assert!(
+            store
+                .find_by_payment_id(&preparation.payment_id)
+                .await
+                .map_err(|_| "find failed")?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -517,48 +620,77 @@ mod tests {
         assert_eq!(format_zec_from_zat(Zatoshis(150_000_000)), "1.5");
     }
 
-    #[test]
-    fn sweep_drops_expired_entries_and_keeps_active_ones() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn sweep_drops_expired_entries_and_keeps_active_ones() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let mut short_lived = valid_request();
         short_lived.validity_seconds = Some(1);
         let mut long_lived = valid_request();
         long_lived.validity_seconds = Some(3600);
 
-        let short = propose(short_lived, &cache).map_err(|_| "short propose must succeed")?;
-        let long = propose(long_lived, &cache).map_err(|_| "long propose must succeed")?;
-        assert_eq!(cache.entry_count(), 2);
+        let short = propose(short_lived, &store)
+            .await
+            .map_err(|_| "short propose must succeed")?;
+        let long = propose(long_lived, &store)
+            .await
+            .map_err(|_| "long propose must succeed")?;
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            2
+        );
 
         // Pick a "now" that is past the short-lived entry's expiry but not
         // the long-lived one's. The short entry uses validity_seconds = 1
         // so its expiry sits about now+1; sweep at now+5 drops it.
         let now_plus_five = super::current_unix_seconds().saturating_add(5);
-        let dropped = cache.sweep_expired(now_plus_five);
+        let dropped = store
+            .sweep_expired(now_plus_five)
+            .await
+            .map_err(|_| "sweep failed")?;
         assert_eq!(dropped, 1);
-        assert!(cache.find(&short.payment_id).is_none());
-        assert!(cache.find(&long.payment_id).is_some());
+        assert!(
+            store
+                .find_by_payment_id(&short.payment_id)
+                .await
+                .map_err(|_| "find failed")?
+                .is_none()
+        );
+        assert!(
+            store
+                .find_by_payment_id(&long.payment_id)
+                .await
+                .map_err(|_| "find failed")?
+                .is_some()
+        );
         Ok(())
     }
 
-    #[test]
-    fn idempotent_propose_returns_same_payment_id() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn idempotent_propose_returns_same_payment_id() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let mut first = valid_request();
         first.idempotency_key = Some("order-abc-001".to_owned());
         let mut second = valid_request();
         second.idempotency_key = Some("order-abc-001".to_owned());
 
-        let initial = propose(first, &cache).map_err(|_| "first propose must succeed")?;
-        let replay = propose(second, &cache).map_err(|_| "replay propose must succeed")?;
+        let initial = propose(first, &store)
+            .await
+            .map_err(|_| "first propose must succeed")?;
+        let replay = propose(second, &store)
+            .await
+            .map_err(|_| "replay propose must succeed")?;
         assert_eq!(initial.payment_id, replay.payment_id);
         assert_eq!(initial.payment_uri, replay.payment_uri);
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
         Ok(())
     }
 
-    #[test]
-    fn idempotency_key_is_merchant_scoped() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn idempotency_key_is_merchant_scoped() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let mut a = valid_request();
         a.merchant_id = MerchantId("aether-ai".to_owned());
         a.idempotency_key = Some("order-001".to_owned());
@@ -566,25 +698,39 @@ mod tests {
         b.merchant_id = MerchantId("demo-rp".to_owned());
         b.idempotency_key = Some("order-001".to_owned());
 
-        let first = propose(a, &cache).map_err(|_| "first propose must succeed")?;
-        let second = propose(b, &cache).map_err(|_| "second propose must succeed")?;
+        let first = propose(a, &store)
+            .await
+            .map_err(|_| "first propose must succeed")?;
+        let second = propose(b, &store)
+            .await
+            .map_err(|_| "second propose must succeed")?;
         assert_ne!(first.payment_id, second.payment_id);
-        assert_eq!(cache.entry_count(), 2);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            2
+        );
         Ok(())
     }
 
-    #[test]
-    fn empty_idempotency_key_is_treated_as_absent() -> Result<(), &'static str> {
-        let cache = PreparedTxCache::new();
+    #[tokio::test]
+    async fn empty_idempotency_key_is_treated_as_absent() -> Result<(), &'static str> {
+        let store = PreparedTxCache::new();
         let mut first = valid_request();
         first.idempotency_key = Some("   ".to_owned());
         let mut second = valid_request();
         second.idempotency_key = Some(String::new());
 
-        let a = propose(first, &cache).map_err(|_| "first propose must succeed")?;
-        let b = propose(second, &cache).map_err(|_| "second propose must succeed")?;
+        let a = propose(first, &store)
+            .await
+            .map_err(|_| "first propose must succeed")?;
+        let b = propose(second, &store)
+            .await
+            .map_err(|_| "second propose must succeed")?;
         assert_ne!(a.payment_id, b.payment_id);
-        assert_eq!(cache.entry_count(), 2);
+        assert_eq!(
+            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            2
+        );
         Ok(())
     }
 }
