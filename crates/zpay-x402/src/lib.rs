@@ -27,16 +27,17 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::BroadcastClient;
 use zpay_core::prepare::{Preparation, PrepareError, PrepareRequest, PreparedTxCache, propose};
 use zpay_core::settle::{SettleError, SettleRequest, SettlementOutcome, submit_settlement};
 use zpay_core::status::{PaymentStatusSnapshot, SettlementLedger, lookup_payment_status};
-use zpay_core::types::PaymentId;
+use zpay_core::types::{MerchantId, PaymentId};
 
 /// Shared application state injected into every x402 v2 handler.
 pub struct AppState<C> {
@@ -45,6 +46,9 @@ pub struct AppState<C> {
     /// Settlement ledger holding the last broadcast outcome per
     /// `payment_id`. Read by `GET /payments/{id}` and written by `settle`.
     pub ledger: Arc<SettlementLedger>,
+    /// Registered merchants and their `accepts[]` templates. Read by
+    /// `GET /accepts?merchant_id=…`.
+    pub merchants: Arc<MerchantRegistry>,
     /// Chain plane abstraction used for broadcast. Wrapped in `Arc` so the
     /// state stays `Clone`; the underlying client is `Send + Sync` per the
     /// [`BroadcastClient`] contract.
@@ -58,6 +62,7 @@ impl<C> Clone for AppState<C> {
         Self {
             cache: Arc::clone(&self.cache),
             ledger: Arc::clone(&self.ledger),
+            merchants: Arc::clone(&self.merchants),
             chain: Arc::clone(&self.chain),
         }
     }
@@ -65,12 +70,18 @@ impl<C> Clone for AppState<C> {
 
 impl<C> AppState<C> {
     /// Build a fresh shared state from the supplied cache, settlement
-    /// ledger, and broadcast client.
+    /// ledger, merchant registry, and broadcast client.
     #[must_use]
-    pub fn new(cache: Arc<PreparedTxCache>, ledger: Arc<SettlementLedger>, chain: Arc<C>) -> Self {
+    pub fn new(
+        cache: Arc<PreparedTxCache>,
+        ledger: Arc<SettlementLedger>,
+        merchants: Arc<MerchantRegistry>,
+        chain: Arc<C>,
+    ) -> Self {
         Self {
             cache,
             ledger,
+            merchants,
             chain,
         }
     }
@@ -83,7 +94,7 @@ impl<C> AppState<C> {
 /// the mount point.
 pub fn router<C: BroadcastClient + 'static>(state: AppState<C>) -> Router {
     Router::new()
-        .route("/accepts", get(not_yet_implemented))
+        .route("/accepts", get(accepts_handler::<C>))
         .route("/prepare", post(prepare_handler::<C>))
         .route("/settle", post(settle_handler::<C>))
         .route("/verify", post(not_yet_implemented))
@@ -119,6 +130,43 @@ async fn payment_status_handler<C: BroadcastClient + 'static>(
     json_ok(&PaymentStatusResponseBody { data: snapshot })
 }
 
+async fn accepts_handler<C: BroadcastClient + 'static>(
+    State(state): State<AppState<C>>,
+    Query(query): Query<AcceptsQuery>,
+) -> Response {
+    let Some(merchant_id) = query.merchant_id else {
+        return problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid Argument",
+            422,
+            "merchant_id query parameter is required",
+        );
+    };
+    state
+        .merchants
+        .find(&MerchantId(merchant_id.clone()))
+        .map_or_else(
+            || {
+                problem_response(
+                    StatusCode::NOT_FOUND,
+                    "Not Found",
+                    404,
+                    &format!("merchant_id {merchant_id:?} is not registered with this deployment"),
+                )
+            },
+            |entries| {
+                json_ok(&AcceptsResponseBody {
+                    accepts: entries.to_vec(),
+                })
+            },
+        )
+}
+
+#[derive(Deserialize)]
+struct AcceptsQuery {
+    merchant_id: Option<String>,
+}
+
 #[derive(Serialize)]
 struct PrepareResponseBody {
     data: Preparation,
@@ -132,6 +180,11 @@ struct SettleResponseBody {
 #[derive(Serialize)]
 struct PaymentStatusResponseBody {
     data: PaymentStatusSnapshot,
+}
+
+#[derive(Serialize)]
+struct AcceptsResponseBody {
+    accepts: Vec<AcceptsEntry>,
 }
 
 fn json_ok<T: Serialize>(body: &T) -> Response {

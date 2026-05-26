@@ -18,9 +18,11 @@ use axum::routing::get;
 use clap::Parser;
 use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
+use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::prepare::PreparedTxCache;
 use zpay_core::status::SettlementLedger;
+use zpay_core::types::MerchantId;
 use zpay_x402::AppState;
 
 /// zpay facilitator runtime.
@@ -63,6 +65,8 @@ enum StartupError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("merchant registry config read failed: {path}: {reason}")]
+    MerchantsConfig { path: String, reason: String },
 }
 
 #[tokio::main]
@@ -123,9 +127,11 @@ fn install_tracing() -> Result<(), StartupError> {
 
 fn build_app_router(config: &ResolvedConfig) -> Result<Router, StartupError> {
     let chain = build_broadcast_client(config)?;
+    let merchants = load_merchant_registry(config)?;
     let state = AppState::new(
         Arc::new(PreparedTxCache::new()),
         Arc::new(SettlementLedger::new()),
+        Arc::new(merchants),
         Arc::new(chain),
     );
     let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
@@ -156,6 +162,43 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient,
         "zinder broadcast client wired",
     );
     Ok(AnyBroadcastClient::Zinder(Box::new(client)))
+}
+
+fn load_merchant_registry(config: &ResolvedConfig) -> Result<MerchantRegistry, StartupError> {
+    let Some(path) = config.merchants_config_path.clone() else {
+        return Ok(MerchantRegistry::new());
+    };
+    let raw = std::fs::read_to_string(&path).map_err(|source| StartupError::MerchantsConfig {
+        path: path.clone(),
+        reason: source.to_string(),
+    })?;
+    let parsed: MerchantsConfigFile =
+        toml::from_str(&raw).map_err(|source| StartupError::MerchantsConfig {
+            path: path.clone(),
+            reason: source.to_string(),
+        })?;
+    let mut registry = MerchantRegistry::new();
+    for (merchant_id, merchant) in parsed.merchants {
+        registry.register(MerchantId(merchant_id), merchant.accepts);
+    }
+    tracing::info!(
+        merchant_count = registry.merchant_count(),
+        path = %path,
+        "merchant registry loaded",
+    );
+    Ok(registry)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MerchantsConfigFile {
+    #[serde(default)]
+    merchants: std::collections::HashMap<String, MerchantsConfigEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MerchantsConfigEntry {
+    #[serde(default)]
+    accepts: Vec<AcceptsEntry>,
 }
 
 const fn zinder_network_from_str(raw: &str) -> ZinderNetwork {
@@ -224,6 +267,7 @@ struct ResolvedConfig {
     ops_bind_addr: SocketAddr,
     network: String,
     indexer_grpc_addr: Option<String>,
+    merchants_config_path: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -234,6 +278,9 @@ impl ResolvedConfig {
             std::env::var("ZPAY_OPS__BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9295".to_string());
         let network = std::env::var("ZPAY_NETWORK").unwrap_or_else(|_| "regtest".to_string());
         let indexer_grpc_addr = std::env::var("ZPAY_NODE__INDEXER_GRPC_ADDR")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty());
+        let merchants_config_path = std::env::var("ZPAY_MERCHANTS__CONFIG_PATH")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
 
@@ -256,6 +303,7 @@ impl ResolvedConfig {
             ops_bind_addr,
             network,
             indexer_grpc_addr,
+            merchants_config_path,
         })
     }
 }

@@ -15,6 +15,7 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod accepts;
 pub mod broadcast;
 pub mod capability;
 pub mod error;
