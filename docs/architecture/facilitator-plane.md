@@ -52,12 +52,16 @@ Steps:
 
 1. Resolve merchant config from TOML.
 2. Compose the protocol memo content (98 bytes):
-   - byte 0: protocol byte `0xZP`
-   - byte 1: version `0x02`
+   - byte 0: protocol byte `0xFF` (ZIP-302 Arbitrary category; see
+     [ADR-0006](../adrs/0006-facilitator-trust-boundary.md))
+   - byte 1: version `0x01`
    - bytes 2-33: challenge hash (`SHA-256(merchant_id || resource_uri ||
      nonce)`)
    - bytes 34-65: resource hash (`SHA-256(resource_uri)`)
    - bytes 66-97: evidence_pack_hash (derived from agent_assertion)
+
+   The wallet wraps these 98 bytes as a 512-byte `MemoBytes::Arbitrary`,
+   zero-padding bytes 98..511.
 3. Call zally `Wallet::propose` to build the recipient URI components.
 4. Generate `payment_id` (ULID).
 5. Insert into `prepared_tx` table with TTL.
@@ -83,8 +87,11 @@ Steps:
    - Validate SD-JWT-VC signature (EdDSA).
    - Enforce `aud == merchant_origin`, `cnf.jkt == agent_dpop_jkt`,
      `exp` freshness, `verification_level >= min_verification_level`.
-4. Decode `raw_tx_hex`; verify the recipient, amount, expiry height,
-   and memo content match the `prepared_tx` record.
+4. Parse `raw_tx_hex` as a Zcash v5 transaction. Verify the parsed
+   `expiry_height` equals the `expiry_height` zpay returned at prepare
+   time. Recipient, amount, and memo content are NOT verified here;
+   that is `/verify`'s job, via a ZIP-311 disclosure (see
+   [ADR-0006](../adrs/0006-facilitator-trust-boundary.md)).
 5. Insert into `settlement_ledger` with `broadcast_outcome:
    pending_broadcast`.
 6. Call `zinder_client::broadcast_transaction(raw_tx_hex)`.
