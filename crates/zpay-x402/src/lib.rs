@@ -333,11 +333,17 @@ fn settle_error_response(err: &SettleError) -> Response {
             502,
             "chain plane is currently unavailable",
         ),
-        SettleError::MemoMismatch => problem_response(
+        SettleError::TransactionMalformed { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
             422,
-            "raw_tx_hex does not contain the prepared protocol memo; the wallet may have signed a different transaction",
+            "raw_tx_hex did not parse as a Zcash v5 transaction",
+        ),
+        SettleError::ExpiryHeightMismatch { .. } => problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid Argument",
+            422,
+            "expiry_height in the signed transaction does not match the prepared row",
         ),
         #[allow(
             clippy::wildcard_enum_match_arm,

@@ -52,7 +52,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ulid = "1.2.1"
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
 zcash_address = "0.11.0"
-zcash_protocol = "0.8.0"
+zcash_primitives = "0.26.4"
+zcash_protocol = "0.7.2"
 
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.

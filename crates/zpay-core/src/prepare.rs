@@ -31,18 +31,30 @@ use crate::types::{
 /// can override per-request via [`PrepareRequest::validity_seconds`].
 pub const DEFAULT_VALIDITY_SECONDS: u64 = 300;
 
-/// Length of the protocol-defined ZIP-302 memo prefix in bytes.
+/// Length of the protocol-defined memo prefix in bytes.
 ///
 /// Layout: protocol byte (1) + version byte (1) + challenge hash (32) +
 /// resource hash (32) + evidence-pack hash (32). See PRD-42 Decision 11.
+///
+/// On chain this 98-byte prefix occupies the leading region of a 512-byte
+/// ZIP-302 [`Arbitrary`] memo: the wallet writes the prefix, zero-pads to
+/// 511 bytes, and the protocol tag itself becomes byte 0 of the 512-byte
+/// container.
+///
+/// [`Arbitrary`]: https://zips.z.cash/zip-0302#arbitrary
 pub const PROTOCOL_MEMO_BYTE_COUNT: usize = 98;
 
-/// Sentinel byte that prefixes every zpay-issued memo. Lets callers
-/// distinguish zpay protocol memos from arbitrary user memos at a glance.
-pub const PROTOCOL_MEMO_TAG: u8 = 0x5a; // 'Z' in ASCII
+/// Leading byte of the zpay protocol memo.
+///
+/// ZIP-302 (`zips/zip-0302.rst:58-61`) reserves `0xFF` for arbitrary
+/// application-defined payloads, with the remaining 511 bytes
+/// unconstrained. Any value in `0x00..=0xF4` would force the rest of the
+/// memo to parse as valid UTF-8, which our 96 bytes of hash material
+/// cannot satisfy.
+pub const PROTOCOL_MEMO_TAG: u8 = 0xff;
 
 /// Current protocol memo layout version. Bumped when the layout changes; a
-/// memo with an unknown version is rejected at settle time.
+/// memo with an unknown version is rejected by the disclosure verifier.
 pub const PROTOCOL_MEMO_VERSION: u8 = 0x01;
 
 /// 32-byte hash binding the payment to a specific request the agent

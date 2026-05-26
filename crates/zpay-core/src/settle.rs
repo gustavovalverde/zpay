@@ -1,6 +1,25 @@
-//! Settle a prepared payment: validate the user-signed transaction
-//! against the cached preparation, broadcast through the chain plane, and
-//! mint a watch handle the confirmation oracle subscribes to.
+//! Settle a prepared payment.
+//!
+//! Parses the user-signed transaction, gates it against the cached
+//! preparation's well-formedness contract, broadcasts through the chain
+//! plane, and mints a watch handle the confirmation oracle subscribes
+//! to.
+//!
+//! # Trust boundary
+//!
+//! Settle is a relay with a well-formedness gate. It does not, and
+//! cannot, verify the recipient address, the disclosed amount, or the
+//! plaintext memo content of a shielded transaction: those fields live
+//! inside the AEAD-encrypted output ciphertext keyed by the recipient's
+//! incoming viewing key (ZIP-244 §T.3b/T.4b). Settle therefore checks
+//! only the properties that are observable from the unencrypted v5 tx
+//! header: the bytes parse as a Zcash transaction, and the parsed
+//! `expiry_height` equals the `expiry_height` zpay returned at
+//! `/prepare`.
+//!
+//! Cryptographic recipient/amount/memo binding is the job of the
+//! [`crate::verify`] surface, which consumes a ZIP-311 payment
+//! disclosure that only the sender can construct. See ADR-0006.
 //!
 //! The settle path is fire-once: a successful broadcast removes the
 //! cached preparation so a second call returns
@@ -11,6 +30,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::BranchId;
 
 use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use crate::prepare::PreparedTxCache;
@@ -63,13 +84,28 @@ pub enum SettleError {
         /// the error source chain.
         reason: String,
     },
-    /// The prepared `memo_bytes` do not appear inside the supplied
-    /// `raw_tx_hex`. Indicates the wallet either dropped the protocol
-    /// memo or signed a different transaction than the one we prepared.
-    /// Retry posture: `not_retryable`. The cache entry is preserved so
-    /// the agent can fix the wallet payload and call settle again.
-    #[error("raw_tx_hex does not contain the prepared protocol memo")]
-    MemoMismatch,
+    /// `raw_tx_hex` is hex-shaped but not a valid Zcash transaction.
+    /// Retry posture: `not_retryable`. The wallet must rebuild the tx.
+    /// The cache entry is preserved so the agent can submit a corrected
+    /// payload.
+    #[error("raw_tx_hex did not parse as a Zcash transaction: {reason}")]
+    TransactionMalformed {
+        /// Operator-facing parse error.
+        reason: String,
+    },
+    /// The parsed transaction's `expiry_height` does not equal the
+    /// `expiry_height` zpay returned from `/prepare`. Indicates the
+    /// wallet built a transaction for a different prepared row than the
+    /// one named by `payment_id`. Retry posture: `not_retryable`.
+    #[error(
+        "expiry_height mismatch: prepared={prepared_expiry_height}, signed={signed_expiry_height}"
+    )]
+    ExpiryHeightMismatch {
+        /// `expiry_height` zpay returned from `/prepare`.
+        prepared_expiry_height: u32,
+        /// `expiry_height` observed in the user-signed transaction.
+        signed_expiry_height: u32,
+    },
 }
 
 /// Submit a prepared payment to the chain plane.
@@ -102,14 +138,12 @@ pub async fn submit_settlement<C: BroadcastClient>(
         });
     };
 
-    // Pragmatic settle-time check: the prepared 98-byte protocol memo
-    // must appear in the user-signed transaction. A full v5 parse that
-    // also verifies recipient + amount + expiry is a follow-up; this
-    // single subsequence check already catches "wallet swallowed the
-    // memo" and "agent broadcast the wrong tx" regressions without
-    // pulling zcash_primitives into the facilitator.
-    if !raw_tx_contains_protocol_memo(&request.raw_tx_hex, &prepared.preparation.memo_bytes) {
-        return Err(SettleError::MemoMismatch);
+    let signed_expiry_height = parse_signed_expiry_height(&request.raw_tx_hex)?;
+    if signed_expiry_height != prepared.preparation.expiry_height {
+        return Err(SettleError::ExpiryHeightMismatch {
+            prepared_expiry_height: prepared.preparation.expiry_height,
+            signed_expiry_height,
+        });
     }
 
     let outcome = chain
@@ -163,29 +197,21 @@ fn validate_raw_tx_hex(raw_tx_hex: &str) -> Result<(), SettleError> {
     Ok(())
 }
 
-const HEX_NIBBLES: &[u8; 16] = b"0123456789abcdef";
-
-/// Case-insensitive substring check between the prepared memo and the
-/// user-signed raw transaction hex.
+/// Parse `raw_tx_hex` as a v5 Zcash transaction and return its
+/// `expiry_height`.
 ///
-/// Returns `true` when the memo appears anywhere in the tx; the caller
-/// treats `false` as [`SettleError::MemoMismatch`].
-fn raw_tx_contains_protocol_memo(raw_tx_hex: &str, memo_bytes: &[u8]) -> bool {
-    if memo_bytes.is_empty() {
-        return true;
-    }
-    let memo_hex = hex_encode(memo_bytes);
-    let haystack = raw_tx_hex.to_ascii_lowercase();
-    haystack.contains(&memo_hex)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX_NIBBLES[(byte >> 4) as usize] as char);
-        out.push(HEX_NIBBLES[(byte & 0x0f) as usize] as char);
-    }
-    out
+/// `Transaction::read` requires a `BranchId` but uses it only for v3/v4
+/// txid computation; v5 carries the consensus branch id in its own
+/// header. zpay is post-NU5 only, so we pass [`BranchId::Nu5`] as a
+/// placeholder and trust the v5 path.
+fn parse_signed_expiry_height(raw_tx_hex: &str) -> Result<u32, SettleError> {
+    let raw_bytes = hex::decode(raw_tx_hex).map_err(|_| SettleError::RawTxHexInvalid)?;
+    let tx = Transaction::read(raw_bytes.as_slice(), BranchId::Nu5).map_err(|err| {
+        SettleError::TransactionMalformed {
+            reason: err.to_string(),
+        }
+    })?;
+    Ok(u32::from(tx.expiry_height()))
 }
 
 #[cfg(test)]
@@ -256,7 +282,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id.clone(),
-                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
+                raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
             &cache,
             &ledger,
@@ -285,7 +311,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id.clone(),
-                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
+                raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
             &cache,
             &ledger,
@@ -383,7 +409,7 @@ mod tests {
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id,
-                raw_tx_hex: raw_tx_hex_with_memo_of(&preparation.memo_bytes),
+                raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
             &cache,
             &ledger,
@@ -397,7 +423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_tx_without_protocol_memo_returns_memo_mismatch() -> Result<(), &'static str> {
+    async fn signed_tx_with_wrong_expiry_returns_expiry_mismatch() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
@@ -406,12 +432,13 @@ mod tests {
             transaction_id: "deadbeef".to_owned(),
         });
 
-        // Tx hex deliberately omits the prepared memo, simulating a
-        // wallet that signed a different transaction.
+        // Wallet signed a tx whose expiry_height is not the one zpay
+        // returned at /prepare. Settle must reject before broadcasting.
+        let wrong_expiry = preparation.expiry_height.wrapping_add(1);
         let outcome = submit_settlement(
             SettleRequest {
                 payment_id: preparation.payment_id.clone(),
-                raw_tx_hex: "deadbeefdeadbeef".to_owned(),
+                raw_tx_hex: minimal_v5_tx_hex(wrong_expiry),
             },
             &cache,
             &ledger,
@@ -419,18 +446,65 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(outcome, Err(SettleError::MemoMismatch)));
-        // Cache entry preserved so the wallet can retry with the
-        // correct payload.
+        assert!(matches!(
+            outcome,
+            Err(SettleError::ExpiryHeightMismatch { .. })
+        ));
         assert_eq!(cache.entry_count(), 1);
         Ok(())
     }
 
-    fn raw_tx_hex_with_memo_of(memo_bytes: &[u8]) -> String {
-        // A real tx wraps the memo in Sapling output ciphertext, but the
-        // settle-time check is a substring match — any envelope that
-        // sandwiches the memo bytes between filler is enough for tests.
-        let memo_hex = super::hex_encode(memo_bytes);
-        format!("0500000080{memo_hex}deadbeef")
+    #[tokio::test]
+    async fn raw_tx_hex_that_is_not_a_zcash_tx_returns_malformed() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
+        let preparation = propose(valid_prepare_request(), &cache)
+            .map_err(|_| "propose must accept valid input")?;
+        let chain = FakeChain::new(BroadcastOutcome::Accepted {
+            transaction_id: "deadbeef".to_owned(),
+        });
+
+        // Hex-shaped but garbage bytes.
+        let outcome = submit_settlement(
+            SettleRequest {
+                payment_id: preparation.payment_id.clone(),
+                raw_tx_hex: "deadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
+            },
+            &cache,
+            &ledger,
+            &chain,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            Err(SettleError::TransactionMalformed { .. })
+        ));
+        assert_eq!(cache.entry_count(), 1);
+        Ok(())
+    }
+
+    /// Build the smallest v5 transaction the `zcash_primitives` reader
+    /// will accept: V5 header, V5 version group id, Nu5 consensus
+    /// branch id, supplied expiry, zero transparent/sapling/orchard
+    /// items.
+    fn minimal_v5_tx_hex(expiry_height: u32) -> String {
+        use std::fmt::Write as _;
+        let mut bytes = Vec::with_capacity(25);
+        bytes.extend_from_slice(&0x8000_0005u32.to_le_bytes()); // version + overwintered
+        bytes.extend_from_slice(&0x26A7_270Au32.to_le_bytes()); // V5_VERSION_GROUP_ID
+        bytes.extend_from_slice(&0xC2D6_D0B4u32.to_le_bytes()); // BranchId::Nu5
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        bytes.extend_from_slice(&expiry_height.to_le_bytes());
+        bytes.push(0x00); // transparent tx_in count
+        bytes.push(0x00); // transparent tx_out count
+        bytes.push(0x00); // sapling spends count
+        bytes.push(0x00); // sapling outputs count
+        bytes.push(0x00); // orchard actions count
+        let mut hex_out = String::with_capacity(bytes.len() * 2);
+        for byte in &bytes {
+            let _ = write!(&mut hex_out, "{byte:02x}");
+        }
+        hex_out
     }
 }
