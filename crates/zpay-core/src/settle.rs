@@ -127,6 +127,8 @@ pub async fn submit_settlement<C: BroadcastClient>(
         SettlementLedgerEntry {
             broadcast_outcome: outcome.clone(),
             settled_at_unix_seconds: current_unix_seconds(),
+            confirmation_count: None,
+            mined_block_height: None,
         },
     );
 

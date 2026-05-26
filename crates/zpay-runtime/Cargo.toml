@@ -39,3 +39,6 @@ zpay-core.workspace = true
 zpay-mpp = { workspace = true, optional = true }
 zpay-store.workspace = true
 zpay-x402.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true

@@ -50,6 +50,12 @@ pub struct PaymentStatusSnapshot {
     pub broadcast_outcome: Option<BroadcastOutcome>,
     /// Unix-seconds timestamp of the last settle attempt.
     pub settled_at_unix_seconds: Option<i64>,
+    /// Confirmation count reported by the oracle on its last poll.
+    /// `None` until the oracle has observed the tx; a freshly mined tx
+    /// is `Some(1)`, a tx still in mempool stays `Some(0)`.
+    pub confirmation_count: Option<u32>,
+    /// Block height that includes the tx, when known.
+    pub mined_block_height: Option<u64>,
 }
 
 /// Append-mostly ledger of settle outcomes keyed by [`PaymentId`].
@@ -71,6 +77,12 @@ pub struct SettlementLedgerEntry {
     pub broadcast_outcome: BroadcastOutcome,
     /// Wall-clock timestamp of the settle attempt.
     pub settled_at_unix_seconds: i64,
+    /// Latest confirmation count observed by the oracle. `None` until
+    /// the first oracle poll completes.
+    pub confirmation_count: Option<u32>,
+    /// Block height that includes the tx, when the oracle has seen it
+    /// mined.
+    pub mined_block_height: Option<u64>,
 }
 
 impl SettlementLedger {
@@ -101,6 +113,42 @@ impl SettlementLedger {
         let guard = self.entries.lock();
         guard.len()
     }
+
+    /// Collect (`payment_id`, `transaction_id`) pairs for every entry
+    /// whose broadcast outcome was a success kind. The background
+    /// confirmation oracle iterates this list each tick.
+    #[must_use]
+    pub fn success_kind_transactions(&self) -> Vec<(PaymentId, String)> {
+        let guard = self.entries.lock();
+        guard
+            .iter()
+            .filter_map(|(payment_id, entry)| {
+                entry
+                    .broadcast_outcome
+                    .transaction_id()
+                    .map(|txid| (payment_id.clone(), txid.to_owned()))
+            })
+            .collect()
+    }
+
+    /// Update the confirmation count and mined block height for an
+    /// existing ledger entry. Returns `true` when an entry was found and
+    /// updated, `false` when the `payment_id` was not in the ledger.
+    pub fn record_confirmation(
+        &self,
+        payment_id: &PaymentId,
+        confirmation_count: u32,
+        mined_block_height: Option<u64>,
+    ) -> bool {
+        let mut guard = self.entries.lock();
+        guard.get_mut(payment_id).is_some_and(|entry| {
+            entry.confirmation_count = Some(confirmation_count);
+            if mined_block_height.is_some() {
+                entry.mined_block_height = mined_block_height;
+            }
+            true
+        })
+    }
 }
 
 /// Compute the current lifecycle snapshot for a `payment_id`.
@@ -128,6 +176,8 @@ pub fn lookup_payment_status(
             status,
             broadcast_outcome: Some(entry.broadcast_outcome),
             settled_at_unix_seconds: Some(entry.settled_at_unix_seconds),
+            confirmation_count: entry.confirmation_count,
+            mined_block_height: entry.mined_block_height,
         };
     }
     if let Some(entry) = prepared.find(payment_id) {
@@ -143,6 +193,8 @@ pub fn lookup_payment_status(
                 status: PaymentStatus::Prepared,
                 broadcast_outcome: None,
                 settled_at_unix_seconds: None,
+                confirmation_count: None,
+                mined_block_height: None,
             };
         }
     }
@@ -151,6 +203,8 @@ pub fn lookup_payment_status(
         status: PaymentStatus::Unknown,
         broadcast_outcome: None,
         settled_at_unix_seconds: None,
+        confirmation_count: None,
+        mined_block_height: None,
     }
 }
 
@@ -213,6 +267,8 @@ mod tests {
                     transaction_id: "deadbeef".to_owned(),
                 },
                 settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
             },
         );
         let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
@@ -238,6 +294,8 @@ mod tests {
                     upstream_message: "policy: dust output".to_owned(),
                 },
                 settled_at_unix_seconds: 1_700_000_001,
+                confirmation_count: None,
+                mined_block_height: None,
             },
         );
         let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
@@ -255,6 +313,8 @@ mod tests {
                     upstream_message: "first attempt".to_owned(),
                 },
                 settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
             },
         );
         ledger.record(
@@ -264,6 +324,8 @@ mod tests {
                     transaction_id: "feedface".to_owned(),
                 },
                 settled_at_unix_seconds: 1_700_000_100,
+                confirmation_count: None,
+                mined_block_height: None,
             },
         );
         assert_eq!(ledger.entry_count(), 1);
@@ -275,5 +337,66 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn record_confirmation_updates_existing_entry() {
+        let ledger = SettlementLedger::new();
+        let payment_id = PaymentId("watch-me".to_owned());
+        ledger.record(
+            payment_id.clone(),
+            SettlementLedgerEntry {
+                broadcast_outcome: BroadcastOutcome::Accepted {
+                    transaction_id: "feedface".to_owned(),
+                },
+                settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        );
+
+        let cache = PreparedTxCache::new();
+        assert!(ledger.record_confirmation(&payment_id, 3, Some(1_234_567)));
+        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+        assert_eq!(snapshot.confirmation_count, Some(3));
+        assert_eq!(snapshot.mined_block_height, Some(1_234_567));
+    }
+
+    #[test]
+    fn record_confirmation_returns_false_for_missing_entry() {
+        let ledger = SettlementLedger::new();
+        let payment_id = PaymentId("not-recorded".to_owned());
+        assert!(!ledger.record_confirmation(&payment_id, 1, None));
+    }
+
+    #[test]
+    fn success_kind_transactions_skips_failure_outcomes() {
+        let ledger = SettlementLedger::new();
+        ledger.record(
+            PaymentId("ok".to_owned()),
+            SettlementLedgerEntry {
+                broadcast_outcome: BroadcastOutcome::Accepted {
+                    transaction_id: "abcd".to_owned(),
+                },
+                settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        );
+        ledger.record(
+            PaymentId("fail".to_owned()),
+            SettlementLedgerEntry {
+                broadcast_outcome: BroadcastOutcome::Rejected {
+                    upstream_message: "no".to_owned(),
+                },
+                settled_at_unix_seconds: 1_700_000_001,
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        );
+        let pairs = ledger.success_kind_transactions();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, PaymentId("ok".to_owned()));
+        assert_eq!(pairs[0].1, "abcd");
     }
 }

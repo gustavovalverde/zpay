@@ -1,34 +1,68 @@
-//! Confirmation oracle: subscribe to zinder `ChainEvents` for live
-//! processes; expose pull-mode lookup via the settlement ledger.
+//! Confirmation oracle: a pull-mode abstraction over the chain plane
+//! that maps a broadcast transaction id back to its current
+//! confirmation status.
 //!
-//! Implementation lands in M2.
+//! The runtime composition root plugs a zinder-backed implementation
+//! behind this trait; zpay-core stays free of zinder types so it can
+//! be unit-tested with an in-memory fake.
 
 use serde::{Deserialize, Serialize};
 
-/// Confirmation status returned by the oracle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Outcome returned by [`ConfirmationOracle::fetch_confirmations`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum ConfirmationStatus {
-    /// In `prepared_tx`, not yet settled.
-    Prepared,
-    /// In `settlement_ledger`, broadcast succeeded, `confirmations: 0`.
-    Settled,
-    /// Settlement has reached at least one confirmation.
-    Confirmed,
-    /// Prepared transaction expired without settling.
-    Expired,
-    /// Settlement failed permanently.
-    Failed,
+pub enum ConfirmationOutcome {
+    /// Transaction is in a mined block. Carries the block height the
+    /// chain placed it in and the current confirmation depth.
+    Mined {
+        /// Height of the containing block.
+        block_height: u64,
+        /// Number of blocks from the containing block to the chain tip,
+        /// inclusive (a freshly mined tx has `confirmation_count: 1`).
+        confirmation_count: u32,
+    },
+    /// Transaction is visible in the mempool but not yet mined.
+    InMempool,
+    /// Chain plane has no record of the transaction.
+    NotFound,
+    /// Transaction conflicts with the visible canonical chain.
+    ConflictingChain,
 }
 
-/// Snapshot of a payment's confirmation state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfirmationSnapshot {
-    /// Where the payment is in its lifecycle.
-    pub status: ConfirmationStatus,
-    /// Number of confirmations observed.
-    pub confirmations_count: u32,
-    /// Block height at which the transaction was first observed.
-    pub mined_block_height: Option<u32>,
+/// Errors raised by [`ConfirmationOracle`] implementations. These wrap
+/// transport-level failures the chain plane could not even respond to.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OracleError {
+    /// The chain plane was unreachable. Retry posture: `retryable`.
+    #[error("oracle unavailable: {reason}")]
+    Unavailable {
+        /// Operator-facing reason; the upstream error chains as the source.
+        reason: String,
+    },
+    /// The chain plane responded but the response could not be interpreted.
+    /// Retry posture: `requires_operator`.
+    #[error("oracle response malformed: {reason}")]
+    ResponseMalformed {
+        /// Operator-facing reason.
+        reason: String,
+    },
 }
+
+/// Abstraction over the chain plane that resolves a transaction id to a
+/// confirmation outcome. Implementations are pinned to `Send + Sync` so
+/// a single oracle can be shared across background tasks.
+pub trait ConfirmationOracle: Send + Sync {
+    /// Fetch the current confirmation status for `transaction_id`.
+    ///
+    /// `transaction_id` is the hex-encoded ZIP-244 txid the broadcast
+    /// outcome reported. Implementations decode it; an unparseable id
+    /// surfaces as [`OracleError::ResponseMalformed`].
+    fn fetch_confirmations(
+        &self,
+        transaction_id: &str,
+    ) -> impl Future<Output = Result<ConfirmationOutcome, OracleError>> + Send;
+}
+
+use std::future::Future;

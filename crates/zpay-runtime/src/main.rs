@@ -7,6 +7,7 @@
 //! `/healthz` and the x402 stub routes.
 
 mod zinder_broadcast;
+mod zinder_oracle;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,8 +19,10 @@ use axum::routing::get;
 use clap::Parser;
 use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
+use zinder_oracle::ZinderConfirmationOracle;
 use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
 use zpay_core::prepare::PreparedTxCache;
 use zpay_core::status::SettlementLedger;
 use zpay_core::types::MerchantId;
@@ -84,6 +87,7 @@ async fn main() -> Result<(), StartupError> {
     let app_plane = build_app_router(&config)?;
     let app_router = app_plane.router;
     spawn_prepared_tx_sweeper(Arc::clone(&app_plane.cache));
+    spawn_confirmation_oracle(&config, Arc::clone(&app_plane.ledger))?;
     let ops_router = build_ops_router();
 
     let app_listener = tokio::net::TcpListener::bind(config.app_bind_addr)
@@ -130,15 +134,17 @@ fn install_tracing() -> Result<(), StartupError> {
 struct AppPlane {
     router: Router,
     cache: Arc<PreparedTxCache>,
+    ledger: Arc<SettlementLedger>,
 }
 
 fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
     let merchants = load_merchant_registry(config)?;
     let cache = Arc::new(PreparedTxCache::new());
+    let ledger = Arc::new(SettlementLedger::new());
     let state = AppState::new(
         Arc::clone(&cache),
-        Arc::new(SettlementLedger::new()),
+        Arc::clone(&ledger),
         Arc::new(merchants),
         Arc::new(chain),
     );
@@ -150,11 +156,18 @@ fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     Ok(AppPlane {
         router: router.layer(tower_http::trace::TraceLayer::new_for_http()),
         cache,
+        ledger,
     })
 }
 
 /// Interval at which the prepared-tx sweeper drops expired entries.
 const PREPARED_TX_SWEEP_INTERVAL_SECONDS: u64 = 30;
+
+/// Interval at which the confirmation oracle re-polls zinder.
+///
+/// Short enough that a freshly mined block is visible to agents within
+/// a minute; long enough not to thrash the chain plane.
+const CONFIRMATION_ORACLE_POLL_SECONDS: u64 = 60;
 
 fn spawn_prepared_tx_sweeper(cache: Arc<PreparedTxCache>) {
     tokio::spawn(async move {
@@ -177,6 +190,80 @@ fn spawn_prepared_tx_sweeper(cache: Arc<PreparedTxCache>) {
             }
         }
     });
+}
+
+fn spawn_confirmation_oracle(
+    config: &ResolvedConfig,
+    ledger: Arc<SettlementLedger>,
+) -> Result<(), StartupError> {
+    let Some(endpoint) = config.indexer_grpc_addr.clone() else {
+        tracing::warn!(
+            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; confirmation oracle disabled until a chain plane is configured",
+        );
+        return Ok(());
+    };
+    let oracle =
+        ZinderConfirmationOracle::connect(endpoint.clone(), zinder_network_from_str(&config.network))
+            .map_err(|source| StartupError::BroadcastClient {
+                endpoint,
+                source: Box::new(source),
+            })?;
+    let oracle = Arc::new(oracle);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            CONFIRMATION_ORACLE_POLL_SECONDS,
+        ));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            poll_oracle_once(oracle.as_ref(), ledger.as_ref()).await;
+        }
+    });
+    tracing::info!("confirmation oracle wired");
+    Ok(())
+}
+
+async fn poll_oracle_once<O: ConfirmationOracle>(oracle: &O, ledger: &SettlementLedger) {
+    let entries = ledger.success_kind_transactions();
+    if entries.is_empty() {
+        return;
+    }
+    for (payment_id, transaction_id) in entries {
+        match oracle.fetch_confirmations(&transaction_id).await {
+            Ok(ConfirmationOutcome::Mined {
+                block_height,
+                confirmation_count,
+            }) => {
+                ledger.record_confirmation(&payment_id, confirmation_count, Some(block_height));
+            }
+            Ok(ConfirmationOutcome::InMempool) => {
+                ledger.record_confirmation(&payment_id, 0, None);
+            }
+            Ok(ConfirmationOutcome::NotFound | ConfirmationOutcome::ConflictingChain) => {
+                // Leave confirmation_count untouched; an Accepted broadcast
+                // that vanishes from the chain plane is operator-visible
+                // through the unchanged ledger state and the warning below.
+                tracing::warn!(
+                    payment_id = %payment_id,
+                    transaction_id = %transaction_id,
+                    "oracle reports tx no longer visible on chain plane",
+                );
+            }
+            #[allow(
+                clippy::wildcard_enum_match_arm,
+                reason = "ConfirmationOutcome is #[non_exhaustive]; future variants stay a no-op until they have explicit handling"
+            )]
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    payment_id = %payment_id,
+                    transaction_id = %transaction_id,
+                    error = %err,
+                    "confirmation oracle poll failed",
+                );
+            }
+        }
+    }
 }
 
 fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient, StartupError> {
@@ -379,4 +466,98 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfirmationOracle, ConfirmationOutcome, poll_oracle_once};
+    use parking_lot::Mutex;
+    use zpay_core::broadcast::BroadcastOutcome;
+    use zpay_core::oracle::OracleError;
+    use zpay_core::status::{SettlementLedger, SettlementLedgerEntry, lookup_payment_status};
+    use zpay_core::prepare::PreparedTxCache;
+    use zpay_core::types::PaymentId;
+
+    struct ScriptedOracle {
+        outcomes: Mutex<std::collections::HashMap<String, ConfirmationOutcome>>,
+    }
+
+    impl ScriptedOracle {
+        fn new(pairs: &[(&'static str, ConfirmationOutcome)]) -> Self {
+            let mut outcomes = std::collections::HashMap::new();
+            for (txid, outcome) in pairs {
+                outcomes.insert((*txid).to_owned(), outcome.clone());
+            }
+            Self {
+                outcomes: Mutex::new(outcomes),
+            }
+        }
+    }
+
+    impl ConfirmationOracle for ScriptedOracle {
+        async fn fetch_confirmations(
+            &self,
+            transaction_id: &str,
+        ) -> Result<ConfirmationOutcome, OracleError> {
+            let guard = self.outcomes.lock();
+            guard
+                .get(transaction_id)
+                .cloned()
+                .ok_or_else(|| OracleError::Unavailable {
+                    reason: format!("no scripted outcome for txid={transaction_id}"),
+                })
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_oracle_records_confirmations_for_mined_txs() {
+        let ledger = SettlementLedger::new();
+        let payment_id = PaymentId("p1".to_owned());
+        ledger.record(
+            payment_id.clone(),
+            SettlementLedgerEntry {
+                broadcast_outcome: BroadcastOutcome::Accepted {
+                    transaction_id: "abcd".to_owned(),
+                },
+                settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        );
+        let oracle = ScriptedOracle::new(&[(
+            "abcd",
+            ConfirmationOutcome::Mined {
+                block_height: 1_234_567,
+                confirmation_count: 5,
+            },
+        )]);
+
+        poll_oracle_once(&oracle, &ledger).await;
+
+        let cache = PreparedTxCache::new();
+        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger);
+        assert_eq!(snapshot.confirmation_count, Some(5));
+        assert_eq!(snapshot.mined_block_height, Some(1_234_567));
+    }
+
+    #[tokio::test]
+    async fn poll_oracle_leaves_failed_outcomes_alone() {
+        let ledger = SettlementLedger::new();
+        ledger.record(
+            PaymentId("rejected".to_owned()),
+            SettlementLedgerEntry {
+                broadcast_outcome: BroadcastOutcome::Rejected {
+                    upstream_message: "policy".to_owned(),
+                },
+                settled_at_unix_seconds: 1_700_000_000,
+                confirmation_count: None,
+                mined_block_height: None,
+            },
+        );
+        // No outcomes scripted; the oracle returns Unavailable for any
+        // txid. The Rejected entry should be skipped before the oracle is
+        // even consulted because it carries no transaction_id.
+        let oracle = ScriptedOracle::new(&[]);
+        poll_oracle_once(&oracle, &ledger).await;
+    }
 }
