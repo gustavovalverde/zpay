@@ -86,6 +86,11 @@ pub struct PrepareRequest {
     /// [`DEFAULT_VALIDITY_SECONDS`] when omitted.
     #[serde(default)]
     pub validity_seconds: Option<u64>,
+    /// Caller-supplied idempotency key. When set, a second `propose`
+    /// call with the same `(merchant_id, idempotency_key)` pair returns
+    /// the original preparation instead of allocating a new one.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// Output of [`propose`]. The agent passes `payment_uri` and `memo_bytes`
@@ -144,12 +149,19 @@ pub fn compose_protocol_memo(
 
 /// In-memory cache for prepared transactions awaiting settlement.
 ///
-/// Storage is keyed by [`PaymentId`]. Entries carry the full prepared
-/// payload plus the network, merchant, and expiry-height context that
-/// settle-time validation reads. Thread-safe via [`parking_lot::Mutex`].
+/// Storage is keyed by [`PaymentId`] with a secondary `(merchant_id,
+/// idempotency_key)` index so a retried prepare returns the same
+/// preparation instead of allocating a new one. Both maps live behind a
+/// single mutex to make insert / sweep transitions atomic.
 #[derive(Debug, Default)]
 pub struct PreparedTxCache {
-    entries: Mutex<HashMap<PaymentId, PreparedTxEntry>>,
+    inner: Mutex<CacheInner>,
+}
+
+#[derive(Debug, Default)]
+struct CacheInner {
+    by_payment_id: HashMap<PaymentId, PreparedTxEntry>,
+    by_idempotency: HashMap<(MerchantId, String), PaymentId>,
 }
 
 /// Cached prepared transaction.
@@ -167,6 +179,9 @@ pub struct PreparedTxEntry {
     pub amount_zat: Zatoshis,
     /// Wall-clock deadline after which the sweeper removes the entry.
     pub expires_at_unix_seconds: u64,
+    /// Caller-supplied idempotency key, scoped to `merchant_id`. Empty
+    /// when the prepare request did not carry one.
+    pub idempotency_key: Option<String>,
 }
 
 impl PreparedTxCache {
@@ -177,45 +192,86 @@ impl PreparedTxCache {
     }
 
     /// Insert a prepared-tx entry. Replaces any existing entry under the
-    /// same `payment_id` (caller's idempotency key prevents collisions in
-    /// practice; the replacement is the safe outcome on duplicate
-    /// generation).
+    /// same `payment_id`. When `idempotency_key` is set, also writes the
+    /// secondary index so `find_by_idempotency` can return the same
+    /// preparation on retry.
     pub fn insert(&self, entry: PreparedTxEntry) {
-        let mut guard = self.entries.lock();
-        guard.insert(entry.preparation.payment_id.clone(), entry);
+        let mut guard = self.inner.lock();
+        if let Some(key) = entry.idempotency_key.clone() {
+            guard
+                .by_idempotency
+                .insert((entry.merchant_id.clone(), key), entry.preparation.payment_id.clone());
+        }
+        guard
+            .by_payment_id
+            .insert(entry.preparation.payment_id.clone(), entry);
     }
 
     /// Look up a prepared-tx entry by `payment_id`. Returns `None` when the
     /// entry has been removed by settle or expired by a sweep.
     #[must_use]
     pub fn find(&self, payment_id: &PaymentId) -> Option<PreparedTxEntry> {
-        let guard = self.entries.lock();
-        guard.get(payment_id).cloned()
+        let guard = self.inner.lock();
+        guard.by_payment_id.get(payment_id).cloned()
+    }
+
+    /// Resolve a `(merchant_id, idempotency_key)` to the prepared entry
+    /// the first call produced. Returns `None` when no entry exists or
+    /// the prior entry has already expired.
+    #[must_use]
+    pub fn find_by_idempotency(
+        &self,
+        merchant_id: &MerchantId,
+        idempotency_key: &str,
+    ) -> Option<PreparedTxEntry> {
+        let guard = self.inner.lock();
+        let payment_id = guard
+            .by_idempotency
+            .get(&(merchant_id.clone(), idempotency_key.to_owned()))?;
+        guard.by_payment_id.get(payment_id).cloned()
     }
 
     /// Remove the prepared-tx entry for `payment_id`. Returns the removed
     /// entry when present; settle calls this on the success path to enforce
-    /// fire-once semantics.
+    /// fire-once semantics. Also clears the matching idempotency-index row
+    /// so a retry after settle does not resurrect the spent preparation.
     pub fn remove(&self, payment_id: &PaymentId) -> Option<PreparedTxEntry> {
-        let mut guard = self.entries.lock();
-        guard.remove(payment_id)
+        let mut guard = self.inner.lock();
+        let removed = guard.by_payment_id.remove(payment_id);
+        if let Some(ref entry) = removed
+            && let Some(ref key) = entry.idempotency_key
+        {
+            guard
+                .by_idempotency
+                .remove(&(entry.merchant_id.clone(), key.clone()));
+        }
+        drop(guard);
+        removed
     }
 
     /// Number of entries currently cached.
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        let guard = self.entries.lock();
-        guard.len()
+        let guard = self.inner.lock();
+        guard.by_payment_id.len()
     }
 
     /// Remove every entry whose `expires_at_unix_seconds` is at or before
     /// `now_unix_seconds`. Returns the number of entries dropped so a
-    /// background sweeper can record useful telemetry.
+    /// background sweeper can record useful telemetry. Also prunes
+    /// orphaned rows from the idempotency index.
     pub fn sweep_expired(&self, now_unix_seconds: u64) -> usize {
-        let mut guard = self.entries.lock();
-        let before = guard.len();
-        guard.retain(|_, entry| entry.expires_at_unix_seconds > now_unix_seconds);
-        before - guard.len()
+        let mut guard = self.inner.lock();
+        let before = guard.by_payment_id.len();
+        guard
+            .by_payment_id
+            .retain(|_, entry| entry.expires_at_unix_seconds > now_unix_seconds);
+        let live_ids: std::collections::HashSet<PaymentId> =
+            guard.by_payment_id.keys().cloned().collect();
+        guard
+            .by_idempotency
+            .retain(|_, pid| live_ids.contains(pid));
+        before - guard.by_payment_id.len()
     }
 }
 
@@ -244,6 +300,19 @@ pub fn propose(
     }
     if request.expiry_height == 0 {
         return Err(PrepareError::ExpiryHeightInvalid);
+    }
+
+    // Idempotency replay: if a prior prepare with the same (merchant,
+    // idempotency_key) is still in the cache, hand the agent the same
+    // preparation. Expiry sweep already drops stale entries so a hit here
+    // is always within the validity window.
+    if let Some(key) = request
+        .idempotency_key
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+        && let Some(prior) = cache.find_by_idempotency(&request.merchant_id, key)
+    {
+        return Ok(prior.preparation);
     }
 
     let memo = compose_protocol_memo(
@@ -277,6 +346,9 @@ pub fn propose(
         recipient_unified_address: request.recipient_unified_address,
         amount_zat: request.amount_zat,
         expires_at_unix_seconds,
+        idempotency_key: request
+            .idempotency_key
+            .filter(|raw| !raw.trim().is_empty()),
     });
 
     Ok(preparation)
@@ -339,6 +411,7 @@ mod tests {
             evidence_pack_hash: EvidencePackHash([0x33; 32]),
             expiry_height: 3_217_900,
             validity_seconds: None,
+            idempotency_key: None,
         }
     }
 
@@ -452,6 +525,54 @@ mod tests {
         assert_eq!(dropped, 1);
         assert!(cache.find(&short.payment_id).is_none());
         assert!(cache.find(&long.payment_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn idempotent_propose_returns_same_payment_id() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let mut first = valid_request();
+        first.idempotency_key = Some("order-abc-001".to_owned());
+        let mut second = valid_request();
+        second.idempotency_key = Some("order-abc-001".to_owned());
+
+        let initial = propose(first, &cache).map_err(|_| "first propose must succeed")?;
+        let replay = propose(second, &cache).map_err(|_| "replay propose must succeed")?;
+        assert_eq!(initial.payment_id, replay.payment_id);
+        assert_eq!(initial.payment_uri, replay.payment_uri);
+        assert_eq!(cache.entry_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn idempotency_key_is_merchant_scoped() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let mut a = valid_request();
+        a.merchant_id = MerchantId("aether-ai".to_owned());
+        a.idempotency_key = Some("order-001".to_owned());
+        let mut b = valid_request();
+        b.merchant_id = MerchantId("demo-rp".to_owned());
+        b.idempotency_key = Some("order-001".to_owned());
+
+        let first = propose(a, &cache).map_err(|_| "first propose must succeed")?;
+        let second = propose(b, &cache).map_err(|_| "second propose must succeed")?;
+        assert_ne!(first.payment_id, second.payment_id);
+        assert_eq!(cache.entry_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_idempotency_key_is_treated_as_absent() -> Result<(), &'static str> {
+        let cache = PreparedTxCache::new();
+        let mut first = valid_request();
+        first.idempotency_key = Some("   ".to_owned());
+        let mut second = valid_request();
+        second.idempotency_key = Some(String::new());
+
+        let a = propose(first, &cache).map_err(|_| "first propose must succeed")?;
+        let b = propose(second, &cache).map_err(|_| "second propose must succeed")?;
+        assert_ne!(a.payment_id, b.payment_id);
+        assert_eq!(cache.entry_count(), 2);
         Ok(())
     }
 }

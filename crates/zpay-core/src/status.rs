@@ -175,6 +175,7 @@ mod tests {
             evidence_pack_hash: EvidencePackHash([0x33; 32]),
             expiry_height: 3_217_900,
             validity_seconds: None,
+            idempotency_key: None,
         }
     }
 

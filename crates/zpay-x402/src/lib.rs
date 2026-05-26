@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Json, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -104,8 +104,21 @@ pub fn router<C: BroadcastClient + 'static>(state: AppState<C>) -> Router {
 
 async fn prepare_handler<C: BroadcastClient + 'static>(
     State(state): State<AppState<C>>,
-    Json(body): Json<PrepareRequest>,
+    headers: HeaderMap,
+    Json(mut body): Json<PrepareRequest>,
 ) -> Response {
+    // Header takes precedence over body field. RFC-draft `Idempotency-Key`
+    // is the conventional surface; we accept the body field as a fallback
+    // for clients that cannot set custom headers (e.g. constrained MCP
+    // tool runtimes).
+    if let Some(header_value) = headers
+        .get("idempotency-key")
+        .and_then(|raw| raw.to_str().ok())
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        body.idempotency_key = Some(header_value.to_owned());
+    }
     match propose(body, &state.cache) {
         Ok(preparation) => json_ok(&PrepareResponseBody { data: preparation }),
         Err(err) => prepare_error_response(&err),
