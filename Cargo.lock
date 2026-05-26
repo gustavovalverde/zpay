@@ -1414,6 +1414,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "zpay-core",
 ]

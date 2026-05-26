@@ -7,12 +7,16 @@
 //! `/healthz` and the x402 stub routes.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use clap::Parser;
+use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+use zpay_core::prepare::PreparedTxCache;
+use zpay_x402::AppState;
 
 /// zpay facilitator runtime.
 #[derive(Debug, Parser)]
@@ -107,12 +111,36 @@ fn install_tracing() -> Result<(), StartupError> {
 }
 
 fn build_app_router() -> Router {
-    let router = Router::new().nest("/x402/v2", zpay_x402::router());
+    let state = AppState::new(
+        Arc::new(PreparedTxCache::new()),
+        Arc::new(RejectingBroadcastClient),
+    );
+    let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
 
     #[cfg(feature = "mpp")]
     let router = router.nest("/mpp/v1", zpay_mpp::router());
 
     router.layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+/// Placeholder broadcast client that refuses every call.
+///
+/// Wired in until a production chain-plane client lands. Refusing every
+/// broadcast is more honest than silently swallowing the request: the
+/// settle handler reports `502 Bad Gateway` so callers know broadcast is
+/// not configured.
+struct RejectingBroadcastClient;
+
+impl BroadcastClient for RejectingBroadcastClient {
+    async fn broadcast(
+        &self,
+        _raw_tx_hex: &str,
+    ) -> Result<BroadcastOutcome, BroadcastError> {
+        Err(BroadcastError::Unavailable {
+            reason: "broadcast client not configured; wire zinder-client to enable settle"
+                .to_owned(),
+        })
+    }
 }
 
 fn build_ops_router() -> Router {
