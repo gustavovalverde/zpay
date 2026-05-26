@@ -57,10 +57,14 @@ struct Cli {
     )]
     zpay_url: String,
     /// Birthday height the wallet starts scanning from on first run.
-    /// Use a recent testnet tip minus a small margin so initial sync is
-    /// fast. Ignored if the wallet already exists at `wallet_dir`.
+    /// Use a recent tip minus a small margin so initial sync is fast.
+    /// Ignored if the wallet already exists at `wallet_dir`.
     #[arg(long, env = "ZPAY_E2E_BIRTHDAY", default_value_t = 4_031_000)]
     birthday: u32,
+    /// Network name passed in `/prepare` requests and used to bind the
+    /// zally wallet. Accepts `testnet` or `regtest`.
+    #[arg(long, env = "ZPAY_E2E_NETWORK", default_value = "testnet")]
+    network: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -73,6 +77,15 @@ enum Command {
     /// Sync the wallet against the zinder chain source and print the
     /// resulting account balance.
     Status,
+    /// Shield matured transparent funds into Orchard notes by submitting
+    /// a shielding transaction directly to zinder (bypasses zpay). Run
+    /// this once after funding the wallet from a coinbase miner so the
+    /// `Run` flow has shielded notes to spend from.
+    Shield {
+        /// Minimum transparent value to shield (zatoshis).
+        #[arg(long, default_value_t = 5_000_000)]
+        shielding_threshold_zat: u64,
+    },
     /// Run the full e2e flow: prepare against zpay, propose with the
     /// prepared memo, submit through `/settle`, poll until the
     /// confirmation oracle bumps the count.
@@ -110,7 +123,12 @@ async fn main() -> Result<(), HarnessError> {
     let cli = Cli::parse();
     std::fs::create_dir_all(&cli.wallet_dir).map_err(HarnessError::WalletDir)?;
 
-    let network = Network::Testnet;
+    let network = match cli.network.as_str() {
+        "testnet" => Network::Testnet,
+        "regtest" => Network::regtest(),
+        other => return Err(HarnessError::NetworkInvalid(other.to_owned())),
+    };
+    let network_label = cli.network.clone();
     let chain = ZinderChainSource::connect_remote(ZinderRemoteOptions {
         endpoint: cli.zinder_url.clone(),
         network,
@@ -123,7 +141,7 @@ async fn main() -> Result<(), HarnessError> {
 
     match cli.command {
         Command::Address => {
-            let ua = wallet.derive_next_address(account_id).await?;
+            let ua = wallet.derive_next_address_with_transparent(account_id).await?;
             let encoded = ua.encode(&params);
             info!(unified_address = %encoded, "wallet unified address (fund this via fauzec)");
         }
@@ -141,6 +159,11 @@ async fn main() -> Result<(), HarnessError> {
                 transparent_mature_zat = balance.transparent_mature_zat.as_u64(),
                 "account balance",
             );
+        }
+        Command::Shield {
+            shielding_threshold_zat,
+        } => {
+            shield_funds(&wallet, account_id, &chain, shielding_threshold_zat).await?;
         }
         Command::Run {
             merchant_id,
@@ -160,10 +183,48 @@ async fn main() -> Result<(), HarnessError> {
                 validity_seconds,
                 poll_seconds,
                 network,
+                &network_label,
             )
             .await?;
         }
     }
+    Ok(())
+}
+
+async fn shield_funds(
+    wallet: &Wallet,
+    account_id: AccountId,
+    chain: &ZinderChainSource,
+    shielding_threshold_zat: u64,
+) -> Result<(), HarnessError> {
+    info!("syncing wallet before shielding");
+    let outcome = wallet.sync(chain).await?;
+    info!(
+        scanned_to_height = outcome.scanned_to_height.as_u32(),
+        block_count = outcome.block_count,
+        "sync complete",
+    );
+    let submitter = chain.submitter();
+    let idempotency_token = format!(
+        "zpay-e2e-shield-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis())
+    );
+    let plan = zally_wallet::ShieldTransparentPlan::new(
+        account_id,
+        IdempotencyKey::try_from(idempotency_token.as_str())
+            .map_err(|err| HarnessError::Idempotency(err.to_string()))?,
+        Zatoshis::try_from(shielding_threshold_zat)
+            .map_err(|err| HarnessError::Zat(err.to_string()))?,
+        &submitter,
+    );
+    let send_outcome = wallet.shield_transparent_funds(plan).await?;
+    info!(
+        tx_id = %hex::encode(send_outcome.tx_id.as_bytes()),
+        broadcast_at_height = send_outcome.broadcast_at_height.as_u32(),
+        "shielding tx broadcast",
+    );
     Ok(())
 }
 
@@ -210,6 +271,7 @@ async fn run_flow(
     validity_seconds: u64,
     poll_seconds: u64,
     network: Network,
+    network_label: &str,
 ) -> Result<(), HarnessError> {
     info!("syncing wallet against zinder before propose");
     let outcome = wallet.sync(chain).await?;
@@ -242,13 +304,28 @@ async fn run_flow(
     let recipient = if let Some(addr) = recipient_address {
         addr
     } else {
-        let ua = wallet.derive_next_address(account_id).await?;
+        let ua = wallet.derive_next_address_with_transparent(account_id).await?;
         ua.encode(&network.to_parameters())
     };
     info!(recipient = %recipient, "recipient unified address");
 
-    let prepared = call_prepare(zpay_url, &merchant_id, &recipient, amount_zat, validity_seconds)
-        .await?;
+    // zally's proposal builder targets `(scanned_to_height + 1) +
+    // DEFAULT_TX_EXPIRY_DELTA` for the signed tx's expiry. The prepared
+    // row has to match exactly, or settle rejects with
+    // ExpiryHeightMismatch (ADR-0006). DEFAULT_TX_EXPIRY_DELTA is 40
+    // blocks in zcash_client_backend.
+    let chain_tip_height = outcome.scanned_to_height.as_u32();
+    let expiry_height = chain_tip_height.saturating_add(41);
+    let prepared = call_prepare(
+        zpay_url,
+        &merchant_id,
+        network_label,
+        expiry_height,
+        &recipient,
+        amount_zat,
+        validity_seconds,
+    )
+    .await?;
     info!(
         payment_id = %prepared.payment_id,
         expiry_height = prepared.expiry_height,
@@ -324,23 +401,26 @@ async fn poll_until_confirmed(
     }
 }
 
+#[allow(clippy::too_many_arguments, reason = "thin RPC adapter; the natural shape mirrors the request body")]
 async fn call_prepare(
     zpay_url: &str,
     merchant_id: &str,
+    network_label: &str,
+    expiry_height: u32,
     recipient_unified_address: &str,
     amount_zat: u64,
     validity_seconds: u64,
 ) -> Result<PreparedPayment, HarnessError> {
     let body = PrepareRequestBody {
         merchant_id: merchant_id.to_owned(),
-        network: "testnet".to_owned(),
+        network: network_label.to_owned(),
         scheme: "zcash".to_owned(),
         recipient_unified_address: recipient_unified_address.to_owned(),
         amount_zat,
         challenge_hash: vec![0x11; 32],
         resource_hash: vec![0x22; 32],
         evidence_pack_hash: vec![0x33; 32],
-        expiry_height: 4_032_000,
+        expiry_height,
         validity_seconds,
         idempotency_key: None,
     };
@@ -583,5 +663,7 @@ enum HarnessError {
     Zat(String),
     #[error("polling /payments/{{payment_id}} timed out before a confirmation was observed")]
     PollTimedOut,
+    #[error("unsupported --network value: {0} (expected 'testnet' or 'regtest')")]
+    NetworkInvalid(String),
 }
 
