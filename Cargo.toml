@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/zpay-core",
+  "crates/zpay-e2e",
   "crates/zpay-mpp",
   "crates/zpay-runtime",
   "crates/zpay-store",
@@ -34,7 +35,7 @@ libsql = "0.9.30"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 parking_lot = "0.12.5"
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -58,6 +59,7 @@ zcash_protocol = "0.7.2"
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.
 zpay-core = { version = "0.1.0", path = "crates/zpay-core" }
+zpay-e2e = { version = "0.1.0", path = "crates/zpay-e2e" }
 zpay-mpp = { version = "0.1.0", path = "crates/zpay-mpp" }
 zpay-runtime = { version = "0.1.0", path = "crates/zpay-runtime" }
 zpay-store = { version = "0.1.0", path = "crates/zpay-store" }
@@ -68,13 +70,13 @@ zpay-x402 = { version = "0.1.0", path = "crates/zpay-x402" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca" }
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca", features = ["zinder"] }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "c2f70455ad7ee6b09f2985b05b6eda3f932cbb80" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "c2f70455ad7ee6b09f2985b05b6eda3f932cbb80" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "77272f73eace9b5b24697e002804dedc2ebe0021" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "77272f73eace9b5b24697e002804dedc2ebe0021" }
 
 [patch.crates-io]
 # Zebra (transitively pulled through zinder-client and zally-chain) resolves

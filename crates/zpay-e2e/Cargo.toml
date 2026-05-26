@@ -1,0 +1,38 @@
+[package]
+name = "zpay-e2e"
+description = "End-to-end testnet validator for the zpay facilitator: drives a zally wallet through prepare → propose → settle → poll against a running zpay-runtime + zinder."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "facilitator", "e2e", "testnet", "zpay"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zpay-e2e"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+hex.workspace = true
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zally-chain.workspace = true
+zally-core.workspace = true
+zally-keys.workspace = true
+zally-storage.workspace = true
+zally-wallet.workspace = true
+zcash_protocol.workspace = true
+zinder-client.workspace = true
+zpay-core.workspace = true
