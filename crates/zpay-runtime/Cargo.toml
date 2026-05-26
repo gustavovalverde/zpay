@@ -25,6 +25,7 @@ mpp = ["dep:zpay-mpp"]
 [dependencies]
 axum.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -32,6 +33,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sig
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zinder-client.workspace = true
 zpay-core.workspace = true
 zpay-mpp = { workspace = true, optional = true }
 zpay-store.workspace = true

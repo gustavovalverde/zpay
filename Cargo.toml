@@ -71,7 +71,7 @@ zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb4
 zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca", features = ["zinder"] }
 zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca" }
 zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "b1123fb435b64d2bb66b3dc1bf48bc4aa236d6ca", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "main" }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "c2f70455ad7ee6b09f2985b05b6eda3f932cbb80" }
 
 [patch.crates-io]
 # Zebra (transitively pulled through zinder-client and zally-chain) resolves

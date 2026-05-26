@@ -6,6 +6,8 @@
 //! M1; this scaffold only carries the env-var entry points needed to run
 //! `/healthz` and the x402 stub routes.
 
+mod zinder_broadcast;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -14,6 +16,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use clap::Parser;
+use zinder_broadcast::ZinderBroadcastClient;
+use zinder_client::Network as ZinderNetwork;
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::prepare::PreparedTxCache;
 use zpay_x402::AppState;
@@ -52,6 +56,12 @@ enum StartupError {
         #[source]
         source: tracing_subscriber::util::TryInitError,
     },
+    #[error("zinder broadcast client construction failed for endpoint {endpoint}: {source}")]
+    BroadcastClient {
+        endpoint: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 #[tokio::main]
@@ -66,7 +76,7 @@ async fn main() -> Result<(), StartupError> {
         return Ok(());
     }
 
-    let app_router = build_app_router();
+    let app_router = build_app_router(&config)?;
     let ops_router = build_ops_router();
 
     let app_listener = tokio::net::TcpListener::bind(config.app_bind_addr)
@@ -110,36 +120,74 @@ fn install_tracing() -> Result<(), StartupError> {
         .map_err(|source| StartupError::Tracing { source })
 }
 
-fn build_app_router() -> Router {
-    let state = AppState::new(
-        Arc::new(PreparedTxCache::new()),
-        Arc::new(RejectingBroadcastClient),
-    );
+fn build_app_router(config: &ResolvedConfig) -> Result<Router, StartupError> {
+    let chain = build_broadcast_client(config)?;
+    let state = AppState::new(Arc::new(PreparedTxCache::new()), Arc::new(chain));
     let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
 
     #[cfg(feature = "mpp")]
     let router = router.nest("/mpp/v1", zpay_mpp::router());
 
-    router.layer(tower_http::trace::TraceLayer::new_for_http())
+    Ok(router.layer(tower_http::trace::TraceLayer::new_for_http()))
 }
 
-/// Placeholder broadcast client that refuses every call.
-///
-/// Wired in until a production chain-plane client lands. Refusing every
-/// broadcast is more honest than silently swallowing the request: the
-/// settle handler reports `502 Bad Gateway` so callers know broadcast is
-/// not configured.
-struct RejectingBroadcastClient;
+fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient, StartupError> {
+    let Some(endpoint) = config.indexer_grpc_addr.clone() else {
+        tracing::warn!(
+            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; /x402/v2/settle will return 502 until a chain plane is configured",
+        );
+        return Ok(AnyBroadcastClient::Rejecting);
+    };
+    let zinder_network = zinder_network_from_str(&config.network);
+    let client =
+        ZinderBroadcastClient::connect(endpoint.clone(), zinder_network).map_err(|source| {
+            StartupError::BroadcastClient {
+                endpoint,
+                source: Box::new(source),
+            }
+        })?;
+    tracing::info!(
+        network = %config.network,
+        "zinder broadcast client wired",
+    );
+    Ok(AnyBroadcastClient::Zinder(Box::new(client)))
+}
 
-impl BroadcastClient for RejectingBroadcastClient {
-    async fn broadcast(
-        &self,
-        _raw_tx_hex: &str,
-    ) -> Result<BroadcastOutcome, BroadcastError> {
-        Err(BroadcastError::Unavailable {
-            reason: "broadcast client not configured; wire zinder-client to enable settle"
-                .to_owned(),
-        })
+const fn zinder_network_from_str(raw: &str) -> ZinderNetwork {
+    match raw.as_bytes() {
+        b"mainnet" => ZinderNetwork::ZcashMainnet,
+        b"testnet" => ZinderNetwork::ZcashTestnet,
+        _ => ZinderNetwork::ZcashRegtest,
+    }
+}
+
+/// Concrete broadcast client variant chosen at startup.
+///
+/// Using an enum (rather than `Arc<dyn BroadcastClient>`) keeps the
+/// `impl Future + Send` return type from [`BroadcastClient::broadcast`]
+/// statically resolvable without an `async-trait` allocation per call.
+enum AnyBroadcastClient {
+    /// Placeholder when no chain plane is configured. Every call returns
+    /// `BroadcastError::Unavailable` so the settle handler returns 502.
+    Rejecting,
+    /// Production client backed by zinder's `WalletQuery.BroadcastTransaction`.
+    ///
+    /// Boxed because the underlying `RemoteChainIndex` carries a tonic
+    /// `Endpoint` of several hundred bytes, while the `Rejecting` variant
+    /// is unit-sized; clippy's `large_enum_variant` rule prefers
+    /// indirection.
+    Zinder(Box<ZinderBroadcastClient>),
+}
+
+impl BroadcastClient for AnyBroadcastClient {
+    async fn broadcast(&self, raw_tx_hex: &str) -> Result<BroadcastOutcome, BroadcastError> {
+        match self {
+            Self::Rejecting => Err(BroadcastError::Unavailable {
+                reason: "broadcast client not configured; set ZPAY_NODE__INDEXER_GRPC_ADDR to enable settle"
+                    .to_owned(),
+            }),
+            Self::Zinder(client) => client.broadcast(raw_tx_hex).await,
+        }
     }
 }
 
@@ -170,6 +218,7 @@ struct ResolvedConfig {
     app_bind_addr: SocketAddr,
     ops_bind_addr: SocketAddr,
     network: String,
+    indexer_grpc_addr: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -179,6 +228,9 @@ impl ResolvedConfig {
         let ops_bind_raw =
             std::env::var("ZPAY_OPS__BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9295".to_string());
         let network = std::env::var("ZPAY_NETWORK").unwrap_or_else(|_| "regtest".to_string());
+        let indexer_grpc_addr = std::env::var("ZPAY_NODE__INDEXER_GRPC_ADDR")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty());
 
         let app_bind_addr = app_bind_raw
             .parse()
@@ -198,6 +250,7 @@ impl ResolvedConfig {
             app_bind_addr,
             ops_bind_addr,
             network,
+            indexer_grpc_addr,
         })
     }
 }
