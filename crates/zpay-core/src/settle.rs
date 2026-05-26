@@ -8,10 +8,13 @@
 //! preparation in cache so the agent can retry the wallet step without
 //! re-preparing.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use crate::prepare::PreparedTxCache;
+use crate::status::{SettlementLedger, SettlementLedgerEntry};
 use crate::types::{PaymentId, WatchId};
 
 /// Input to [`submit_settlement`].
@@ -81,6 +84,7 @@ pub enum SettleError {
 pub async fn submit_settlement<C: BroadcastClient>(
     request: SettleRequest,
     cache: &PreparedTxCache,
+    ledger: &SettlementLedger,
     chain: &C,
 ) -> Result<SettlementOutcome, SettleError> {
     validate_raw_tx_hex(&request.raw_tx_hex)?;
@@ -101,6 +105,14 @@ pub async fn submit_settlement<C: BroadcastClient>(
             }
         })?;
 
+    ledger.record(
+        request.payment_id.clone(),
+        SettlementLedgerEntry {
+            broadcast_outcome: outcome.clone(),
+            settled_at_unix_seconds: current_unix_seconds(),
+        },
+    );
+
     let watch_id = if outcome.is_success_kind() {
         cache.remove(&request.payment_id);
         Some(WatchId(format!("watch_{}", request.payment_id)))
@@ -113,6 +125,13 @@ pub async fn submit_settlement<C: BroadcastClient>(
         broadcast_outcome: outcome,
         watch_id,
     })
+}
+
+fn current_unix_seconds() -> i64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(now.as_secs()).unwrap_or(i64::MAX)
 }
 
 fn validate_raw_tx_hex(raw_tx_hex: &str) -> Result<(), SettleError> {
@@ -132,6 +151,7 @@ mod tests {
     use super::{SettleError, SettleRequest, submit_settlement};
     use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
     use crate::prepare::{ChallengeHash, PrepareRequest, PreparedTxCache, ResourceHash, propose};
+    use crate::status::SettlementLedger;
     use crate::types::{EvidencePackHash, MerchantId, PaymentNetwork, PaymentScheme, Zatoshis};
 
     struct FakeChain {
@@ -180,6 +200,7 @@ mod tests {
     async fn accepted_broadcast_returns_watch_id_and_removes_preparation()
     -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -192,6 +213,7 @@ mod tests {
                 raw_tx_hex: "0500000080".to_owned(),
             },
             &cache,
+            &ledger,
             &chain,
         )
         .await
@@ -207,6 +229,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_broadcast_keeps_preparation_for_retry() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Rejected {
@@ -219,6 +242,7 @@ mod tests {
                 raw_tx_hex: "0500000080".to_owned(),
             },
             &cache,
+            &ledger,
             &chain,
         )
         .await
@@ -236,6 +260,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_payment_id_returns_preparation_not_found() {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
@@ -244,7 +269,7 @@ mod tests {
             raw_tx_hex: "0500000080".to_owned(),
         };
 
-        let outcome = submit_settlement(request, &cache, &chain).await;
+        let outcome = submit_settlement(request, &cache, &ledger, &chain).await;
         assert!(matches!(
             outcome,
             Err(SettleError::PreparationNotFound { .. })
@@ -254,6 +279,7 @@ mod tests {
     #[tokio::test]
     async fn empty_raw_tx_hex_returns_raw_tx_hex_invalid() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -266,6 +292,7 @@ mod tests {
                 raw_tx_hex: String::new(),
             },
             &cache,
+            &ledger,
             &chain,
         )
         .await;
@@ -277,6 +304,7 @@ mod tests {
     #[tokio::test]
     async fn odd_length_raw_tx_hex_returns_raw_tx_hex_invalid() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -289,6 +317,7 @@ mod tests {
                 raw_tx_hex: "abc".to_owned(),
             },
             &cache,
+            &ledger,
             &chain,
         )
         .await;
@@ -300,6 +329,7 @@ mod tests {
     #[tokio::test]
     async fn chain_unavailable_returns_chain_unavailable_error() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
         let preparation = propose(valid_prepare_request(), &cache)
             .map_err(|_| "propose must accept valid input")?;
         let chain = UnavailableChain;
@@ -310,6 +340,7 @@ mod tests {
                 raw_tx_hex: "0500000080".to_owned(),
             },
             &cache,
+            &ledger,
             &chain,
         )
         .await;

@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Json, State};
+use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -35,11 +35,16 @@ use serde::Serialize;
 use zpay_core::broadcast::BroadcastClient;
 use zpay_core::prepare::{Preparation, PrepareError, PrepareRequest, PreparedTxCache, propose};
 use zpay_core::settle::{SettleError, SettleRequest, SettlementOutcome, submit_settlement};
+use zpay_core::status::{PaymentStatusSnapshot, SettlementLedger, lookup_payment_status};
+use zpay_core::types::PaymentId;
 
 /// Shared application state injected into every x402 v2 handler.
 pub struct AppState<C> {
     /// Cache holding prepared transactions awaiting settlement.
     pub cache: Arc<PreparedTxCache>,
+    /// Settlement ledger holding the last broadcast outcome per
+    /// `payment_id`. Read by `GET /payments/{id}` and written by `settle`.
+    pub ledger: Arc<SettlementLedger>,
     /// Chain plane abstraction used for broadcast. Wrapped in `Arc` so the
     /// state stays `Clone`; the underlying client is `Send + Sync` per the
     /// [`BroadcastClient`] contract.
@@ -52,17 +57,22 @@ impl<C> Clone for AppState<C> {
     fn clone(&self) -> Self {
         Self {
             cache: Arc::clone(&self.cache),
+            ledger: Arc::clone(&self.ledger),
             chain: Arc::clone(&self.chain),
         }
     }
 }
 
 impl<C> AppState<C> {
-    /// Build a fresh shared state from the supplied cache and broadcast
-    /// client.
+    /// Build a fresh shared state from the supplied cache, settlement
+    /// ledger, and broadcast client.
     #[must_use]
-    pub fn new(cache: Arc<PreparedTxCache>, chain: Arc<C>) -> Self {
-        Self { cache, chain }
+    pub fn new(cache: Arc<PreparedTxCache>, ledger: Arc<SettlementLedger>, chain: Arc<C>) -> Self {
+        Self {
+            cache,
+            ledger,
+            chain,
+        }
     }
 }
 
@@ -77,7 +87,7 @@ pub fn router<C: BroadcastClient + 'static>(state: AppState<C>) -> Router {
         .route("/prepare", post(prepare_handler::<C>))
         .route("/settle", post(settle_handler::<C>))
         .route("/verify", post(not_yet_implemented))
-        .route("/payments/{payment_id}", get(not_yet_implemented))
+        .route("/payments/{payment_id}", get(payment_status_handler::<C>))
         .with_state(state)
 }
 
@@ -95,10 +105,18 @@ async fn settle_handler<C: BroadcastClient + 'static>(
     State(state): State<AppState<C>>,
     Json(body): Json<SettleRequest>,
 ) -> Response {
-    match submit_settlement(body, &state.cache, state.chain.as_ref()).await {
+    match submit_settlement(body, &state.cache, &state.ledger, state.chain.as_ref()).await {
         Ok(outcome) => json_ok(&SettleResponseBody { data: outcome }),
         Err(err) => settle_error_response(&err),
     }
+}
+
+async fn payment_status_handler<C: BroadcastClient + 'static>(
+    State(state): State<AppState<C>>,
+    Path(payment_id): Path<String>,
+) -> Response {
+    let snapshot = lookup_payment_status(&PaymentId(payment_id), &state.cache, &state.ledger);
+    json_ok(&PaymentStatusResponseBody { data: snapshot })
 }
 
 #[derive(Serialize)]
@@ -109,6 +127,11 @@ struct PrepareResponseBody {
 #[derive(Serialize)]
 struct SettleResponseBody {
     data: SettlementOutcome,
+}
+
+#[derive(Serialize)]
+struct PaymentStatusResponseBody {
+    data: PaymentStatusSnapshot,
 }
 
 fn json_ok<T: Serialize>(body: &T) -> Response {

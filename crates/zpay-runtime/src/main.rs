@@ -20,6 +20,7 @@ use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::prepare::PreparedTxCache;
+use zpay_core::status::SettlementLedger;
 use zpay_x402::AppState;
 
 /// zpay facilitator runtime.
@@ -122,7 +123,11 @@ fn install_tracing() -> Result<(), StartupError> {
 
 fn build_app_router(config: &ResolvedConfig) -> Result<Router, StartupError> {
     let chain = build_broadcast_client(config)?;
-    let state = AppState::new(Arc::new(PreparedTxCache::new()), Arc::new(chain));
+    let state = AppState::new(
+        Arc::new(PreparedTxCache::new()),
+        Arc::new(SettlementLedger::new()),
+        Arc::new(chain),
+    );
     let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
 
     #[cfg(feature = "mpp")]
