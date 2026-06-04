@@ -1,9 +1,10 @@
 //! Storage-trait abstractions for zpay's stateful tables.
 //!
-//! [`PreparedTxStore`] and [`SettlementLedgerStore`] sit between the
-//! protocol-neutral [`prepare`][crate::prepare] / [`settle`][crate::settle]
-//! / [`status`][crate::status] paths and whatever persistence layer the
-//! runtime composes. Two implementations exist:
+//! [`PreparedTxStore`][crate::prepare::PreparedTxStore] and
+//! [`SettlementLedgerStore`][crate::status::SettlementLedgerStore] sit
+//! between the protocol-neutral [`prepare`][crate::prepare] /
+//! [`settle`][crate::settle] / [`status`][crate::status] paths and
+//! whatever persistence layer the runtime composes. Two implementations exist:
 //!
 //! - An in-memory variant (in [`crate::prepare::PreparedTxCache`] and
 //!   [`crate::status::SettlementLedger`]) that lives in this crate

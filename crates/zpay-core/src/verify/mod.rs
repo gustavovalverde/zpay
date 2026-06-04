@@ -8,7 +8,7 @@
 //! - [`CryptographicVerdict`] answers "are the disclosure bytes
 //!   well-formed and is every signature valid?". Runs entirely
 //!   in-process via [`local::LocalPaymentDisclosureVerifier`], which
-//!   composes [`parse_zip311`], [`digest`], and [`transparent`].
+//!   composes [`mod@parse_zip311`], [`digest`], and [`transparent`].
 //! - [`ChainPresence`] answers "is the disclosed transaction visible
 //!   on the chain plane?". Driven by the
 //!   [`crate::transaction_fetcher::TransactionFetcher`] outcome.

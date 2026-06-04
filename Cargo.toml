@@ -70,13 +70,13 @@ zpay-x402 = { version = "0.1.0", path = "crates/zpay-x402" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "f575cc70a784da16f19fe5573caa4dfd86bf4cb6", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "77272f73eace9b5b24697e002804dedc2ebe0021" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "77272f73eace9b5b24697e002804dedc2ebe0021" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "ca7fde9f0b28cf12cdcd2248a1b7759656357bbf" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "ca7fde9f0b28cf12cdcd2248a1b7759656357bbf" }
 
 [patch.crates-io]
 # Zebra (transitively pulled through zinder-client and zally-chain) resolves

@@ -7,7 +7,31 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+# Each entry names the crate, the dependency path, and why the fix is
+# not yet actionable. Revisit when zally bumps zcash_client_backend
+# past time-core =0.1.2 and when libsql moves past hyper-rustls 0.25.
+ignore = [
+    # rustls-webpki vulnerabilities, all reachable only through libsql ->
+    # hyper-rustls 0.25 -> rustls 0.22 -> rustls-webpki 0.102.8. zpay does
+    # not terminate TLS itself (Railway handles that); libsql connects to
+    # Turso over an operator-pinned URL, not to attacker-controlled hosts.
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki CRL Distribution Point matching; libsql 0.9.30 path; no attacker-controlled TLS peer" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki name constraints (URI); libsql 0.9.30 path; clears when libsql lifts to hyper-rustls >=0.27" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki name constraints (wildcard); libsql 0.9.30 path; clears when libsql lifts to hyper-rustls >=0.27" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parser panic; libsql 0.9.30 path; no operator-controlled CRL ingestion in zpay" },
+
+    # time 0.3.37 DoS on RFC 2822 parsing. Pinned through rusqlite 0.37,
+    # jsonwebtoken 9.3, and zcash_client_backend 0.23. zcash_client_backend
+    # has `time-core = "=0.1.2"`, so the patched time >=0.3.47 requires a
+    # zally rev that ships a newer zcash_client_backend. zpay does not parse
+    # RFC 2822 input; the only consumer surface is JWT iat/exp via jsonwebtoken.
+    { id = "RUSTSEC-2026-0009", reason = "time RFC 2822 DoS; no RFC 2822 parsing on zpay's wire; bump tracks zcash_client_backend upgrade" },
+
+    # Unmaintained crates with no safe upgrade path. All transitive.
+    { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained; transitive through libsql replication; not on any external-input path" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive through clap derive; compile-time only" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive through libsql -> hyper-rustls 0.25; clears with libsql bump" },
+]
 
 [licenses]
 version = 2

@@ -207,7 +207,7 @@ impl PaymentEventHub {
     /// the confirmation oracle can both call into the hub concurrently,
     /// and a `Settled(conf=None)` publish may interleave with a
     /// `Settled(conf=Some(n))` publish in either order. That interleave
-    /// is safe in practice because [`EventStream`] closes inclusively on
+    /// is safe in practice because the SSE stream closes inclusively on
     /// the first terminal snapshot it observes: regardless of which
     /// terminal lands first, the subscriber sees exactly one terminal
     /// event and the stream ends. Callers that need stricter ordering
