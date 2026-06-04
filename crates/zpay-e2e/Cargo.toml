@@ -23,7 +23,6 @@ clap = { workspace = true, features = ["derive", "env"] }
 hex.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing.workspace = true
@@ -33,6 +32,4 @@ zally-core.workspace = true
 zally-keys.workspace = true
 zally-storage.workspace = true
 zally-wallet.workspace = true
-zcash_protocol.workspace = true
-zinder-client.workspace = true
 zpay-core.workspace = true

@@ -7319,7 +7319,6 @@ dependencies = [
  "hex",
  "reqwest",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7329,8 +7328,6 @@ dependencies = [
  "zally-keys",
  "zally-storage",
  "zally-wallet",
- "zcash_protocol 0.7.2",
- "zinder-client",
  "zpay-core",
 ]
 
@@ -7344,7 +7341,6 @@ dependencies = [
  "hex",
  "parking_lot",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -7363,10 +7359,8 @@ dependencies = [
 name = "zpay-store"
 version = "0.1.0"
 dependencies = [
- "hex",
  "libsql",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "zpay-core",
@@ -7379,7 +7373,6 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "futures",
- "http 1.4.0",
  "jsonwebtoken",
  "p256",
  "parking_lot",

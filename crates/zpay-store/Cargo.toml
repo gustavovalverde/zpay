@@ -14,10 +14,8 @@ categories = ["database", "network-programming"]
 workspace = true
 
 [dependencies]
-hex.workspace = true
 libsql.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-thiserror.workspace = true
 tracing.workspace = true
 zpay-core = { workspace = true, default-features = false }
 

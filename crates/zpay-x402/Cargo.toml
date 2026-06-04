@@ -17,7 +17,6 @@ workspace = true
 axum.workspace = true
 base64.workspace = true
 futures.workspace = true
-http.workspace = true
 jsonwebtoken = { workspace = true, features = ["use_pem"] }
 p256 = { workspace = true }
 parking_lot.workspace = true
