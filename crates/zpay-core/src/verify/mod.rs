@@ -286,9 +286,7 @@ mod tests {
         CryptographicVerdict, LocalPaymentDisclosureVerifier, VerifyError, VerifyRequest,
         VerifyResponse, verify,
     };
-    use crate::transaction_fetcher::{
-        DisclosedTransaction, FetchError, TransactionFetcher,
-    };
+    use crate::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
     use crate::types::{PaymentNetwork, Zatoshis};
     use crate::verify::parse_zip311::{
         ZIP311_VERSION_V1, Zip311Disclosure, Zip311TransparentInput, encode_signed,

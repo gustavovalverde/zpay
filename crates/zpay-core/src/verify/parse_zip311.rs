@@ -91,8 +91,7 @@ impl Zip311Disclosure {
     #[must_use]
     pub fn pool(&self) -> DisclosurePool {
         let has_transparent = !self.transparent_inputs.is_empty();
-        let has_sapling =
-            !self.sapling_spends.is_empty() || !self.sapling_outputs.is_empty();
+        let has_sapling = !self.sapling_spends.is_empty() || !self.sapling_outputs.is_empty();
         match (has_transparent, has_sapling) {
             (true, false) => DisclosurePool::Transparent,
             (false, true) => DisclosurePool::Sapling,
@@ -371,7 +370,10 @@ pub fn encode_unsigned(disclosure: &Zip311Disclosure) -> Vec<u8> {
     write_compact_size(&mut out, u64_from_usize(disclosure.message.len()));
     out.extend_from_slice(&disclosure.message);
 
-    write_compact_size(&mut out, u64_from_usize(disclosure.transparent_inputs.len()));
+    write_compact_size(
+        &mut out,
+        u64_from_usize(disclosure.transparent_inputs.len()),
+    );
     for input in &disclosure.transparent_inputs {
         write_compact_size(&mut out, u64::from(input.index));
         // NO sig_len/sig in the unsigned form.
@@ -415,7 +417,10 @@ pub fn encode_signed(disclosure: &Zip311Disclosure) -> Vec<u8> {
     write_compact_size(&mut out, u64_from_usize(disclosure.message.len()));
     out.extend_from_slice(&disclosure.message);
 
-    write_compact_size(&mut out, u64_from_usize(disclosure.transparent_inputs.len()));
+    write_compact_size(
+        &mut out,
+        u64_from_usize(disclosure.transparent_inputs.len()),
+    );
     for input in &disclosure.transparent_inputs {
         write_compact_size(&mut out, u64::from(input.index));
         write_compact_size(&mut out, u64_from_usize(input.signature.len()));
@@ -497,10 +502,13 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_u8(&mut self) -> Result<u8, Zip311ParseError> {
-        let byte = *self.bytes.get(self.offset).ok_or(Zip311ParseError::Truncated {
-            offset: self.offset,
-            needed: 1,
-        })?;
+        let byte = *self
+            .bytes
+            .get(self.offset)
+            .ok_or(Zip311ParseError::Truncated {
+                offset: self.offset,
+                needed: 1,
+            })?;
         self.offset += 1;
         Ok(byte)
     }
@@ -621,8 +629,8 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DisclosurePool, ZIP311_VERSION_V1, Zip311Disclosure, Zip311ParseError, Zip311TransparentInput,
-        encode_signed, encode_unsigned, parse,
+        DisclosurePool, ZIP311_VERSION_V1, Zip311Disclosure, Zip311ParseError,
+        Zip311TransparentInput, encode_signed, encode_unsigned, parse,
     };
 
     fn transparent_disclosure_fixture() -> Zip311Disclosure {
@@ -692,11 +700,43 @@ mod tests {
         let bytes = vec![
             ZIP311_VERSION_V1,
             // 32-byte txid
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
             // non-minimal msg_len: 0xFD prefix encoding 0x0010 (16),
             // which fits in one byte (< 0xFD).
-            0xFD, 0x10, 0x00,
+            0xFD,
+            0x10,
+            0x00,
         ];
         let outcome = parse(&bytes);
         assert!(matches!(

@@ -33,10 +33,9 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         payment_id: PaymentId,
         entry: SettlementLedgerEntry,
     ) -> Result<(), StoreError> {
-        let (kind, transaction_id, upstream_message) = encode_broadcast_outcome(&entry.broadcast_outcome);
-        let confirmation_count = entry
-            .confirmation_count
-            .map(i64::from);
+        let (kind, transaction_id, upstream_message) =
+            encode_broadcast_outcome(&entry.broadcast_outcome);
+        let confirmation_count = entry.confirmation_count.map(i64::from);
         let mined_block_height = entry
             .mined_block_height
             .map(|height| i64::try_from(height).unwrap_or(i64::MAX));
@@ -85,7 +84,11 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             )
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
-        let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? else {
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+        else {
             return Ok(None);
         };
         Ok(Some(row_to_settlement_ledger_entry(&row)?))
@@ -112,9 +115,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         })
     }
 
-    async fn success_kind_transactions(
-        &self,
-    ) -> Result<Vec<(PaymentId, String)>, StoreError> {
+    async fn success_kind_transactions(&self) -> Result<Vec<(PaymentId, String)>, StoreError> {
         let mut rows = self
             .connection
             .query(
@@ -127,14 +128,17 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
         let mut pairs = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+        {
             let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
                 reason: format!("payment_id read failed: {err}"),
             })?;
-            let transaction_id: String =
-                row.get(1).map_err(|err| StoreError::RowMalformed {
-                    reason: format!("transaction_id read failed: {err}"),
-                })?;
+            let transaction_id: String = row.get(1).map_err(|err| StoreError::RowMalformed {
+                reason: format!("transaction_id read failed: {err}"),
+            })?;
             pairs.push((PaymentId(payment_id), transaction_id));
         }
         Ok(pairs)
@@ -211,31 +215,25 @@ fn encode_broadcast_outcome(
     }
 }
 
-fn row_to_settlement_ledger_entry(
-    row: &libsql::Row,
-) -> Result<SettlementLedgerEntry, StoreError> {
+fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerEntry, StoreError> {
     let kind: String = row.get(0).map_err(|err| StoreError::RowMalformed {
         reason: format!("broadcast_outcome_kind read failed: {err}"),
     })?;
-    let transaction_id: Option<String> =
-        row.get(1).map_err(|err| StoreError::RowMalformed {
-            reason: format!("transaction_id read failed: {err}"),
-        })?;
-    let upstream_message: Option<String> =
-        row.get(2).map_err(|err| StoreError::RowMalformed {
-            reason: format!("upstream_message read failed: {err}"),
-        })?;
+    let transaction_id: Option<String> = row.get(1).map_err(|err| StoreError::RowMalformed {
+        reason: format!("transaction_id read failed: {err}"),
+    })?;
+    let upstream_message: Option<String> = row.get(2).map_err(|err| StoreError::RowMalformed {
+        reason: format!("upstream_message read failed: {err}"),
+    })?;
     let settled_at_unix_seconds: i64 = row.get(3).map_err(|err| StoreError::RowMalformed {
         reason: format!("settled_at_unix_seconds read failed: {err}"),
     })?;
-    let confirmation_count: Option<i64> =
-        row.get(4).map_err(|err| StoreError::RowMalformed {
-            reason: format!("confirmation_count read failed: {err}"),
-        })?;
-    let mined_block_height: Option<i64> =
-        row.get(5).map_err(|err| StoreError::RowMalformed {
-            reason: format!("mined_block_height read failed: {err}"),
-        })?;
+    let confirmation_count: Option<i64> = row.get(4).map_err(|err| StoreError::RowMalformed {
+        reason: format!("confirmation_count read failed: {err}"),
+    })?;
+    let mined_block_height: Option<i64> = row.get(5).map_err(|err| StoreError::RowMalformed {
+        reason: format!("mined_block_height read failed: {err}"),
+    })?;
 
     let broadcast_outcome = match kind.as_str() {
         "accepted" => BroadcastOutcome::Accepted {
@@ -265,17 +263,17 @@ fn row_to_settlement_ledger_entry(
     Ok(SettlementLedgerEntry {
         broadcast_outcome,
         settled_at_unix_seconds,
-        confirmation_count: confirmation_count
-            .map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
-        mined_block_height: mined_block_height
-            .map(|raw| u64::try_from(raw).unwrap_or(0)),
+        confirmation_count: confirmation_count.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
+        mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
     })
 }
 
 fn libsql_to_store_error(err: &libsql::Error) -> StoreError {
     let message = err.to_string();
     if message.contains("UNIQUE") {
-        return StoreError::IntegrityViolation { constraint: message };
+        return StoreError::IntegrityViolation {
+            constraint: message,
+        };
     }
     StoreError::Unavailable { reason: message }
 }

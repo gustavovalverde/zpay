@@ -104,10 +104,7 @@ fn verify_input(
     input: &Zip311TransparentInput,
     message: &[u8],
 ) -> InputOutcome {
-    let Some(vin) = transaction
-        .transparent_inputs
-        .get(input.index as usize)
-    else {
+    let Some(vin) = transaction.transparent_inputs.get(input.index as usize) else {
         return InputOutcome::PrevoutUnresolved;
     };
     if vin.prevout_script_pub_key.is_empty() {
@@ -313,8 +310,7 @@ mod tests {
     ) -> Result<(DisclosedTransaction, Zip311TransparentInput), Box<dyn std::error::Error>> {
         let (sk, pk) = tests_support::deterministic_keypair().ok_or("keypair")?;
         let h160 = tests_support::hash160_pubkey_compressed(&pk);
-        let (signature, _digest) =
-            tests_support::sign_bip322_legacy(&sk, message).ok_or("sign")?;
+        let (signature, _digest) = tests_support::sign_bip322_legacy(&sk, message).ok_or("sign")?;
         let script = tests_support::p2pkh_script(&h160);
 
         let tx = DisclosedTransaction {

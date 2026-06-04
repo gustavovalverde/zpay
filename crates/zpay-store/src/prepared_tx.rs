@@ -38,11 +38,10 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
         // impl's `HashMap::insert` replace-on-collision behaviour.
         let network = network_to_sql(entry.network);
         let memo_bytes = entry.preparation.memo_bytes.clone();
-        let amount_zat = i64::try_from(entry.amount_zat.0).map_err(|_| {
-            StoreError::IntegrityViolation {
+        let amount_zat =
+            i64::try_from(entry.amount_zat.0).map_err(|_| StoreError::IntegrityViolation {
                 constraint: "amount_zat exceeds i64".to_owned(),
-            }
-        })?;
+            })?;
         let expiry_height = i64::from(entry.preparation.expiry_height);
         let expires_at = i64::try_from(entry.expires_at_unix_seconds).map_err(|_| {
             StoreError::IntegrityViolation {
@@ -100,7 +99,11 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
             )
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
-        let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? else {
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+        else {
             return Ok(None);
         };
         Ok(Some(row_to_prepared_tx_entry(&row)?))
@@ -123,16 +126,17 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
             )
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
-        let Some(row) = rows.next().await.map_err(|err| libsql_to_store_error(&err))? else {
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+        else {
             return Ok(None);
         };
         Ok(Some(row_to_prepared_tx_entry(&row)?))
     }
 
-    async fn remove(
-        &self,
-        payment_id: &PaymentId,
-    ) -> Result<Option<PreparedTxEntry>, StoreError> {
+    async fn remove(&self, payment_id: &PaymentId) -> Result<Option<PreparedTxEntry>, StoreError> {
         let existing = self.find_by_payment_id(payment_id).await?;
         if existing.is_some() {
             self.connection
@@ -147,10 +151,8 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
     }
 
     async fn sweep_expired(&self, now_unix_seconds: u64) -> Result<usize, StoreError> {
-        let now = i64::try_from(now_unix_seconds).map_err(|_| {
-            StoreError::IntegrityViolation {
-                constraint: "now_unix_seconds exceeds i64".to_owned(),
-            }
+        let now = i64::try_from(now_unix_seconds).map_err(|_| StoreError::IntegrityViolation {
+            constraint: "now_unix_seconds exceeds i64".to_owned(),
         })?;
         let dropped = self
             .connection
@@ -197,10 +199,9 @@ fn row_to_prepared_tx_entry(row: &libsql::Row) -> Result<PreparedTxEntry, StoreE
     let network: String = row.get(2).map_err(|err| StoreError::RowMalformed {
         reason: format!("network read failed: {err}"),
     })?;
-    let recipient_unified_address: String =
-        row.get(3).map_err(|err| StoreError::RowMalformed {
-            reason: format!("recipient_unified_address read failed: {err}"),
-        })?;
+    let recipient_unified_address: String = row.get(3).map_err(|err| StoreError::RowMalformed {
+        reason: format!("recipient_unified_address read failed: {err}"),
+    })?;
     let amount_zat_raw: i64 = row.get(4).map_err(|err| StoreError::RowMalformed {
         reason: format!("amount_zat read failed: {err}"),
     })?;
@@ -228,19 +229,19 @@ fn row_to_prepared_tx_entry(row: &libsql::Row) -> Result<PreparedTxEntry, StoreE
     let agent_dpop_jkt: String = row.get(7).map_err(|err| StoreError::RowMalformed {
         reason: format!("agent_dpop_jkt read failed: {err}"),
     })?;
-    let idempotency_key: Option<String> =
-        row.get(8).map_err(|err| StoreError::RowMalformed {
-            reason: format!("idempotency_key read failed: {err}"),
-        })?;
+    let idempotency_key: Option<String> = row.get(8).map_err(|err| StoreError::RowMalformed {
+        reason: format!("idempotency_key read failed: {err}"),
+    })?;
     let expires_at_raw: i64 = row.get(9).map_err(|err| StoreError::RowMalformed {
         reason: format!("expires_at_unix_seconds read failed: {err}"),
     })?;
 
-    let amount_zat = Zatoshis(u64::try_from(amount_zat_raw).map_err(|_| {
-        StoreError::RowMalformed {
-            reason: "amount_zat does not fit u64".to_owned(),
-        }
-    })?);
+    let amount_zat =
+        Zatoshis(
+            u64::try_from(amount_zat_raw).map_err(|_| StoreError::RowMalformed {
+                reason: "amount_zat does not fit u64".to_owned(),
+            })?,
+        );
 
     // Re-derive payment_uri from persisted components instead of
     // storing it as a redundant column. Every byte of the URI is a
@@ -304,7 +305,9 @@ fn sql_to_network(raw: &str) -> Result<PaymentNetwork, StoreError> {
 fn libsql_to_store_error(err: &libsql::Error) -> StoreError {
     let message = err.to_string();
     if message.contains("UNIQUE") {
-        return StoreError::IntegrityViolation { constraint: message };
+        return StoreError::IntegrityViolation {
+            constraint: message,
+        };
     }
     StoreError::Unavailable { reason: message }
 }

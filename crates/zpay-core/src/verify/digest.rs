@@ -100,7 +100,9 @@ const fn coin_type_for(network: PaymentNetwork) -> u32 {
 mod tests {
     use super::{COIN_TYPE_MAINNET, COIN_TYPE_TESTNET, compute};
     use crate::types::PaymentNetwork;
-    use crate::verify::parse_zip311::{ZIP311_VERSION_V1, Zip311Disclosure, Zip311TransparentInput};
+    use crate::verify::parse_zip311::{
+        ZIP311_VERSION_V1, Zip311Disclosure, Zip311TransparentInput,
+    };
 
     fn fixture() -> Zip311Disclosure {
         Zip311Disclosure {

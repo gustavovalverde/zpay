@@ -24,8 +24,7 @@ pub(crate) struct RejectingTransactionFetcher;
 
 impl RejectingTransactionFetcher {
     /// Operator-facing reason carried on every [`FetchError::Unavailable`].
-    pub(crate) const REASON: &'static str =
-        "transaction fetcher not configured; set ZPAY_NODE__EXPLORER_GRPC_ADDR to surface mined chain_presence on /verify";
+    pub(crate) const REASON: &'static str = "transaction fetcher not configured; set ZPAY_NODE__EXPLORER_GRPC_ADDR to surface mined chain_presence on /verify";
 
     /// Construct the fetcher. Stateless; `new` is here for symmetry
     /// with the other variants.
@@ -35,10 +34,7 @@ impl RejectingTransactionFetcher {
 }
 
 impl TransactionFetcher for RejectingTransactionFetcher {
-    async fn fetch_transaction(
-        &self,
-        _txid: [u8; 32],
-    ) -> Result<DisclosedTransaction, FetchError> {
+    async fn fetch_transaction(&self, _txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         Err(FetchError::Unavailable {
             reason: Self::REASON.to_owned(),
         })

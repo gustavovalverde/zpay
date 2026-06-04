@@ -44,8 +44,8 @@ use zpay_core::prepare::{PrepareError, PrepareRequest, PreparedTxStore, propose}
 use zpay_core::settle::{SettleError, SettleRequest, submit_settlement};
 use zpay_core::status::{SettlementLedgerStore, lookup_payment_status};
 use zpay_core::tip::{ChainTip, ChainTipOracle, TipError};
-use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::transaction_fetcher::TransactionFetcher;
+use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::{PaymentDisclosureVerifier, VerifyError, VerifyRequest, verify};
 
 pub use dpop::{
@@ -375,20 +375,17 @@ where
             "payee_id query parameter is required",
         );
     };
-    state
-        .payees
-        .find(&PayeeId(payee_id.clone()))
-        .map_or_else(
-            || {
-                problem_response(
-                    StatusCode::NOT_FOUND,
-                    "Not Found",
-                    404,
-                    &format!("payee_id {payee_id:?} is not registered with this deployment"),
-                )
-            },
-            |entries| json_ok(&entries.to_vec()),
-        )
+    state.payees.find(&PayeeId(payee_id.clone())).map_or_else(
+        || {
+            problem_response(
+                StatusCode::NOT_FOUND,
+                "Not Found",
+                404,
+                &format!("payee_id {payee_id:?} is not registered with this deployment"),
+            )
+        },
+        |entries| json_ok(&entries.to_vec()),
+    )
 }
 
 async fn tip_handler<C, V, P, L, T, F>(
@@ -814,8 +811,14 @@ mod host_pinning_tests {
 
     fn headers_with(host: &str, proof: &str) -> Result<HeaderMap, Box<dyn std::error::Error>> {
         let mut h = HeaderMap::new();
-        h.insert(HeaderName::from_static("host"), HeaderValue::from_str(host)?);
-        h.insert(HeaderName::from_static("dpop"), HeaderValue::from_str(proof)?);
+        h.insert(
+            HeaderName::from_static("host"),
+            HeaderValue::from_str(host)?,
+        );
+        h.insert(
+            HeaderName::from_static("dpop"),
+            HeaderValue::from_str(proof)?,
+        );
         Ok(h)
     }
 
@@ -854,7 +857,10 @@ mod host_pinning_tests {
         let proof = mint_proof_with_htu("https://zpay.example.com/x402/v2/prepare")?;
         let uri: Uri = "/x402/v2/prepare".parse()?;
         let mut headers = HeaderMap::new();
-        headers.insert(HeaderName::from_static("dpop"), HeaderValue::from_str(&proof)?);
+        headers.insert(
+            HeaderName::from_static("dpop"),
+            HeaderValue::from_str(&proof)?,
+        );
         verify_request_dpop("POST", &uri, &headers, &replay, &expectations).await?;
         Ok(())
     }

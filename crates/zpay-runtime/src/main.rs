@@ -206,7 +206,8 @@ async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupEr
     let events = Arc::new(PaymentEventHub::new());
 
     let expectations = build_dpop_expectations(config);
-    let replay_store: Arc<dyn zpay_x402::DpopReplayStore> = Arc::new(DpopInMemoryReplayStore::new());
+    let replay_store: Arc<dyn zpay_x402::DpopReplayStore> =
+        Arc::new(DpopInMemoryReplayStore::new());
     let state = AppState::new(
         Arc::clone(&prepared_store),
         Arc::clone(&ledger),
@@ -248,15 +249,13 @@ async fn build_stores(
             ))
         }
         "libsql" => {
-            let connection = open_and_migrate(
-                &config.store_url,
-                config.store_auth_token.as_deref(),
-            )
-            .await
-            .map_err(|source| StartupError::StoreBackend {
-                backend: "libsql".to_owned(),
-                source,
-            })?;
+            let connection =
+                open_and_migrate(&config.store_url, config.store_auth_token.as_deref())
+                    .await
+                    .map_err(|source| StartupError::StoreBackend {
+                        backend: "libsql".to_owned(),
+                        source,
+                    })?;
             tracing::info!(
                 backend = "libsql",
                 store_url = %config.store_url,
@@ -312,10 +311,7 @@ impl PreparedTxStore for AnyPreparedTxStore {
         }
     }
 
-    async fn remove(
-        &self,
-        payment_id: &PaymentId,
-    ) -> Result<Option<PreparedTxEntry>, StoreError> {
+    async fn remove(&self, payment_id: &PaymentId) -> Result<Option<PreparedTxEntry>, StoreError> {
         match self {
             Self::Memory(inner) => inner.remove(payment_id).await,
             Self::Libsql(inner) => inner.remove(payment_id).await,
@@ -372,9 +368,7 @@ impl SettlementLedgerStore for AnySettlementLedgerStore {
         }
     }
 
-    async fn success_kind_transactions(
-        &self,
-    ) -> Result<Vec<(PaymentId, String)>, StoreError> {
+    async fn success_kind_transactions(&self) -> Result<Vec<(PaymentId, String)>, StoreError> {
         match self {
             Self::Memory(inner) => inner.success_kind_transactions().await,
             Self::Libsql(inner) => inner.success_kind_transactions().await,
@@ -460,12 +454,14 @@ fn spawn_confirmation_oracle(
         );
         return Ok(());
     };
-    let oracle =
-        ZinderConfirmationOracle::connect(endpoint.clone(), zinder_network_from_str(&config.network)?)
-            .map_err(|source| StartupError::BroadcastClient {
-                endpoint,
-                source: Box::new(source),
-            })?;
+    let oracle = ZinderConfirmationOracle::connect(
+        endpoint.clone(),
+        zinder_network_from_str(&config.network)?,
+    )
+    .map_err(|source| StartupError::BroadcastClient {
+        endpoint,
+        source: Box::new(source),
+    })?;
     let oracle = Arc::new(oracle);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
@@ -639,13 +635,12 @@ fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupErro
         )));
     };
     let zinder_network = zinder_network_from_str(&config.network)?;
-    let oracle =
-        ZinderTipOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
-            StartupError::BroadcastClient {
-                endpoint,
-                source: Box::new(source),
-            }
-        })?;
+    let oracle = ZinderTipOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
+        StartupError::BroadcastClient {
+            endpoint,
+            source: Box::new(source),
+        }
+    })?;
     tracing::info!(
         network = %config.network,
         "zinder chain tip oracle wired",
@@ -810,10 +805,7 @@ enum AnyTransactionFetcher {
 }
 
 impl TransactionFetcher for AnyTransactionFetcher {
-    async fn fetch_transaction(
-        &self,
-        txid: [u8; 32],
-    ) -> Result<DisclosedTransaction, FetchError> {
+    async fn fetch_transaction(&self, txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         match self {
             Self::Rejecting(inner) => inner.fetch_transaction(txid).await,
             Self::Zinder(fetcher) => fetcher.fetch_transaction(txid).await,
@@ -927,10 +919,10 @@ impl ResolvedConfig {
         // tests). `ZPAY_STORE__URL` accepts `file:<path>` for local
         // SQLite and `libsql://<host>` for Turso; the auth token only
         // applies to the remote shape.
-        let store_backend = std::env::var("ZPAY_STORE__BACKEND")
-            .unwrap_or_else(|_| "libsql".to_string());
-        let store_url = std::env::var("ZPAY_STORE__URL")
-            .unwrap_or_else(|_| "file:./zpay.libsql".to_string());
+        let store_backend =
+            std::env::var("ZPAY_STORE__BACKEND").unwrap_or_else(|_| "libsql".to_string());
+        let store_url =
+            std::env::var("ZPAY_STORE__URL").unwrap_or_else(|_| "file:./zpay.libsql".to_string());
         let store_auth_token = std::env::var("ZPAY_STORE__AUTH_TOKEN")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
@@ -941,12 +933,12 @@ impl ResolvedConfig {
                 if trimmed.is_empty() {
                     DEFAULT_STATIC_TIP_FALLBACK
                 } else {
-                    trimmed.parse::<u32>().map_err(|source| {
-                        StartupError::StaticTipInvalid {
+                    trimmed
+                        .parse::<u32>()
+                        .map_err(|source| StartupError::StaticTipInvalid {
                             provided: trimmed,
                             source,
-                        }
-                    })?
+                        })?
                 }
             }
             Err(_) => DEFAULT_STATIC_TIP_FALLBACK,
@@ -958,12 +950,12 @@ impl ResolvedConfig {
                 if trimmed.is_empty() {
                     DEFAULT_FINALITY_DEPTH
                 } else {
-                    trimmed.parse::<u32>().map_err(|source| {
-                        StartupError::FinalityDepthInvalid {
+                    trimmed
+                        .parse::<u32>()
+                        .map_err(|source| StartupError::FinalityDepthInvalid {
                             provided: trimmed,
                             source,
-                        }
-                    })?
+                        })?
                 }
             }
             Err(_) => DEFAULT_FINALITY_DEPTH,
@@ -1051,7 +1043,10 @@ impl ResolvedConfig {
 /// falsy. Used for opt-in operator switches where a typo should not
 /// silently flip behaviour into the dangerous direction.
 fn parse_truthy(raw: &str) -> bool {
-    matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 /// Parse `ZPAY_VERIFY__NETWORK` into a [`PaymentNetwork`]. Constrained
@@ -1127,8 +1122,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmationOracle, ConfirmationOutcome, StartupError, is_placeholder_pay_to,
-        parse_truthy, poll_oracle_once, resolve_verify_network, validate_payees,
+        ConfirmationOracle, ConfirmationOutcome, StartupError, is_placeholder_pay_to, parse_truthy,
+        poll_oracle_once, resolve_verify_network, validate_payees,
     };
     use parking_lot::Mutex;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
@@ -1168,11 +1163,11 @@ mod tests {
             Ok(PaymentNetwork::Testnet),
         ));
     }
+    use zpay_core::prepare::PreparedTxCache;
     use zpay_core::status::{
         DEFAULT_FINALITY_DEPTH, SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
         lookup_payment_status,
     };
-    use zpay_core::prepare::PreparedTxCache;
     use zpay_x402::PaymentEventHub;
 
     struct ScriptedOracle {
@@ -1247,8 +1242,7 @@ mod tests {
     /// The literal `pay_to` baked into `etc/aether-demo.toml`.
     /// Used by the placeholder-shape tests below so a future tweak to
     /// the baked file does not silently invalidate the gate.
-    const DEMO_PLACEHOLDER_PAY_TO: &str =
-        "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    const DEMO_PLACEHOLDER_PAY_TO: &str = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
     fn placeholder_entry() -> AcceptsEntry {
         AcceptsEntry {

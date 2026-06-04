@@ -137,8 +137,7 @@ pub trait ReplayStore: Send + Sync {
     /// returned future is boxed so the trait is dyn-compatible; the
     /// verifier holds an `Arc<dyn ReplayStore>` for the lifetime of
     /// the process.
-    fn observe<'a>(&'a self, jkt: &'a str, jti: &'a str, ttl: Duration)
-    -> ReplayObserveFuture<'a>;
+    fn observe<'a>(&'a self, jkt: &'a str, jti: &'a str, ttl: Duration) -> ReplayObserveFuture<'a>;
 }
 
 /// In-memory replay store keyed by `(jkt, jti)`.
@@ -167,12 +166,7 @@ impl InMemoryReplayStore {
 }
 
 impl ReplayStore for InMemoryReplayStore {
-    fn observe<'a>(
-        &'a self,
-        jkt: &'a str,
-        jti: &'a str,
-        ttl: Duration,
-    ) -> ReplayObserveFuture<'a> {
+    fn observe<'a>(&'a self, jkt: &'a str, jti: &'a str, ttl: Duration) -> ReplayObserveFuture<'a> {
         Box::pin(async move {
             let now = Instant::now();
             let cutoff = now.checked_sub(ttl).unwrap_or(now);
@@ -333,11 +327,10 @@ pub async fn verify_dpop_proof(
         });
     }
 
-    let ec_jwk: EcJwk = serde_json::from_value(proof_header.jwk).map_err(|err| {
-        DpopError::InvalidProof {
+    let ec_jwk: EcJwk =
+        serde_json::from_value(proof_header.jwk).map_err(|err| DpopError::InvalidProof {
             reason: format!("jwk parse failed: {err}"),
-        }
-    })?;
+        })?;
     if ec_jwk.kty != "EC" {
         return Err(DpopError::InvalidProof {
             reason: format!("jwk.kty must be EC, got {}", ec_jwk.kty),
@@ -738,7 +731,11 @@ mod tests {
         // fresh key per call, so the jkt differs; we exercise the
         // observe path directly to keep the test focused on burn order.
         let outcome = store
-            .observe("dummy-jkt", "jti-burn", Duration::from_secs(REPLAY_WINDOW_SECONDS))
+            .observe(
+                "dummy-jkt",
+                "jti-burn",
+                Duration::from_secs(REPLAY_WINDOW_SECONDS),
+            )
             .await;
         assert_eq!(outcome, ReplayOutcome::Fresh);
 
@@ -780,12 +777,8 @@ mod tests {
             let jkt_b = key_jkt.clone();
             let jti_a = key_jti.clone();
             let jti_b = key_jti.clone();
-            let task_a = tokio::spawn(async move {
-                store_a.observe(&jkt_a, &jti_a, ttl).await
-            });
-            let task_b = tokio::spawn(async move {
-                store_b.observe(&jkt_b, &jti_b, ttl).await
-            });
+            let task_a = tokio::spawn(async move { store_a.observe(&jkt_a, &jti_a, ttl).await });
+            let task_b = tokio::spawn(async move { store_b.observe(&jkt_b, &jti_b, ttl).await });
             let result_a = task_a.await.map_err(|_| "task_a panicked")?;
             let result_b = task_b.await.map_err(|_| "task_b panicked")?;
             let fresh_count = [result_a, result_b]

@@ -168,7 +168,10 @@ where
 {
     validate_raw_tx_hex(&request.raw_tx_hex)?;
 
-    let Some(prepared) = prepared_store.find_by_payment_id(&request.payment_id).await? else {
+    let Some(prepared) = prepared_store
+        .find_by_payment_id(&request.payment_id)
+        .await?
+    else {
         return Err(SettleError::PreparationNotFound {
             payment_id: request.payment_id,
         });
@@ -313,15 +316,21 @@ mod tests {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
@@ -337,7 +346,10 @@ SettleRequest {
         assert_eq!(outcome.broadcast_outcome.transaction_id(), Some("deadbeef"));
         assert!(outcome.watch_id.is_some());
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             0
         );
         Ok(())
@@ -349,15 +361,21 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Rejected {
             upstream_message: "policy: dust output".to_owned(),
         });
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
@@ -375,7 +393,10 @@ SettleRequest {
         ));
         assert!(outcome.watch_id.is_none());
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())
@@ -406,15 +427,21 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: String::new(),
             },
@@ -435,15 +462,21 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: "abc".to_owned(),
             },
@@ -464,13 +497,19 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = UnavailableChain;
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
@@ -483,7 +522,10 @@ SettleRequest {
 
         assert!(matches!(outcome, Err(SettleError::ChainUnavailable { .. })));
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())
@@ -495,9 +537,15 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
@@ -506,7 +554,7 @@ SettleRequest {
         // returned at /prepare. Settle must reject before broadcasting.
         let wrong_expiry = preparation.expiry_height.wrapping_add(1);
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(wrong_expiry),
             },
@@ -522,7 +570,10 @@ SettleRequest {
             Err(SettleError::ExpiryHeightMismatch { .. })
         ));
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())
@@ -534,16 +585,22 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
 
         // Hex-shaped but garbage bytes.
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: "deadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
             },
@@ -559,7 +616,10 @@ SettleRequest {
             Err(SettleError::TransactionMalformed { .. })
         ));
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())
@@ -567,9 +627,7 @@ SettleRequest {
 
     #[tokio::test]
     async fn obsolete_memo_version_is_rejected_before_broadcast() -> Result<(), &'static str> {
-        use crate::prepare::{
-            PROTOCOL_MEMO_TAG, Preparation, PreparedTxEntry,
-        };
+        use crate::prepare::{PROTOCOL_MEMO_TAG, Preparation, PreparedTxEntry};
         use crate::types::{PayeeId, PaymentId, PaymentNetwork, Zatoshis};
 
         let cache = PreparedTxCache::new();
@@ -604,7 +662,7 @@ SettleRequest {
         });
 
         let outcome = submit_settlement(
-SettleRequest {
+            SettleRequest {
                 payment_id: PaymentId("obsolete-memo".to_owned()),
                 raw_tx_hex: minimal_v5_tx_hex(1_234),
             },
@@ -631,9 +689,15 @@ SettleRequest {
         let ledger = SettlementLedger::new();
         let registry = fixture_registry();
         let tip = FixedTipOracle::fixture();
-        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &cache,
+            &registry,
+            &tip,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
             transaction_id: "deadbeef".to_owned(),
         });
@@ -652,7 +716,10 @@ SettleRequest {
 
         assert!(matches!(outcome, Err(SettleError::DpopMismatch)));
         assert_eq!(
-            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            cache
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())

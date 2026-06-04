@@ -134,14 +134,20 @@ async fn main() -> Result<(), HarnessError> {
         network,
     })?;
 
-    let (wallet, account_id) =
-        open_or_bootstrap_wallet(network, &cli.wallet_dir, &chain, BlockHeight::from(cli.birthday))
-            .await?;
+    let (wallet, account_id) = open_or_bootstrap_wallet(
+        network,
+        &cli.wallet_dir,
+        &chain,
+        BlockHeight::from(cli.birthday),
+    )
+    .await?;
     let params = network.to_parameters();
 
     match cli.command {
         Command::Address => {
-            let ua = wallet.derive_next_address_with_transparent(account_id).await?;
+            let ua = wallet
+                .derive_next_address_with_transparent(account_id)
+                .await?;
             let encoded = ua.encode(&params);
             info!(unified_address = %encoded, "wallet unified address (fund this via fauzec)");
         }
@@ -257,7 +263,10 @@ async fn open_or_bootstrap_wallet(
     Ok(pair)
 }
 
-#[allow(clippy::too_many_arguments, reason = "one-shot harness; splitting would obscure the linear flow")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one-shot harness; splitting would obscure the linear flow"
+)]
 async fn run_flow(
     wallet: &Wallet,
     account_id: AccountId,
@@ -301,7 +310,9 @@ async fn run_flow(
     let recipient = if let Some(addr) = recipient_address {
         addr
     } else {
-        let ua = wallet.derive_next_address_with_transparent(account_id).await?;
+        let ua = wallet
+            .derive_next_address_with_transparent(account_id)
+            .await?;
         ua.encode(&network.to_parameters())
     };
     info!(recipient = %recipient, "recipient unified address (informational; registry-resolved pay_to is authoritative)");
@@ -362,7 +373,11 @@ async fn poll_until_confirmed(
 ) -> Result<(), HarnessError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(poll_seconds);
     let client = reqwest::Client::new();
-    let url = format!("{}/x402/v2/payments/{}", zpay_url.trim_end_matches('/'), payment_id);
+    let url = format!(
+        "{}/x402/v2/payments/{}",
+        zpay_url.trim_end_matches('/'),
+        payment_id
+    );
     let mut last_status = String::new();
     loop {
         let response = client
@@ -415,7 +430,10 @@ async fn call_prepare(
     };
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{}/x402/v2/prepare", zpay_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/x402/v2/prepare",
+            zpay_url.trim_end_matches('/')
+        ))
         .json(&body)
         .send()
         .await
@@ -560,12 +578,18 @@ struct PrepareRequestBody {
 struct PreparedPayment {
     payment_id: String,
     #[serde(default)]
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     payment_uri: String,
     memo_bytes: Vec<u8>,
     expiry_height: u32,
     #[serde(default)]
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     amount_zat: u64,
 }
 
@@ -579,10 +603,16 @@ struct SettleRequestBody {
 
 #[derive(Debug, Deserialize)]
 struct SettlementResponseData {
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     payment_id: String,
     broadcast_outcome: BroadcastOutcomeBody,
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     watch_id: Option<String>,
 }
 
@@ -592,7 +622,10 @@ struct BroadcastOutcomeBody {
     kind: String,
     transaction_id: Option<String>,
     #[serde(default)]
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     upstream_message: Option<String>,
 }
 
@@ -600,7 +633,10 @@ struct BroadcastOutcomeBody {
 
 #[derive(Debug, Deserialize)]
 struct PaymentStatusData {
-    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    #[allow(
+        dead_code,
+        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
+    )]
     payment_id: String,
     status: String,
     #[serde(default)]
@@ -647,4 +683,3 @@ enum HarnessError {
     #[error("unsupported --network value: {0} (expected 'testnet' or 'regtest')")]
     NetworkInvalid(String),
 }
-

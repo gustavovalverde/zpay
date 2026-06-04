@@ -87,11 +87,7 @@ impl StoreConnection {
 
     /// Execute an INSERT/UPDATE/DELETE statement. Same retry contract
     /// as [`Self::query`].
-    pub async fn execute(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<u64, libsql::Error> {
+    pub async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, libsql::Error> {
         let params = params.into_params()?;
         let first_outcome = self
             .inner

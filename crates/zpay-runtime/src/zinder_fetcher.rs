@@ -92,10 +92,7 @@ impl ZinderTransactionFetcher {
 }
 
 impl TransactionFetcher for ZinderTransactionFetcher {
-    async fn fetch_transaction(
-        &self,
-        _txid: [u8; 32],
-    ) -> Result<DisclosedTransaction, FetchError> {
+    async fn fetch_transaction(&self, _txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         // Keep the channel handle live so the connection is
         // pre-warmed for the upcoming translator.
         let _ = &*self.client.load();

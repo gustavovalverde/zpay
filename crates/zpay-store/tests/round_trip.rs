@@ -136,12 +136,11 @@ async fn idempotent_find_rebuilds_payment_uri() -> TestResult {
     // payment_uri, so it must be recomputed on read.
     let mut entry = sample_entry("pid-1", Some("order-001"));
     entry.preparation.payment_uri = "zcash:utest1example?amount=0.0005&memo=_wEBAQ".to_owned();
-    let expected_uri =
-        zpay_core::prepare::compose_payment_uri(
-            &entry.recipient_unified_address,
-            entry.amount_zat,
-            &entry.preparation.memo_bytes,
-        );
+    let expected_uri = zpay_core::prepare::compose_payment_uri(
+        &entry.recipient_unified_address,
+        entry.amount_zat,
+        &entry.preparation.memo_bytes,
+    );
 
     store.insert(entry.clone()).await?;
 
@@ -240,10 +239,7 @@ async fn settlement_ledger_round_trip() -> TestResult {
         )
         .await?;
 
-    let found = ledger
-        .find(&payment_id)
-        .await?
-        .ok_or("ledger find miss")?;
+    let found = ledger.find(&payment_id).await?.ok_or("ledger find miss")?;
     let BroadcastOutcome::Accepted { transaction_id } = found.broadcast_outcome else {
         return Err("expected Accepted outcome".into());
     };

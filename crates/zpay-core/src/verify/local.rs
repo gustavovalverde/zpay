@@ -150,8 +150,7 @@ impl LocalPaymentDisclosureVerifier {
 
         let outcomes = verify_inputs(&transaction, &parsed.transparent_inputs, &parsed.message);
         let cryptographic_verdict = aggregate_transparent_outcomes(&outcomes);
-        let inconclusive_reason =
-            inconclusive_reason_for(cryptographic_verdict, &outcomes);
+        let inconclusive_reason = inconclusive_reason_for(cryptographic_verdict, &outcomes);
 
         Ok(VerifyResponse {
             cryptographic_verdict,
@@ -344,7 +343,10 @@ mod tests {
         let response = verifier.verify_disclosure(&bytes, &fetcher).await?;
         assert_eq!(response.cryptographic_verdict, CryptographicVerdict::Valid);
         assert_eq!(response.chain_presence, ChainPresence::Mined);
-        assert_eq!(response.amount_reconciliation, AmountReconciliation::NotChecked);
+        assert_eq!(
+            response.amount_reconciliation,
+            AmountReconciliation::NotChecked
+        );
         assert_eq!(response.transaction_id, Some(hex::encode([0x33u8; 32])));
         Ok(())
     }

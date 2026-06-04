@@ -42,11 +42,12 @@ impl ZinderConfirmationOracle {
         endpoint: String,
         network: ZinderNetwork,
     ) -> Result<Self, ZinderOracleConfigError> {
-        let chain = RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(
-            |err| ZinderOracleConfigError::EndpointInvalid {
-                reason: err.to_string(),
-            },
-        )?;
+        let chain =
+            RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(|err| {
+                ZinderOracleConfigError::EndpointInvalid {
+                    reason: err.to_string(),
+                }
+            })?;
         Ok(Self { chain })
     }
 }
@@ -56,16 +57,16 @@ impl ConfirmationOracle for ZinderConfirmationOracle {
         &self,
         transaction_id_hex: &str,
     ) -> Result<ConfirmationOutcome, OracleError> {
-        let txid_bytes = hex::decode(transaction_id_hex).map_err(|err| {
-            OracleError::ResponseMalformed {
+        let txid_bytes =
+            hex::decode(transaction_id_hex).map_err(|err| OracleError::ResponseMalformed {
                 reason: format!("transaction_id is not valid hex: {err}"),
-            }
-        })?;
-        let txid_array: [u8; 32] = txid_bytes
-            .try_into()
-            .map_err(|_| OracleError::ResponseMalformed {
-                reason: "transaction_id must be exactly 32 bytes".to_owned(),
             })?;
+        let txid_array: [u8; 32] =
+            txid_bytes
+                .try_into()
+                .map_err(|_| OracleError::ResponseMalformed {
+                    reason: "transaction_id must be exactly 32 bytes".to_owned(),
+                })?;
         let status = self
             .chain
             .transaction_by_id(TransactionId::from_bytes(txid_array), None)

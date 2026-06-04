@@ -39,14 +39,12 @@ use crate::accepts::PayeeRegistry;
 use crate::binding::compose_binding_memo;
 use crate::store::StoreError;
 use crate::tip::{ChainTipOracle, TipError};
-use crate::types::{
-    EvidencePackHash, PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
-};
+use crate::types::{EvidencePackHash, PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
 
 #[cfg(feature = "in_memory")]
-use std::collections::HashMap;
-#[cfg(feature = "in_memory")]
 use parking_lot::Mutex;
+#[cfg(feature = "in_memory")]
+use std::collections::HashMap;
 
 /// Default validity window for a prepared transaction.
 ///
@@ -180,9 +178,7 @@ pub enum PrepareError {
     /// The named payee is registered but has no `accepts[]` entry for
     /// the requested `(scheme, network)` pair. Retry posture:
     /// `not_retryable`.
-    #[error(
-        "payee {payee_id:?} does not advertise scheme={scheme:?} on network={network:?}"
-    )]
+    #[error("payee {payee_id:?} does not advertise scheme={scheme:?} on network={network:?}")]
     SchemeNetworkUnsupported {
         /// The payee identifier the caller asked about.
         payee_id: PayeeId,
@@ -249,10 +245,8 @@ pub trait PreparedTxStore: Send + Sync {
     /// `(agent_dpop_jkt, idempotency_key)` pair so a retried prepare
     /// from the same agent returns the original entry instead of
     /// allocating a new one.
-    fn insert(
-        &self,
-        entry: PreparedTxEntry,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn insert(&self, entry: PreparedTxEntry)
+    -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Look up a prepared-tx entry by `payment_id`.
     fn find_by_payment_id(
@@ -459,10 +453,9 @@ where
             payee_id: request.payee_id,
         });
     };
-    let Some(entry) = entries
-        .iter()
-        .find(|candidate| candidate.scheme == request.scheme && candidate.network == request.network)
-    else {
+    let Some(entry) = entries.iter().find(|candidate| {
+        candidate.scheme == request.scheme && candidate.network == request.network
+    }) else {
         return Err(PrepareError::SchemeNetworkUnsupported {
             payee_id: request.payee_id,
             scheme: request.scheme,
@@ -515,9 +508,7 @@ where
             recipient_unified_address: entry.pay_to.clone(),
             amount_zat: entry.amount_zat,
             expires_at_unix_seconds,
-            idempotency_key: request
-                .idempotency_key
-                .filter(|raw| !raw.trim().is_empty()),
+            idempotency_key: request.idempotency_key.filter(|raw| !raw.trim().is_empty()),
             agent_dpop_jkt: jkt,
         })
         .await
@@ -672,20 +663,19 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_EXPIRY_DELTA_BLOCKS, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE, PrepareError,
-        PreparedTxCache, PreparedTxStore, format_zec_from_zat, propose,
-    };
     use super::test_support::{
         ALTERNATE_FIXTURE_JKT, FIXTURE_JKT, FIXTURE_PAYEE_ID, FIXTURE_TIP_HEIGHT, FixedTipOracle,
         fixture_registry, registry_with, valid_request,
+    };
+    use super::{
+        DEFAULT_EXPIRY_DELTA_BLOCKS, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE, PrepareError,
+        PreparedTxCache, PreparedTxStore, format_zec_from_zat, propose,
     };
     use crate::tip::{ChainTipOracle, TipError};
     use crate::types::{PayeeId, PaymentNetwork, Zatoshis};
 
     #[tokio::test]
-    async fn propose_inserts_into_store_and_returns_full_preparation()
-    -> Result<(), &'static str> {
+    async fn propose_inserts_into_store_and_returns_full_preparation() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
         let registry = fixture_registry();
         let oracle = FixedTipOracle::fixture();
@@ -703,8 +693,7 @@ mod tests {
             preparation.memo_bytes.len(),
             PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE,
         );
-        let expected_expiry =
-            FIXTURE_TIP_HEIGHT.saturating_add(DEFAULT_EXPIRY_DELTA_BLOCKS);
+        let expected_expiry = FIXTURE_TIP_HEIGHT.saturating_add(DEFAULT_EXPIRY_DELTA_BLOCKS);
         assert_eq!(preparation.expiry_height, expected_expiry);
         assert_eq!(preparation.amount_zat, Zatoshis(50_000));
         assert!(
@@ -715,7 +704,10 @@ mod tests {
         assert!(preparation.payment_uri.contains("amount=0.0005"));
         assert!(preparation.payment_uri.contains("memo="));
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         let cached = store
@@ -739,7 +731,10 @@ mod tests {
         let outcome = propose(request, FIXTURE_JKT.to_owned(), &store, &registry, &oracle).await;
         assert!(matches!(outcome, Err(PrepareError::PayeeUnknown { .. })));
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             0
         );
         Ok(())
@@ -758,7 +753,10 @@ mod tests {
             Err(PrepareError::SchemeNetworkUnsupported { .. })
         ));
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             0
         );
         Ok(())
@@ -801,10 +799,7 @@ mod tests {
         struct FailingOracle;
 
         impl ChainTipOracle for FailingOracle {
-            async fn current_tip(
-                &self,
-                _network: PaymentNetwork,
-            ) -> Result<u32, TipError> {
+            async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
                 Err(TipError::Unavailable {
                     reason: "no chain plane".to_owned(),
                 })
@@ -845,7 +840,10 @@ mod tests {
             .map_err(|_| "remove failed")?;
         assert!(removed.is_some());
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             0
         );
         assert!(
@@ -933,7 +931,10 @@ mod tests {
         .await
         .map_err(|_| "long propose must succeed")?;
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             2
         );
 
@@ -979,7 +980,10 @@ mod tests {
         assert_eq!(initial.payment_id, replay.payment_id);
         assert_eq!(initial.payment_uri, replay.payment_uri);
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         Ok(())
@@ -1014,7 +1018,10 @@ mod tests {
         .map_err(|_| "second propose must succeed")?;
         assert_ne!(one.payment_id, two.payment_id);
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             2
         );
         Ok(())
@@ -1038,7 +1045,10 @@ mod tests {
             .map_err(|_| "second propose must succeed")?;
         assert_ne!(a.payment_id, b.payment_id);
         assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
+            store
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             2
         );
         Ok(())

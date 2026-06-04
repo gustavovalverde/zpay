@@ -20,9 +20,9 @@ use crate::store::StoreError;
 use crate::types::PaymentId;
 
 #[cfg(feature = "in_memory")]
-use std::collections::HashMap;
-#[cfg(feature = "in_memory")]
 use parking_lot::Mutex;
+#[cfg(feature = "in_memory")]
+use std::collections::HashMap;
 
 /// Default finality depth used when no operator configuration is supplied.
 ///
@@ -354,7 +354,9 @@ mod tests {
         SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status,
     };
     use crate::broadcast::BroadcastOutcome;
-    use crate::prepare::test_support::{FIXTURE_JKT, FixedTipOracle, fixture_registry, valid_request};
+    use crate::prepare::test_support::{
+        FIXTURE_JKT, FixedTipOracle, fixture_registry, valid_request,
+    };
     use crate::prepare::{PreparedTxCache, propose};
     use crate::types::PaymentId;
 
@@ -425,10 +427,9 @@ mod tests {
             )
             .await
             .map_err(|_| "record failed")?;
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
-                .await
-                .map_err(|_| "lookup failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Broadcast);
         match snapshot.broadcast_outcome {
             Some(BroadcastOutcome::Accepted { transaction_id }) => {
@@ -459,10 +460,9 @@ mod tests {
             )
             .await
             .map_err(|_| "record failed")?;
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
-                .await
-                .map_err(|_| "lookup failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Mined);
         assert_eq!(snapshot.confirmation_count, Some(1));
         assert_eq!(snapshot.mined_block_height, Some(2_000_000));
@@ -488,10 +488,9 @@ mod tests {
             )
             .await
             .map_err(|_| "record failed")?;
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
-                .await
-                .map_err(|_| "lookup failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Final);
         assert!(snapshot.status.is_terminal());
         Ok(())
@@ -516,10 +515,9 @@ mod tests {
             )
             .await
             .map_err(|_| "record failed")?;
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
-                .await
-                .map_err(|_| "lookup failed")?;
+        let snapshot = lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH)
+            .await
+            .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Failed);
         assert!(snapshot.status.is_terminal());
         Ok(())
@@ -558,7 +556,10 @@ mod tests {
             .await
             .map_err(|_| "second record failed")?;
         assert_eq!(
-            ledger.entry_count().await.map_err(|_| "entry_count failed")?,
+            ledger
+                .entry_count()
+                .await
+                .map_err(|_| "entry_count failed")?,
             1
         );
         let entry = ledger.find(&payment_id).await.map_err(|_| "find failed")?;
@@ -573,8 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_confirmation_drives_mined_then_final_transition()
-    -> Result<(), &'static str> {
+    async fn record_confirmation_drives_mined_then_final_transition() -> Result<(), &'static str> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("watch-me".to_owned());
         ledger
@@ -686,8 +686,7 @@ mod tests {
         ] {
             let json = serde_json::to_string(&variant).map_err(|_| "serialize")?;
             assert_eq!(json, expected);
-            let back: PaymentStatus =
-                serde_json::from_str(&json).map_err(|_| "deserialize")?;
+            let back: PaymentStatus = serde_json::from_str(&json).map_err(|_| "deserialize")?;
             assert_eq!(back, variant);
         }
         Ok(())
@@ -703,8 +702,7 @@ mod tests {
         ] {
             let json = serde_json::to_string(&variant).map_err(|_| "serialize")?;
             assert_eq!(json, expected);
-            let back: IntentPosture =
-                serde_json::from_str(&json).map_err(|_| "deserialize")?;
+            let back: IntentPosture = serde_json::from_str(&json).map_err(|_| "deserialize")?;
             assert_eq!(back, variant);
         }
         Ok(())

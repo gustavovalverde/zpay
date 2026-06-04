@@ -129,8 +129,7 @@ where
     fn re_read<'a>(
         &'a self,
         payment_id: &'a PaymentId,
-    ) -> Pin<Box<dyn Future<Output = Result<PaymentStatusSnapshot, StoreError>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentStatusSnapshot, StoreError>> + Send + 'a>> {
         Box::pin(async move {
             lookup_payment_status(
                 payment_id,
@@ -186,10 +185,7 @@ impl PaymentEventHub {
         clippy::significant_drop_tightening,
         reason = "the parking_lot guard is held for two synchronous calls (entry + subscribe); tightening to a single expression would force a double-lookup and worsen the lock-hold profile this lint is meant to improve."
     )]
-    pub fn subscribe(
-        &self,
-        payment_id: &PaymentId,
-    ) -> broadcast::Receiver<PaymentStatusSnapshot> {
+    pub fn subscribe(&self, payment_id: &PaymentId) -> broadcast::Receiver<PaymentStatusSnapshot> {
         let mut channels = self.channels.lock();
         let sender = channels
             .entry(payment_id.clone())
@@ -360,9 +356,7 @@ where
     let body_stream = EventStream::new(payment_id, initial_snapshot, rx, resync);
 
     let mut response = Sse::new(body_stream)
-        .keep_alive(
-            KeepAlive::new().interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECONDS)),
-        )
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECONDS)))
         .into_response();
 
     let headers = response.headers_mut();
@@ -383,8 +377,7 @@ where
 /// Boxed because the concrete future returned by
 /// [`ResyncSource::re_read`] is opaque; the stream needs a single named
 /// type to park between polls.
-type ResyncFuture =
-    Pin<Box<dyn Future<Output = Result<PaymentStatusSnapshot, StoreError>> + Send>>;
+type ResyncFuture = Pin<Box<dyn Future<Output = Result<PaymentStatusSnapshot, StoreError>> + Send>>;
 
 pin_project! {
     /// SSE body stream: initial snapshot (head), then broadcast tail,
@@ -515,9 +508,10 @@ impl Stream for EventStream {
                 // the recovered snapshot.
                 let resync_source = Arc::clone(this.resync_source);
                 let payment_id = this.payment_id.clone();
-                *this.resync_in_flight = Some(Box::pin(async move {
-                    resync_source.re_read(&payment_id).await
-                }));
+                *this.resync_in_flight =
+                    Some(Box::pin(
+                        async move { resync_source.re_read(&payment_id).await },
+                    ));
                 Poll::Ready(Some(Ok(lag_event())))
             }
             Poll::Ready(None) => {
@@ -583,12 +577,8 @@ mod tests {
     };
     use zpay_core::store::StoreError;
     use zpay_core::tip::{ChainTipOracle, TipError};
-    use zpay_core::types::{
-        PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
-    };
-    use zpay_core::transaction_fetcher::{
-        DisclosedTransaction, FetchError, TransactionFetcher,
-    };
+    use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+    use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
     use zpay_core::verify::{
         AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
         VerifyError, VerifyResponse,
@@ -795,8 +785,8 @@ mod tests {
             &registry,
             &oracle,
         )
-            .await
-            .map_err(|_| "propose failed")?;
+        .await
+        .map_err(|_| "propose failed")?;
         let payment_id = preparation.payment_id.clone();
 
         // The route opens by reading the snapshot and then subscribing.
@@ -828,8 +818,7 @@ mod tests {
         hub.publish(&payment_id, terminal_snapshot.clone());
 
         let resync = store_resync(&cache, &ledger);
-        let mut stream =
-            std::pin::pin!(EventStream::new(payment_id.clone(), initial, rx, resync));
+        let mut stream = std::pin::pin!(EventStream::new(payment_id.clone(), initial, rx, resync));
 
         // First event: the initial awaiting snapshot.
         let first = timeout(Duration::from_secs(2), stream.next())
@@ -866,8 +855,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_initial_snapshot_emits_once_then_closes() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn terminal_initial_snapshot_emits_once_then_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("already-final".to_owned());
         ledger
@@ -894,8 +883,7 @@ mod tests {
         let cache_arc = Arc::new(cache);
         let ledger_arc = Arc::new(ledger);
         let resync = store_resync(&cache_arc, &ledger_arc);
-        let mut stream =
-            std::pin::pin!(EventStream::new(payment_id.clone(), initial, rx, resync));
+        let mut stream = std::pin::pin!(EventStream::new(payment_id.clone(), initial, rx, resync));
 
         let first = timeout(Duration::from_secs(2), stream.next())
             .await?
@@ -946,8 +934,8 @@ mod tests {
             &registry,
             &oracle,
         )
-            .await
-            .map_err(|_| "propose failed")?;
+        .await
+        .map_err(|_| "propose failed")?;
         let payment_id = preparation.payment_id.clone();
 
         // Subscribe FIRST so the broadcast channel exists and any publish
@@ -986,12 +974,7 @@ mod tests {
         assert_eq!(initial.status, PaymentStatus::Awaiting);
 
         let resync = store_resync(&cache, &ledger);
-        let mut stream = std::pin::pin!(EventStream::new(
-            payment_id.clone(),
-            initial,
-            rx,
-            resync,
-        ));
+        let mut stream = std::pin::pin!(EventStream::new(payment_id.clone(), initial, rx, resync,));
 
         // First event: the initial awaiting snapshot (head of stream).
         let first = timeout(Duration::from_secs(2), stream.next())

@@ -41,11 +41,12 @@ impl ZinderTipOracle {
         endpoint: String,
         network: ZinderNetwork,
     ) -> Result<Self, ZinderTipOracleConfigError> {
-        let chain = RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(
-            |err| ZinderTipOracleConfigError::EndpointInvalid {
-                reason: err.to_string(),
-            },
-        )?;
+        let chain =
+            RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(|err| {
+                ZinderTipOracleConfigError::EndpointInvalid {
+                    reason: err.to_string(),
+                }
+            })?;
         Ok(Self { chain })
     }
 }
