@@ -15,9 +15,28 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
+futures.workspace = true
 http.workspace = true
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+p256 = { workspace = true }
+parking_lot.workspace = true
+pin-project-lite.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
+url.workspace = true
 zpay-core.workspace = true
+
+[dev-dependencies]
+p256 = { workspace = true, features = ["pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["std"] }
+tokio = { workspace = true, features = ["test-util"] }
+# Pull in zpay-core's in-memory stores for the SSE handler integration
+# tests; the production wire path uses the libSQL stores via
+# `zpay-runtime`, so the in_memory feature is opt-in here.
+zpay-core = { workspace = true, features = ["in_memory"] }

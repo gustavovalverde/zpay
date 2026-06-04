@@ -6,9 +6,11 @@
 //! M1; this scaffold only carries the env-var entry points needed to run
 //! `/healthz` and the x402 stub routes.
 
+mod rejecting_fetcher;
+mod tip_oracle;
 mod zinder_broadcast;
+mod zinder_fetcher;
 mod zinder_oracle;
-mod zinder_verify;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,22 +20,26 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use clap::Parser;
+use rejecting_fetcher::RejectingTransactionFetcher;
+use tip_oracle::{AnyTipOracle, StaticTipOracle, ZinderTipOracle};
 use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
+use zinder_fetcher::ZinderTransactionFetcher;
 use zinder_oracle::ZinderConfirmationOracle;
-use zinder_verify::ZinderDisclosureVerifier;
-use zpay_core::accepts::{AcceptsEntry, MerchantRegistry};
+use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
 use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
 use zpay_core::prepare::{PreparedTxCache, PreparedTxEntry, PreparedTxStore};
 use zpay_core::status::{
-    SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
+    DEFAULT_FINALITY_DEPTH, SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
+    lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::types::{MerchantId, PaymentId};
-use zpay_core::verify::{DisclosureVerdict, DisclosureVerifier, Verdict, VerifyError};
+use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
+use zpay_core::verify::LocalPaymentDisclosureVerifier;
 use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
-use zpay_x402::AppState;
+use zpay_x402::{AppState, DpopExpectations, DpopInMemoryReplayStore, PaymentEventHub};
 
 /// zpay facilitator runtime.
 #[derive(Debug, Parser)]
@@ -75,8 +81,32 @@ enum StartupError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("merchant registry config read failed: {path}: {reason}")]
-    MerchantsConfig { path: String, reason: String },
+    #[error("payee registry config read failed: {path}: {reason}")]
+    PayeesConfig { path: String, reason: String },
+    #[error(
+        "ZPAY_NETWORK has unknown value {provided:?}; expected one of mainnet, testnet, regtest"
+    )]
+    NetworkInvalid { provided: String },
+    #[error(
+        "ZPAY_VERIFY__NETWORK has unknown value {provided:?}; expected one of mainnet, testnet"
+    )]
+    VerifyNetworkInvalid { provided: String },
+    #[error(
+        "ZPAY_VERIFY__NETWORK is required; set it to mainnet or testnet (regtest pins to testnet)"
+    )]
+    VerifyNetworkMissing,
+    #[error("ZPAY_STATIC_TIP_FALLBACK has invalid u32 value {provided:?}: {source}")]
+    StaticTipInvalid {
+        provided: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("ZPAY_FINALITY_DEPTH has invalid u32 value {provided:?}: {source}")]
+    FinalityDepthInvalid {
+        provided: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
     #[error("store backend {backend:?} initialisation failed: {source}")]
     StoreBackend {
         backend: String,
@@ -85,6 +115,12 @@ enum StartupError {
     },
     #[error("invalid store backend {backend:?}: expected 'memory' or 'libsql'")]
     StoreBackendInvalid { backend: String },
+    #[error(
+        "payee {payee_id:?} advertises the baked-in demo placeholder pay_to; refusing to start. \
+         Override the payees config (ZPAY_PAYEES__CONFIG_PATH) with a real receiver, or set \
+         ZPAY_ALLOW_DEMO_PAYEE=1 to bypass for dev (never set this in production)."
+    )]
+    PlaceholderPayee { payee_id: String },
 }
 
 #[tokio::main]
@@ -102,7 +138,13 @@ async fn main() -> Result<(), StartupError> {
     let app_plane = build_app_router(&config).await?;
     let app_router = app_plane.router;
     spawn_prepared_tx_sweeper(Arc::clone(&app_plane.prepared_store));
-    spawn_confirmation_oracle(&config, Arc::clone(&app_plane.ledger))?;
+    spawn_confirmation_oracle(
+        &config,
+        Arc::clone(&app_plane.ledger),
+        Arc::clone(&app_plane.prepared_store),
+        Arc::clone(&app_plane.events),
+        config.finality_depth,
+    )?;
     let ops_router = build_ops_router();
 
     let app_listener = tokio::net::TcpListener::bind(config.app_bind_addr)
@@ -150,30 +192,47 @@ struct AppPlane {
     router: Router,
     prepared_store: Arc<AnyPreparedTxStore>,
     ledger: Arc<AnySettlementLedgerStore>,
+    events: Arc<PaymentEventHub>,
 }
 
 async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
-    let verifier = build_disclosure_verifier(config)?;
-    let merchants = load_merchant_registry(config)?;
+    let verifier = LocalPaymentDisclosureVerifier::new(config.verify_network);
+    let fetcher = build_transaction_fetcher(config)?;
+    let payees = load_payee_registry(config)?;
+    validate_payees(&payees, config.allow_demo_payee)?;
+    let tip_oracle = build_tip_oracle(config)?;
     let (prepared_store, ledger) = build_stores(config).await?;
+    let events = Arc::new(PaymentEventHub::new());
 
+    let expectations = build_dpop_expectations(config);
+    let replay_store: Arc<dyn zpay_x402::DpopReplayStore> = Arc::new(DpopInMemoryReplayStore::new());
     let state = AppState::new(
         Arc::clone(&prepared_store),
         Arc::clone(&ledger),
-        Arc::new(merchants),
+        Arc::new(payees),
         Arc::new(chain),
         Arc::new(verifier),
+        Arc::clone(&events),
+        Arc::new(tip_oracle),
+        Arc::new(fetcher),
+        replay_store,
+        expectations,
+        config.finality_depth,
     );
-    let router = Router::new().nest("/x402/v2", zpay_x402::router(state));
-
-    #[cfg(feature = "mpp")]
-    let router = router.nest("/mpp/v1", zpay_mpp::router());
+    // `/healthz` lives on the app listener too so platform health probes
+    // (Railway, Kubernetes, AWS ALB) that only reach the public port get a
+    // 200 from a healthy process. The ops listener also serves it so
+    // intra-cluster sidecars keep the existing path.
+    let router = Router::new()
+        .route("/healthz", get(healthz))
+        .nest("/x402/v2", zpay_x402::router(state));
 
     Ok(AppPlane {
         router: router.layer(tower_http::trace::TraceLayer::new_for_http()),
         prepared_store,
         ledger,
+        events,
     })
 }
 
@@ -244,12 +303,12 @@ impl PreparedTxStore for AnyPreparedTxStore {
 
     async fn find_by_idempotency(
         &self,
-        merchant_id: &MerchantId,
+        jkt: &str,
         idempotency_key: &str,
     ) -> Result<Option<PreparedTxEntry>, StoreError> {
         match self {
-            Self::Memory(inner) => inner.find_by_idempotency(merchant_id, idempotency_key).await,
-            Self::Libsql(inner) => inner.find_by_idempotency(merchant_id, idempotency_key).await,
+            Self::Memory(inner) => inner.find_by_idempotency(jkt, idempotency_key).await,
+            Self::Libsql(inner) => inner.find_by_idempotency(jkt, idempotency_key).await,
         }
     }
 
@@ -352,6 +411,14 @@ const PREPARED_TX_SWEEP_INTERVAL_SECONDS: u64 = 30;
 /// a minute; long enough not to thrash the chain plane.
 const CONFIRMATION_ORACLE_POLL_SECONDS: u64 = 60;
 
+/// Default static tip height for the chain-tip fallback.
+///
+/// Used when neither a chain plane nor an explicit
+/// `ZPAY_STATIC_TIP_FALLBACK` is configured. Chosen to match the
+/// long-standing demo expiry the host probes used (`4_000_000`) so
+/// cold-start scenarios stay deterministic across releases.
+const DEFAULT_STATIC_TIP_FALLBACK: u32 = 4_000_000;
+
 fn spawn_prepared_tx_sweeper(store: Arc<AnyPreparedTxStore>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
@@ -383,6 +450,9 @@ fn spawn_prepared_tx_sweeper(store: Arc<AnyPreparedTxStore>) {
 fn spawn_confirmation_oracle(
     config: &ResolvedConfig,
     ledger: Arc<AnySettlementLedgerStore>,
+    prepared_store: Arc<AnyPreparedTxStore>,
+    events: Arc<PaymentEventHub>,
+    finality_depth: u32,
 ) -> Result<(), StartupError> {
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
@@ -391,7 +461,7 @@ fn spawn_confirmation_oracle(
         return Ok(());
     };
     let oracle =
-        ZinderConfirmationOracle::connect(endpoint.clone(), zinder_network_from_str(&config.network))
+        ZinderConfirmationOracle::connect(endpoint.clone(), zinder_network_from_str(&config.network)?)
             .map_err(|source| StartupError::BroadcastClient {
                 endpoint,
                 source: Box::new(source),
@@ -404,17 +474,30 @@ fn spawn_confirmation_oracle(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            poll_oracle_once(oracle.as_ref(), ledger.as_ref()).await;
+            poll_oracle_once(
+                oracle.as_ref(),
+                ledger.as_ref(),
+                prepared_store.as_ref(),
+                events.as_ref(),
+                finality_depth,
+            )
+            .await;
         }
     });
-    tracing::info!("confirmation oracle wired");
+    tracing::info!(finality_depth, "confirmation oracle wired");
     Ok(())
 }
 
-async fn poll_oracle_once<O, L>(oracle: &O, ledger: &L)
-where
+async fn poll_oracle_once<O, L, P>(
+    oracle: &O,
+    ledger: &L,
+    prepared_store: &P,
+    events: &PaymentEventHub,
+    finality_depth: u32,
+) where
     O: ConfirmationOracle,
     L: SettlementLedgerStore + ?Sized,
+    P: zpay_core::prepare::PreparedTxStore + ?Sized,
 {
     let entries = match ledger.success_kind_transactions().await {
         Ok(entries) => entries,
@@ -427,21 +510,27 @@ where
         return;
     }
     for (payment_id, transaction_id) in entries {
-        match oracle.fetch_confirmations(&transaction_id).await {
+        let changed = match oracle.fetch_confirmations(&transaction_id).await {
             Ok(ConfirmationOutcome::Mined {
                 block_height,
                 confirmation_count,
-            }) => {
-                if let Err(err) = ledger
-                    .record_confirmation(&payment_id, confirmation_count, Some(block_height))
-                    .await
-                {
+            }) => match ledger
+                .record_confirmation(&payment_id, confirmation_count, Some(block_height))
+                .await
+            {
+                Ok(updated) => updated,
+                Err(err) => {
                     tracing::warn!(error = %err, "record_confirmation failed");
+                    false
                 }
-            }
+            },
             Ok(ConfirmationOutcome::InMempool) => {
-                if let Err(err) = ledger.record_confirmation(&payment_id, 0, None).await {
-                    tracing::warn!(error = %err, "record_confirmation failed");
+                match ledger.record_confirmation(&payment_id, 0, None).await {
+                    Ok(updated) => updated,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "record_confirmation failed");
+                        false
+                    }
                 }
             }
             Ok(ConfirmationOutcome::NotFound | ConfirmationOutcome::ConflictingChain) => {
@@ -453,12 +542,13 @@ where
                     transaction_id = %transaction_id,
                     "oracle reports tx no longer visible on chain plane",
                 );
+                false
             }
             #[allow(
                 clippy::wildcard_enum_match_arm,
                 reason = "ConfirmationOutcome is #[non_exhaustive]; future variants stay a no-op until they have explicit handling"
             )]
-            Ok(_) => {}
+            Ok(_) => false,
             Err(err) => {
                 tracing::warn!(
                     payment_id = %payment_id,
@@ -466,9 +556,54 @@ where
                     error = %err,
                     "confirmation oracle poll failed",
                 );
+                false
+            }
+        };
+
+        if changed {
+            // The hub never inserts on publish, so this is a no-op for
+            // payments without a live SSE subscriber. We only re-read
+            // the snapshot when the ledger actually changed, so an idle
+            // oracle tick costs one `find` per success-kind row and
+            // nothing more.
+            match lookup_payment_status(&payment_id, prepared_store, ledger, finality_depth).await {
+                Ok(snapshot) => events.publish(&payment_id, snapshot),
+                Err(err) => {
+                    tracing::warn!(
+                        payment_id = %payment_id,
+                        error = %err,
+                        "snapshot read for oracle publish failed",
+                    );
+                }
             }
         }
     }
+}
+
+/// Build the operator-supplied DPoP expectations bundle.
+///
+/// When `ZPAY_EXPECTED_HOST` is unset we emit a single startup `WARN`
+/// so an operator who ships to production without pinning the host
+/// sees the gap in the logs; the verifier then falls back to the
+/// inbound `Host` header.
+fn build_dpop_expectations(config: &ResolvedConfig) -> DpopExpectations {
+    config.expected_host.clone().map_or_else(
+        || {
+            tracing::warn!(
+                scheme = %config.expected_scheme,
+                "ZPAY_EXPECTED_HOST unset; DPoP htu canonicalization uses inbound Host header. Set this in production.",
+            );
+            DpopExpectations::unbound(config.expected_scheme.clone())
+        },
+        |host| {
+            tracing::info!(
+                scheme = %config.expected_scheme,
+                host = %host,
+                "DPoP host pinning enabled",
+            );
+            DpopExpectations::pinned(config.expected_scheme.clone(), host)
+        },
+    )
 }
 
 fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient, StartupError> {
@@ -478,7 +613,7 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient,
         );
         return Ok(AnyBroadcastClient::Rejecting);
     };
-    let zinder_network = zinder_network_from_str(&config.network);
+    let zinder_network = zinder_network_from_str(&config.network)?;
     let client =
         ZinderBroadcastClient::connect(endpoint.clone(), zinder_network).map_err(|source| {
             StartupError::BroadcastClient {
@@ -493,48 +628,137 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient,
     Ok(AnyBroadcastClient::Zinder(Box::new(client)))
 }
 
-fn load_merchant_registry(config: &ResolvedConfig) -> Result<MerchantRegistry, StartupError> {
-    let Some(path) = config.merchants_config_path.clone() else {
-        return Ok(MerchantRegistry::new());
+fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupError> {
+    let Some(endpoint) = config.indexer_grpc_addr.clone() else {
+        tracing::warn!(
+            fallback_tip = config.static_tip_fallback,
+            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; using static fallback tip for /prepare and /tip",
+        );
+        return Ok(AnyTipOracle::Static(StaticTipOracle::new(
+            config.static_tip_fallback,
+        )));
     };
-    let raw = std::fs::read_to_string(&path).map_err(|source| StartupError::MerchantsConfig {
+    let zinder_network = zinder_network_from_str(&config.network)?;
+    let oracle =
+        ZinderTipOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
+            StartupError::BroadcastClient {
+                endpoint,
+                source: Box::new(source),
+            }
+        })?;
+    tracing::info!(
+        network = %config.network,
+        "zinder chain tip oracle wired",
+    );
+    Ok(AnyTipOracle::Zinder(Box::new(oracle)))
+}
+
+fn load_payee_registry(config: &ResolvedConfig) -> Result<PayeeRegistry, StartupError> {
+    let Some(path) = config.payees_config_path.clone() else {
+        return Ok(PayeeRegistry::new());
+    };
+    let raw = std::fs::read_to_string(&path).map_err(|source| StartupError::PayeesConfig {
         path: path.clone(),
         reason: source.to_string(),
     })?;
-    let parsed: MerchantsConfigFile =
-        toml::from_str(&raw).map_err(|source| StartupError::MerchantsConfig {
+    let parsed: PayeesConfigFile =
+        toml::from_str(&raw).map_err(|source| StartupError::PayeesConfig {
             path: path.clone(),
             reason: source.to_string(),
         })?;
-    let mut registry = MerchantRegistry::new();
-    for (merchant_id, merchant) in parsed.merchants {
-        registry.register(MerchantId(merchant_id), merchant.accepts);
+    let mut registry = PayeeRegistry::new();
+    for (payee_id, payee) in parsed.payees {
+        registry.register(PayeeId(payee_id), payee.accepts);
     }
     tracing::info!(
-        merchant_count = registry.merchant_count(),
+        payee_count = registry.payee_count(),
         path = %path,
-        "merchant registry loaded",
+        "payee registry loaded",
     );
     Ok(registry)
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct MerchantsConfigFile {
-    #[serde(default)]
-    merchants: std::collections::HashMap<String, MerchantsConfigEntry>,
+/// Walk every registered payee and refuse to start when the baked-in
+/// demo placeholder `pay_to` is still present.
+///
+/// The placeholder shipped in `etc/aether-demo.toml` is a long string
+/// of the form `utest1qqq…qqq` (Zcash testnet UA prefix followed by a
+/// run of `q` padding characters). The gate matches that *shape*, not
+/// the exact baked-in literal, so a slightly different placeholder
+/// (extra char, off-by-one length) still trips the gate. Any real UA
+/// has non-`q` characters in the data portion and passes through.
+///
+/// When `allow_demo_payee` is true the gate emits a `WARN` per
+/// offending payee and proceeds; this is the dev / docker-compose
+/// escape hatch only and must never be set in production.
+fn validate_payees(registry: &PayeeRegistry, allow_demo: bool) -> Result<(), StartupError> {
+    for (payee_id, entries) in registry.iter() {
+        for entry in entries {
+            if !is_placeholder_pay_to(&entry.pay_to) {
+                continue;
+            }
+            if allow_demo {
+                tracing::warn!(
+                    payee_id = %payee_id.0,
+                    "ZPAY_ALLOW_DEMO_PAYEE=1; running with placeholder payee; do not use in production",
+                );
+            } else {
+                return Err(StartupError::PlaceholderPayee {
+                    payee_id: payee_id.0.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Demo-placeholder UA shape: the Zcash testnet UA HRP followed by a
+/// run of `q` padding characters.
+const PLACEHOLDER_PAY_TO_PREFIX: &str = "utest1q";
+/// Minimum total length the shape check requires.
+///
+/// The baked-in `etc/aether-demo.toml` placeholder is 133 chars; we
+/// leave a small floor below that so a typo (off by a few chars)
+/// still trips the gate without false-positive matches on short
+/// hand-typed addresses.
+const PLACEHOLDER_PAY_TO_MIN_LEN: usize = 100;
+
+/// Match the demo placeholder by *shape*, not by full-string compare.
+///
+/// Rule: starts with `utest1q`, is at least 100 chars long, and every
+/// character after the `utest1` HRP is `q`. Real testnet UAs encode
+/// keys and metadata that yield a base32 alphabet over the data
+/// portion, so they always contain non-`q` characters past position 6.
+fn is_placeholder_pay_to(pay_to: &str) -> bool {
+    /// Length of the testnet UA HRP `utest1` (Zcash UA human-readable
+    /// prefix).
+    const HRP_LEN: usize = 6;
+    if !pay_to.starts_with(PLACEHOLDER_PAY_TO_PREFIX) || pay_to.len() < PLACEHOLDER_PAY_TO_MIN_LEN {
+        return false;
+    }
+    pay_to[HRP_LEN..].bytes().all(|b| b == b'q')
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct MerchantsConfigEntry {
+struct PayeesConfigFile {
+    #[serde(default)]
+    payees: std::collections::HashMap<String, PayeesConfigEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PayeesConfigEntry {
     #[serde(default)]
     accepts: Vec<AcceptsEntry>,
 }
 
-const fn zinder_network_from_str(raw: &str) -> ZinderNetwork {
-    match raw.as_bytes() {
-        b"mainnet" => ZinderNetwork::ZcashMainnet,
-        b"testnet" => ZinderNetwork::ZcashTestnet,
-        _ => ZinderNetwork::ZcashRegtest,
+fn zinder_network_from_str(raw: &str) -> Result<ZinderNetwork, StartupError> {
+    match raw {
+        "mainnet" => Ok(ZinderNetwork::ZcashMainnet),
+        "testnet" => Ok(ZinderNetwork::ZcashTestnet),
+        "regtest" => Ok(ZinderNetwork::ZcashRegtest),
+        other => Err(StartupError::NetworkInvalid {
+            provided: other.to_owned(),
+        }),
     }
 }
 
@@ -568,51 +792,54 @@ impl BroadcastClient for AnyBroadcastClient {
     }
 }
 
-/// Concrete disclosure-verifier variant chosen at startup.
-enum AnyDisclosureVerifier {
-    /// Placeholder when no explorer endpoint is configured. Returns
-    /// `Verdict::CapabilityUnavailable` so the `/verify` handler surfaces
-    /// 503 `capability_unavailable`.
-    CapabilityUnavailable,
-    /// Production verifier backed by zinder's
-    /// `ExplorerQuery.VerifyPaymentDisclosure`.
-    Zinder(Box<ZinderDisclosureVerifier>),
+/// Concrete transaction-fetcher variant chosen at startup.
+///
+/// The runtime composes the local ZIP-311 verifier with whichever
+/// concrete fetcher the operator's environment supports. See ADR-0007.
+enum AnyTransactionFetcher {
+    /// Placeholder when no explorer endpoint is configured. Every
+    /// call returns `FetchError::Unavailable`, which the local verifier
+    /// surfaces as `chain_presence: "oracle_unavailable"` on the wire.
+    Rejecting(RejectingTransactionFetcher),
+    /// Production fetcher backed by zinder's explorer plane.
+    ///
+    /// Boxed because the underlying tonic `Endpoint` is several hundred
+    /// bytes, while the `Rejecting` variant is unit-sized; clippy's
+    /// `large_enum_variant` rule prefers indirection.
+    Zinder(Box<ZinderTransactionFetcher>),
 }
 
-impl DisclosureVerifier for AnyDisclosureVerifier {
-    async fn verify_disclosure(
+impl TransactionFetcher for AnyTransactionFetcher {
+    async fn fetch_transaction(
         &self,
-        disclosure_bytes: &[u8],
-    ) -> Result<DisclosureVerdict, VerifyError> {
+        txid: [u8; 32],
+    ) -> Result<DisclosedTransaction, FetchError> {
         match self {
-            Self::CapabilityUnavailable => Ok(DisclosureVerdict {
-                verdict: Verdict::CapabilityUnavailable,
-                transaction_id: None,
-                payment_id: None,
-                disclosed_value_zat: None,
-            }),
-            Self::Zinder(verifier) => verifier.verify_disclosure(disclosure_bytes).await,
+            Self::Rejecting(inner) => inner.fetch_transaction(txid).await,
+            Self::Zinder(fetcher) => fetcher.fetch_transaction(txid).await,
         }
     }
 }
 
-fn build_disclosure_verifier(
+fn build_transaction_fetcher(
     config: &ResolvedConfig,
-) -> Result<AnyDisclosureVerifier, StartupError> {
+) -> Result<AnyTransactionFetcher, StartupError> {
     let Some(endpoint) = config.explorer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_NODE__EXPLORER_GRPC_ADDR unset; /x402/v2/verify returns capability_unavailable until an explorer plane is configured",
+            "ZPAY_NODE__EXPLORER_GRPC_ADDR unset; /x402/v2/verify reports chain_presence=oracle_unavailable until an explorer plane is configured",
         );
-        return Ok(AnyDisclosureVerifier::CapabilityUnavailable);
+        return Ok(AnyTransactionFetcher::Rejecting(
+            RejectingTransactionFetcher::new(),
+        ));
     };
-    let verifier = ZinderDisclosureVerifier::connect(endpoint.clone()).map_err(|source| {
+    let fetcher = ZinderTransactionFetcher::connect(endpoint.clone()).map_err(|source| {
         StartupError::BroadcastClient {
             endpoint,
             source: Box::new(source),
         }
     })?;
-    tracing::info!("zinder disclosure verifier wired");
-    Ok(AnyDisclosureVerifier::Zinder(Box::new(verifier)))
+    tracing::info!("zinder transaction fetcher wired");
+    Ok(AnyTransactionFetcher::Zinder(Box::new(fetcher)))
 }
 
 fn build_ops_router() -> Router {
@@ -633,7 +860,7 @@ async fn readyz() -> impl IntoResponse {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [("content-type", "application/json")],
-        r#"{"status":"starting","reason":"dependency probes not yet implemented (M1)"}"#,
+        r#"{"status":"starting","reason":"dependency probes not implemented yet"}"#,
     )
 }
 
@@ -642,15 +869,42 @@ struct ResolvedConfig {
     app_bind_addr: SocketAddr,
     ops_bind_addr: SocketAddr,
     network: String,
+    /// Network the ZIP-311 `BLAKE2b` digest personalization binds to.
+    /// Read from `ZPAY_VERIFY__NETWORK` and constrained to mainnet
+    /// or testnet (per ADR-0007: regtest carries no distinct SLIP-44
+    /// number).
+    verify_network: PaymentNetwork,
     indexer_grpc_addr: Option<String>,
     explorer_grpc_addr: Option<String>,
-    merchants_config_path: Option<String>,
+    payees_config_path: Option<String>,
     store_backend: String,
     store_url: String,
     store_auth_token: Option<String>,
+    static_tip_fallback: u32,
+    finality_depth: u32,
+    /// Pinned host the DPoP verifier expects on every inbound
+    /// request. Read from `ZPAY_EXPECTED_HOST`. When `None`, the
+    /// verifier falls back to the inbound `Host` header and the
+    /// runtime emits a startup `WARN`.
+    expected_host: Option<String>,
+    /// Scheme the DPoP verifier expects on every inbound request.
+    /// Read from `ZPAY_EXPECTED_SCHEME`. Defaults to `"https"` when
+    /// `ZPAY_EXPECTED_HOST` is set (operator-pinned production
+    /// deployment) and `"http"` otherwise (dev fallback).
+    expected_scheme: String,
+    /// Operator-toggled escape hatch for the placeholder-payee gate.
+    /// Read from `ZPAY_ALLOW_DEMO_PAYEE`. Off by default; set to a
+    /// truthy value (`1`, `true`, `yes`, case-insensitive) only in
+    /// dev/compose stacks that intentionally ship the baked-in
+    /// `aether-demo` placeholder.
+    allow_demo_payee: bool,
 }
 
 impl ResolvedConfig {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "from_env is the env-var dispatch surface; each block reads, trims, and converts a single ZPAY_* variable, and splitting it into helper functions per variable would scatter the env-var vocabulary across the file without changing the read order"
+    )]
     fn from_env() -> Result<Self, StartupError> {
         let app_bind_raw = std::env::var("ZPAY_SERVER__BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -663,7 +917,7 @@ impl ResolvedConfig {
         let explorer_grpc_addr = std::env::var("ZPAY_NODE__EXPLORER_GRPC_ADDR")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
-        let merchants_config_path = std::env::var("ZPAY_MERCHANTS__CONFIG_PATH")
+        let payees_config_path = std::env::var("ZPAY_PAYEES__CONFIG_PATH")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
 
@@ -681,6 +935,40 @@ impl ResolvedConfig {
             .ok()
             .filter(|raw| !raw.trim().is_empty());
 
+        let static_tip_fallback = match std::env::var("ZPAY_STATIC_TIP_FALLBACK") {
+            Ok(raw) => {
+                let trimmed = raw.trim().to_owned();
+                if trimmed.is_empty() {
+                    DEFAULT_STATIC_TIP_FALLBACK
+                } else {
+                    trimmed.parse::<u32>().map_err(|source| {
+                        StartupError::StaticTipInvalid {
+                            provided: trimmed,
+                            source,
+                        }
+                    })?
+                }
+            }
+            Err(_) => DEFAULT_STATIC_TIP_FALLBACK,
+        };
+
+        let finality_depth = match std::env::var("ZPAY_FINALITY_DEPTH") {
+            Ok(raw) => {
+                let trimmed = raw.trim().to_owned();
+                if trimmed.is_empty() {
+                    DEFAULT_FINALITY_DEPTH
+                } else {
+                    trimmed.parse::<u32>().map_err(|source| {
+                        StartupError::FinalityDepthInvalid {
+                            provided: trimmed,
+                            source,
+                        }
+                    })?
+                }
+            }
+            Err(_) => DEFAULT_FINALITY_DEPTH,
+        };
+
         let app_bind_addr = app_bind_raw
             .parse()
             .map_err(|source| StartupError::BindAddress {
@@ -695,17 +983,108 @@ impl ResolvedConfig {
                 provided: ops_bind_raw,
                 source,
             })?;
+
+        // DPoP expectations: ZPAY_EXPECTED_HOST pins the host the DPoP
+        // verifier canonicalizes against; ZPAY_EXPECTED_SCHEME pins the
+        // scheme. The scheme defaults to "https" when a host is pinned
+        // (production) and "http" otherwise (dev fallback). Either env
+        // var may be set independently; an operator running TLS
+        // termination at the edge can pin scheme=http if the runtime
+        // sits behind the terminator.
+        let expected_host = std::env::var("ZPAY_EXPECTED_HOST")
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty());
+        let expected_scheme = std::env::var("ZPAY_EXPECTED_SCHEME").map_or_else(
+            |_| default_expected_scheme(expected_host.as_deref()),
+            |raw| {
+                let trimmed = raw.trim().to_owned();
+                if trimmed.is_empty() {
+                    default_expected_scheme(expected_host.as_deref())
+                } else {
+                    trimmed
+                }
+            },
+        );
+
+        // Verify-network: the digest personalization binds the
+        // ZIP-311 BLAKE2b output to the network. Pinned via
+        // ZPAY_VERIFY__NETWORK. The config has no default: a mismatch
+        // between operator intent and the SLIP-44 coin type the
+        // verifier uses would silently produce wrong verdicts (a
+        // mainnet disclosure would never verify under testnet
+        // personalization). Force the operator to choose.
+        let verify_network_raw = std::env::var("ZPAY_VERIFY__NETWORK").ok();
+        let verify_network = resolve_verify_network(verify_network_raw.as_deref())?;
+
+        // Placeholder-payee gate: off by default. Truthy values are
+        // `1`, `true`, `yes` (case-insensitive); anything else is
+        // treated as off so a typo does not silently disable the gate.
+        let allow_demo_payee =
+            std::env::var("ZPAY_ALLOW_DEMO_PAYEE").is_ok_and(|raw| parse_truthy(&raw));
+
         Ok(Self {
             app_bind_addr,
             ops_bind_addr,
             network,
+            verify_network,
             indexer_grpc_addr,
             explorer_grpc_addr,
-            merchants_config_path,
+            payees_config_path,
             store_backend,
             store_url,
             store_auth_token,
+            static_tip_fallback,
+            finality_depth,
+            expected_host,
+            expected_scheme,
+            allow_demo_payee,
         })
+    }
+}
+
+/// Parse a string into a truthy/falsy boolean.
+///
+/// Uses the same vocabulary most container runtimes accept: `1`,
+/// `true`, `yes` (case-insensitive) are truthy; everything else
+/// (including unset, empty, `0`, `false`, `no`, and any typo) is
+/// falsy. Used for opt-in operator switches where a typo should not
+/// silently flip behaviour into the dangerous direction.
+fn parse_truthy(raw: &str) -> bool {
+    matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+}
+
+/// Parse `ZPAY_VERIFY__NETWORK` into a [`PaymentNetwork`]. Constrained
+/// to mainnet or testnet per ADR-0007.
+fn parse_verify_network(raw: &str) -> Result<PaymentNetwork, StartupError> {
+    match raw {
+        "mainnet" => Ok(PaymentNetwork::Mainnet),
+        "testnet" => Ok(PaymentNetwork::Testnet),
+        other => Err(StartupError::VerifyNetworkInvalid {
+            provided: other.to_owned(),
+        }),
+    }
+}
+
+/// Resolve the raw `ZPAY_VERIFY__NETWORK` env value into a pinned
+/// [`PaymentNetwork`].
+///
+/// Returns [`StartupError::VerifyNetworkMissing`] when the var is
+/// absent or empty after trimming, and
+/// [`StartupError::VerifyNetworkInvalid`] for any other string.
+fn resolve_verify_network(raw: Option<&str>) -> Result<PaymentNetwork, StartupError> {
+    let trimmed = raw.map_or("", str::trim);
+    if trimmed.is_empty() {
+        return Err(StartupError::VerifyNetworkMissing);
+    }
+    parse_verify_network(trimmed)
+}
+
+fn default_expected_scheme(expected_host: Option<&str>) -> String {
+    if expected_host.is_some() {
+        "https".to_owned()
+    } else {
+        "http".to_owned()
     }
 }
 
@@ -747,15 +1126,54 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfirmationOracle, ConfirmationOutcome, poll_oracle_once};
+    use super::{
+        ConfirmationOracle, ConfirmationOutcome, StartupError, is_placeholder_pay_to,
+        parse_truthy, poll_oracle_once, resolve_verify_network, validate_payees,
+    };
     use parking_lot::Mutex;
+    use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
     use zpay_core::broadcast::BroadcastOutcome;
     use zpay_core::oracle::OracleError;
+    use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
+
+    #[test]
+    fn verify_network_required_when_env_missing() {
+        let outcome = resolve_verify_network(None);
+        assert!(matches!(outcome, Err(StartupError::VerifyNetworkMissing)));
+    }
+
+    #[test]
+    fn verify_network_required_when_env_empty() {
+        let outcome = resolve_verify_network(Some("   "));
+        assert!(matches!(outcome, Err(StartupError::VerifyNetworkMissing)));
+    }
+
+    #[test]
+    fn verify_network_invalid_for_unrecognised_value() {
+        let outcome = resolve_verify_network(Some("regtest"));
+        assert!(matches!(
+            outcome,
+            Err(StartupError::VerifyNetworkInvalid { ref provided }) if provided == "regtest",
+        ));
+    }
+
+    #[test]
+    fn verify_network_accepts_mainnet_and_testnet() {
+        assert!(matches!(
+            resolve_verify_network(Some("mainnet")),
+            Ok(PaymentNetwork::Mainnet),
+        ));
+        assert!(matches!(
+            resolve_verify_network(Some("testnet")),
+            Ok(PaymentNetwork::Testnet),
+        ));
+    }
     use zpay_core::status::{
-        SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status,
+        DEFAULT_FINALITY_DEPTH, SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore,
+        lookup_payment_status,
     };
     use zpay_core::prepare::PreparedTxCache;
-    use zpay_core::types::PaymentId;
+    use zpay_x402::PaymentEventHub;
 
     struct ScriptedOracle {
         outcomes: Mutex<std::collections::HashMap<String, ConfirmationOutcome>>,
@@ -814,15 +1232,122 @@ mod tests {
             },
         )]);
 
-        poll_oracle_once(&oracle, &ledger).await;
-
         let cache = PreparedTxCache::new();
-        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger)
+        let events = PaymentEventHub::new();
+        poll_oracle_once(&oracle, &ledger, &cache, &events, DEFAULT_FINALITY_DEPTH).await;
+
+        let snapshot = lookup_payment_status(&payment_id, &cache, &ledger, DEFAULT_FINALITY_DEPTH)
             .await
             .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.confirmation_count, Some(5));
         assert_eq!(snapshot.mined_block_height, Some(1_234_567));
         Ok(())
+    }
+
+    /// The literal `pay_to` baked into `etc/aether-demo.toml`.
+    /// Used by the placeholder-shape tests below so a future tweak to
+    /// the baked file does not silently invalidate the gate.
+    const DEMO_PLACEHOLDER_PAY_TO: &str =
+        "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+
+    fn placeholder_entry() -> AcceptsEntry {
+        AcceptsEntry {
+            scheme: PaymentScheme::Zcash,
+            network: PaymentNetwork::Testnet,
+            pay_to: DEMO_PLACEHOLDER_PAY_TO.to_owned(),
+            amount_zat: Zatoshis(1),
+            max_validity_seconds: 1800,
+            expiry_delta_blocks: None,
+            merchant_requires_verify: false,
+        }
+    }
+
+    fn real_entry() -> AcceptsEntry {
+        AcceptsEntry {
+            scheme: PaymentScheme::Zcash,
+            network: PaymentNetwork::Testnet,
+            // Real-shape UA (not all `q` past the HRP).
+            pay_to: "utest1abcdefghijklmnopqrstuvwxyz0987654321abcdefghijklmnopqrstuvwxyz0987654321abcdefghijklmnopqrstuvwxyz0987654321abcdefghijklmnopqrs".to_owned(),
+            amount_zat: Zatoshis(50_000),
+            max_validity_seconds: 120,
+            expiry_delta_blocks: None,
+            merchant_requires_verify: false,
+        }
+    }
+
+    #[test]
+    fn placeholder_shape_matches_baked_file() {
+        assert!(is_placeholder_pay_to(DEMO_PLACEHOLDER_PAY_TO));
+    }
+
+    #[test]
+    fn placeholder_shape_matches_off_by_one_padding() {
+        // Same shape (all-`q` past HRP) but one char shorter; still
+        // load-bearing for the gate so a typo in the override file
+        // does not slip through.
+        let near = format!("utest1{}", "q".repeat(120));
+        assert!(is_placeholder_pay_to(&near));
+    }
+
+    #[test]
+    fn placeholder_shape_rejects_real_ua() {
+        let entry = real_entry();
+        assert!(!is_placeholder_pay_to(&entry.pay_to));
+    }
+
+    #[test]
+    fn placeholder_shape_rejects_short_strings() {
+        assert!(!is_placeholder_pay_to("utest1qq"));
+        assert!(!is_placeholder_pay_to(""));
+    }
+
+    #[test]
+    fn placeholder_shape_rejects_mainnet_prefix() {
+        let mainnet_shaped = format!("u1{}", "q".repeat(128));
+        assert!(!is_placeholder_pay_to(&mainnet_shaped));
+    }
+
+    #[test]
+    fn validate_payees_rejects_placeholder_by_default() {
+        let mut registry = PayeeRegistry::new();
+        registry.register(PayeeId("aether-demo".to_owned()), vec![placeholder_entry()]);
+        let outcome = validate_payees(&registry, false);
+        assert!(matches!(
+            outcome,
+            Err(StartupError::PlaceholderPayee { ref payee_id }) if payee_id == "aether-demo",
+        ));
+    }
+
+    #[test]
+    fn validate_payees_accepts_placeholder_when_allow_demo_payee_set() {
+        let mut registry = PayeeRegistry::new();
+        registry.register(PayeeId("aether-demo".to_owned()), vec![placeholder_entry()]);
+        let outcome = validate_payees(&registry, true);
+        assert!(outcome.is_ok());
+    }
+
+    #[test]
+    fn validate_payees_accepts_real_payees() {
+        let mut registry = PayeeRegistry::new();
+        registry.register(PayeeId("acme".to_owned()), vec![real_entry()]);
+        let outcome = validate_payees(&registry, false);
+        assert!(outcome.is_ok());
+    }
+
+    #[test]
+    fn validate_payees_accepts_empty_registry() {
+        let registry = PayeeRegistry::new();
+        assert!(validate_payees(&registry, false).is_ok());
+    }
+
+    #[test]
+    fn parse_truthy_matches_documented_vocabulary() {
+        for truthy in ["1", "true", "TRUE", "True", "yes", "YES", " yes ", "  1  "] {
+            assert!(parse_truthy(truthy), "expected {truthy:?} to be truthy");
+        }
+        for falsy in ["", " ", "0", "false", "no", "off", "enabled", "2", "y"] {
+            assert!(!parse_truthy(falsy), "expected {falsy:?} to be falsy");
+        }
     }
 
     #[tokio::test]
@@ -846,7 +1371,9 @@ mod tests {
         // txid. The Rejected entry should be skipped before the oracle is
         // even consulted because it carries no transaction_id.
         let oracle = ScriptedOracle::new(&[]);
-        poll_oracle_once(&oracle, &ledger).await;
+        let cache = PreparedTxCache::new();
+        let events = PaymentEventHub::new();
+        poll_oracle_once(&oracle, &ledger, &cache, &events, DEFAULT_FINALITY_DEPTH).await;
         Ok(())
     }
 }

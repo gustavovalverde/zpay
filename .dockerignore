@@ -1,0 +1,31 @@
+# Exclude the cargo target tree from the docker build context. The
+# builder stage uses a target cache mount, so persisting the host's
+# target/ across docker builds buys nothing and gigabytes of context
+# upload kills iteration speed.
+target/
+**/target/
+
+# Local persistence file: never useful inside the image, often
+# multi-MB.
+zpay.libsql
+*.libsql
+*.libsql-journal
+
+# Git metadata.
+.git/
+.gitignore
+
+# IDE.
+.vscode/
+.idea/
+*.swp
+
+# Scripts that only make sense on the host.
+scripts/
+
+# Already shipping under etc/ via COPY; nothing else under docs/
+# belongs in the runtime image.
+docs/
+
+# Local node_modules if any tool ever drops one in this repo.
+node_modules/

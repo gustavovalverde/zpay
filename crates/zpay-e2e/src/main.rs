@@ -32,7 +32,7 @@ use zally_core::{
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions};
 use zally_storage::{Sqlite, SqliteOptions};
 use zally_wallet::{SendPaymentPlan, Wallet};
-use zpay_core::prepare::PROTOCOL_MEMO_BYTE_COUNT;
+use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
 
 /// CLI entry point.
 #[derive(Debug, Parser)]
@@ -90,20 +90,20 @@ enum Command {
     /// prepared memo, submit through `/settle`, poll until the
     /// confirmation oracle bumps the count.
     Run {
-        /// Merchant id registered in zpay's accepts registry.
+        /// Payee id registered in zpay's accepts registry.
         #[arg(long, default_value = "aether-ai")]
-        merchant_id: String,
+        payee_id: String,
         /// Unified address the prepared tx will pay. May be the same
         /// wallet's second u-address; the harness only cares that the
-        /// tx broadcasts successfully.
+        /// tx broadcasts successfully. Informational: the registry's
+        /// `pay_to` is the authoritative target.
         #[arg(long)]
         recipient_address: Option<String>,
-        /// Amount in zatoshis the prepared tx will move.
+        /// Amount in zatoshis used to gate the wallet's balance before
+        /// prepare. Informational: the registry's `amount_zat` is the
+        /// authoritative value that flows through the URI.
         #[arg(long, default_value_t = 10_000)]
         amount_zat: u64,
-        /// Validity window for the prepared row.
-        #[arg(long, default_value_t = 600)]
-        validity_seconds: u64,
         /// Maximum seconds to wait for the oracle to observe a
         /// confirmation before exiting.
         #[arg(long, default_value_t = 600)]
@@ -166,10 +166,9 @@ async fn main() -> Result<(), HarnessError> {
             shield_funds(&wallet, account_id, &chain, shielding_threshold_zat).await?;
         }
         Command::Run {
-            merchant_id,
+            payee_id,
             recipient_address,
             amount_zat,
-            validity_seconds,
             poll_seconds,
         } => {
             run_flow(
@@ -177,10 +176,9 @@ async fn main() -> Result<(), HarnessError> {
                 account_id,
                 &chain,
                 &cli.zpay_url,
-                merchant_id,
+                payee_id,
                 recipient_address,
                 amount_zat,
-                validity_seconds,
                 poll_seconds,
                 network,
                 &network_label,
@@ -265,10 +263,9 @@ async fn run_flow(
     account_id: AccountId,
     chain: &ZinderChainSource,
     zpay_url: &str,
-    merchant_id: String,
+    payee_id: String,
     recipient_address: Option<String>,
     amount_zat: u64,
-    validity_seconds: u64,
     poll_seconds: u64,
     network: Network,
     network_label: &str,
@@ -307,25 +304,20 @@ async fn run_flow(
         let ua = wallet.derive_next_address_with_transparent(account_id).await?;
         ua.encode(&network.to_parameters())
     };
-    info!(recipient = %recipient, "recipient unified address");
+    info!(recipient = %recipient, "recipient unified address (informational; registry-resolved pay_to is authoritative)");
 
-    // zally's proposal builder targets `(scanned_to_height + 1) +
-    // DEFAULT_TX_EXPIRY_DELTA` for the signed tx's expiry. The prepared
-    // row has to match exactly, or settle rejects with
-    // ExpiryHeightMismatch (ADR-0006). DEFAULT_TX_EXPIRY_DELTA is 40
-    // blocks in zcash_client_backend.
+    // zpay owns the expiry math: it calls its tip oracle and adds
+    // DEFAULT_EXPIRY_DELTA_BLOCKS (40, matching zally's wallet
+    // DEFAULT_TX_EXPIRY_DELTA). The harness used to pre-compute this
+    // and pass it in; commit C removed that knob because zally's
+    // chosen expiry must equal whatever zpay returned.
     let chain_tip_height = outcome.scanned_to_height.as_u32();
-    let expiry_height = chain_tip_height.saturating_add(41);
-    let prepared = call_prepare(
-        zpay_url,
-        &merchant_id,
-        network_label,
-        expiry_height,
-        &recipient,
-        amount_zat,
-        validity_seconds,
-    )
-    .await?;
+    info!(
+        chain_tip_height,
+        informational_expiry = chain_tip_height.saturating_add(41),
+        "wallet-side tip for orientation only; zpay's tip oracle is authoritative for expiry_height",
+    );
+    let prepared = call_prepare(zpay_url, &payee_id, network_label).await?;
     info!(
         payment_id = %prepared.payment_id,
         expiry_height = prepared.expiry_height,
@@ -378,19 +370,19 @@ async fn poll_until_confirmed(
             .send()
             .await
             .map_err(|err| HarnessError::Http(err.to_string()))?;
-        let body: PaymentStatusEnvelope = response
+        let body: PaymentStatusData = response
             .json()
             .await
             .map_err(|err| HarnessError::Http(err.to_string()))?;
         let summary = format!(
             "status={} confirmation_count={:?} mined_height={:?}",
-            body.data.status, body.data.confirmation_count, body.data.mined_block_height,
+            body.status, body.confirmation_count, body.mined_block_height,
         );
         if summary != last_status {
             info!(?summary, "payment status");
             last_status = summary;
         }
-        if body.data.confirmation_count.unwrap_or(0) >= 1 {
+        if body.confirmation_count.unwrap_or(0) >= 1 {
             info!("first confirmation observed; harness exiting");
             return Ok(());
         }
@@ -401,28 +393,25 @@ async fn poll_until_confirmed(
     }
 }
 
-#[allow(clippy::too_many_arguments, reason = "thin RPC adapter; the natural shape mirrors the request body")]
 async fn call_prepare(
     zpay_url: &str,
-    merchant_id: &str,
+    payee_id: &str,
     network_label: &str,
-    expiry_height: u32,
-    recipient_unified_address: &str,
-    amount_zat: u64,
-    validity_seconds: u64,
 ) -> Result<PreparedPayment, HarnessError> {
+    let idempotency_key = format!(
+        "zpay-e2e-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis())
+    );
     let body = PrepareRequestBody {
-        merchant_id: merchant_id.to_owned(),
+        payee_id: payee_id.to_owned(),
         network: network_label.to_owned(),
         scheme: "zcash".to_owned(),
-        recipient_unified_address: recipient_unified_address.to_owned(),
-        amount_zat,
-        challenge_hash: vec![0x11; 32],
-        resource_hash: vec![0x22; 32],
-        evidence_pack_hash: vec![0x33; 32],
-        expiry_height,
-        validity_seconds,
-        idempotency_key: None,
+        resource_uri: format!("zpay-e2e/items/{payee_id}"),
+        nonce: idempotency_key.clone(),
+        evidence_pack_hash: None,
+        idempotency_key: Some(idempotency_key),
     };
     let client = reqwest::Client::new();
     let response = client
@@ -436,25 +425,24 @@ async fn call_prepare(
         let text = response.text().await.unwrap_or_default();
         return Err(HarnessError::PrepareFailed { status, body: text });
     }
-    let envelope: PrepareResponseEnvelope = response
+    let prepared: PreparedPayment = response
         .json()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
-    Ok(envelope.data)
+    Ok(prepared)
 }
 
 fn memo_from_protocol_prefix(memo_bytes: &[u8]) -> Result<Memo, HarnessError> {
-    if memo_bytes.len() != PROTOCOL_MEMO_BYTE_COUNT {
-        return Err(HarnessError::MemoLength {
-            len: memo_bytes.len(),
-        });
+    let len = memo_bytes.len();
+    if len != PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE && len != PROTOCOL_MEMO_BYTE_COUNT {
+        return Err(HarnessError::MemoLength { len });
     }
     // ZIP-302: 0xFF declares an Arbitrary memo whose remaining 511
     // bytes carry application-defined data. The prepared protocol memo
-    // is exactly the leading 98 bytes (tag + version + three hashes);
-    // the remaining 413 bytes are zero padding.
+    // is either 66 bytes (no evidence pack) or 98 bytes (with one);
+    // anything past the prefix is zero padding.
     let mut buf = [0u8; 512];
-    buf[..PROTOCOL_MEMO_BYTE_COUNT].copy_from_slice(memo_bytes);
+    buf[..len].copy_from_slice(memo_bytes);
     let memo_bytes = MemoBytes::from_bytes(&buf).map_err(|err| HarnessError::MemoCompose {
         reason: err.to_string(),
     })?;
@@ -514,24 +502,29 @@ impl Submitter for ZpaySettleSubmitter {
                 reason: format!("zpay /settle returned {status}: {text}"),
             });
         }
-        let envelope: SettleResponseEnvelope =
+        let outcome: SettlementResponseData =
             response
                 .json()
                 .await
                 .map_err(|err| SubmitterError::Unavailable {
                     reason: err.to_string(),
                 })?;
-        zpay_outcome_to_submit_outcome(envelope.data)
+        zpay_outcome_to_submit_outcome(&outcome)
     }
 }
 
 fn zpay_outcome_to_submit_outcome(
-    outcome: SettlementResponseData,
+    outcome: &SettlementResponseData,
 ) -> Result<SubmitOutcome, SubmitterError> {
-    let tx_id_hex = outcome.broadcast_outcome.transaction_id.unwrap_or_default();
+    let tx_id_hex = outcome
+        .broadcast_outcome
+        .transaction_id
+        .clone()
+        .unwrap_or_default();
     let tx_id_bytes = decode_txid(&tx_id_hex)?;
     let tx_id = TxId::from_bytes(tx_id_bytes);
-    match outcome.broadcast_outcome.outcome.as_str() {
+    // Commit A renamed the broadcast outcome's serde tag to `kind`.
+    match outcome.broadcast_outcome.kind.as_str() {
         "accepted" => Ok(SubmitOutcome::Accepted { tx_id }),
         "duplicate" => Ok(SubmitOutcome::Duplicate { tx_id }),
         kind => Err(SubmitterError::Unavailable {
@@ -553,22 +546,14 @@ fn decode_txid(tx_id_hex: &str) -> Result<[u8; 32], SubmitterError> {
 
 #[derive(Debug, Serialize)]
 struct PrepareRequestBody {
-    merchant_id: String,
+    payee_id: String,
     network: String,
     scheme: String,
-    recipient_unified_address: String,
-    amount_zat: u64,
-    challenge_hash: Vec<u8>,
-    resource_hash: Vec<u8>,
-    evidence_pack_hash: Vec<u8>,
-    expiry_height: u32,
-    validity_seconds: u64,
+    resource_uri: String,
+    nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_pack_hash: Option<Vec<u8>>,
     idempotency_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PrepareResponseEnvelope {
-    data: PreparedPayment,
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,6 +564,9 @@ struct PreparedPayment {
     payment_uri: String,
     memo_bytes: Vec<u8>,
     expiry_height: u32,
+    #[serde(default)]
+    #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
+    amount_zat: u64,
 }
 
 /// Wire types for `/x402/v2/settle`.
@@ -587,11 +575,6 @@ struct PreparedPayment {
 struct SettleRequestBody {
     payment_id: String,
     raw_tx_hex: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SettleResponseEnvelope {
-    data: SettlementResponseData,
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,7 +588,8 @@ struct SettlementResponseData {
 
 #[derive(Debug, Deserialize)]
 struct BroadcastOutcomeBody {
-    outcome: String,
+    /// Discriminator name: matches Commit A's `kind` serde tag.
+    kind: String,
     transaction_id: Option<String>,
     #[serde(default)]
     #[allow(dead_code, reason = "wire-shape mirror of zpay response; not all fields are read by the harness")]
@@ -613,11 +597,6 @@ struct BroadcastOutcomeBody {
 }
 
 /// Wire types for `/x402/v2/payments/{payment_id}`.
-
-#[derive(Debug, Deserialize)]
-struct PaymentStatusEnvelope {
-    data: PaymentStatusData,
-}
 
 #[derive(Debug, Deserialize)]
 struct PaymentStatusData {
@@ -653,7 +632,9 @@ enum HarnessError {
         spendable_zat: u64,
         requested_zat: u64,
     },
-    #[error("prepared memo_bytes length expected {PROTOCOL_MEMO_BYTE_COUNT}, got {len}")]
+    #[error(
+        "prepared memo_bytes length expected {PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE} or {PROTOCOL_MEMO_BYTE_COUNT}, got {len}"
+    )]
     MemoLength { len: usize },
     #[error("memo compose failed: {reason}")]
     MemoCompose { reason: String },

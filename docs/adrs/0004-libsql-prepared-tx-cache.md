@@ -48,19 +48,31 @@ two-phase write and risks divergence.
 inside one zpay-store crate. SQLite file in local dev; Turso embedded
 replica or remote Turso in production.**
 
-Schema (initial migration `0001_initial.sql`):
+Shipped schema (after the 2026-05-26 reconciliation and the 2026-06-03
+DPoP-binding migration; see the revision history for the redesigns
+that landed each column):
 
-- `prepared_tx (payment_id TEXT PRIMARY KEY, merchant_id TEXT, network
-  TEXT, recipient_unified_address TEXT, amount_zat INTEGER, memo_bytes
-  BLOB, expiry_height INTEGER, agent_dpop_jkt TEXT, idempotency_key
-  TEXT, created_at_unix_seconds INTEGER, expires_at_unix_seconds INTEGER,
-  UNIQUE (merchant_id, agent_dpop_jkt, idempotency_key))`
-- `settlement_ledger (payment_id TEXT PRIMARY KEY, txid TEXT,
-  network TEXT, broadcast_at_unix_seconds INTEGER, broadcast_outcome
-  TEXT, current_confirmations INTEGER, last_confirmation_check_at_unix_seconds
-  INTEGER, evidence_pack_hash BLOB, watch_id TEXT)` (append-only; rows
-  are mutated only to update `current_confirmations` and
-  `last_confirmation_check_at_unix_seconds`).
+- `prepared_tx (payment_id TEXT PRIMARY KEY, payee_id TEXT NOT NULL,
+  network TEXT NOT NULL, scheme TEXT NOT NULL, recipient_unified_address
+  TEXT NOT NULL, amount_zat INTEGER NOT NULL, payment_uri TEXT NOT NULL,
+  memo_bytes BLOB NOT NULL, expiry_height INTEGER NOT NULL,
+  agent_dpop_jkt TEXT NOT NULL, idempotency_key TEXT, intent_posture
+  TEXT NOT NULL, merchant_requires_verify INTEGER NOT NULL,
+  created_at_unix_seconds INTEGER NOT NULL, expires_at_unix_seconds
+  INTEGER NOT NULL)` plus a partial unique index
+  `prepared_tx_idempotency_idx ON prepared_tx (agent_dpop_jkt,
+  idempotency_key) WHERE idempotency_key IS NOT NULL`. The composite
+  is the idempotency identity: a `(jkt, idempotency_key)` pair replays
+  to the same `payment_id`, but a different `jkt` reusing the same
+  `idempotency_key` allocates a fresh row, which is the property the
+  DPoP middleware buys.
+- `settlement_ledger (payment_id TEXT PRIMARY KEY, broadcast_outcome_kind
+  TEXT NOT NULL, transaction_id TEXT, upstream_message TEXT,
+  settled_at_unix_seconds INTEGER NOT NULL, confirmation_count INTEGER,
+  mined_block_height INTEGER, last_confirmation_check_at_unix_seconds
+  INTEGER)`. Append-only; rows are mutated only by the confirmation
+  oracle as it updates `confirmation_count`, `mined_block_height`, and
+  `last_confirmation_check_at_unix_seconds`.
 - `bearer_key_hash (key_hash BLOB PRIMARY KEY, label TEXT,
   created_at_unix_seconds INTEGER, revoked_at_unix_seconds INTEGER)`
 
@@ -191,3 +203,93 @@ through `execute_transactional_batch` and tracks state in
 feature, default-on for tests) and the libSQL implementations via
 the `ZPAY_STORE__BACKEND` env var (`memory` or `libsql`; defaults to
 `libsql` with `ZPAY_STORE__URL` defaulting to `file:./zpay.libsql`).
+
+### 2026-06-03: DPoP-bound idempotency composite ships
+
+Commit E lands the `(agent_dpop_jkt, idempotency_key)` composite the
+2026-05-26 entry deferred. `prepared_tx.agent_dpop_jkt` is `TEXT NOT
+NULL`; the partial UNIQUE INDEX `prepared_tx_idempotency_idx` switches
+from `(payee_id, idempotency_key)` to `(agent_dpop_jkt,
+idempotency_key) WHERE idempotency_key IS NOT NULL`. A new DPoP
+middleware in `zpay-x402::dpop` verifies an ES256 proof on every
+`POST /x402/v2/prepare` and `POST /x402/v2/settle` request, extracts
+the RFC 7638 JWK thumbprint, and threads it through `propose` and
+`submit_settlement`. Settle compares the verified jkt against the
+prepared row and refuses any mismatch with 403 `dpop_mismatch`. The
+`/accepts`, `/tip`, `/payments/{id}`, `/payments/{id}/events`, and
+`/verify` routes stay unauthenticated; payment-id is the capability
+that gates them.
+
+The replay store lives in `AppState` and keys `(jkt, jti)` for a
+5-minute window. Clock skew tolerance is +/- 60 seconds. Each
+typed `DpopError` variant maps to a unique `application/problem+json`
+code (`dpop_missing`, `dpop_invalid_proof`, `dpop_clock_skew`,
+`dpop_replay`, `dpop_mismatch`) so wire consumers can branch on the
+failure mode without sniffing the prose detail.
+
+### 2026-06-03: Commit G DPoP production hardening
+
+Commit G tightens the verifier into a shape production deployments can
+ship as-is and extends the schema's idempotency story into a wire
+contract operators control via env vars. Seven changes land together:
+
+- **Case-sensitive `htm`.** RFC 9449 requires byte-exact matching on
+  the HTTP method. The verifier no longer folds case; the demo BFF
+  sends upper-case verbs verbatim. A new unit test
+  (`htm_lower_case_rejected_rfc9449`) is the regression gate.
+- **Pinned host and scheme.** `ZPAY_EXPECTED_HOST` and
+  `ZPAY_EXPECTED_SCHEME` pin the canonical request URL the verifier
+  compares against. When unset the runtime falls back to the inbound
+  `Host` header and emits a startup `WARN`, so an attacker sending
+  `Host: evil.com` alongside a proof minted against `evil.com` cannot
+  trick the verifier in a production deployment that has pinned the
+  host.
+- **`jti` length cap.** A new `MAX_JTI_LEN = 128` constant bounds the
+  memory an adversary can pin per `(jkt, jti)` row.
+- **`jti` burned on failed proofs.** The replay-store `observe` now
+  runs BEFORE htu/htm/iat/signature validation. A probe-then-replay
+  attack window (mint with wrong `htm` to learn the verifier's
+  response, then retry with a corrected `htm` and the same `jti`) no
+  longer exists.
+- **Structural URL canonicalization.** `canonicalize_url` parses both
+  sides through the `url` crate, resolving dot segments, lowercasing
+  the host, stripping default ports, and normalizing percent-encoding.
+  Encoded slashes (`%2f`) remain distinct from literal slashes so
+  path-traversal attempts that tunnel through an encoded slash do not
+  collapse onto the same canonical path.
+- **`ReplayStore` trait.** The replay store becomes
+  `Arc<dyn ReplayStore>` carried on `AppState`. Production deployments
+  swap a shared Redis or libSQL backend without touching the verifier
+  or the wire handlers. The bundled `InMemoryReplayStore` stays the
+  default for single-process runs.
+- **Deterministic BFF keypair.** The demo BFF now derives its ES256
+  keypair from `ZPAY_DPOP_KEY_SEED` via HKDF-SHA-256, so the
+  `(jkt, idempotency_key)` composite stays stable across BFF restarts
+  and serverless cold starts. When the seed is unset the helper falls
+  back to the previous ephemeral generation and emits a `console.warn`.
+
+The schema does not change in Commit G; the production hardening is a
+verifier discipline, not a persistence change. The `agent_dpop_jkt`
+column and the `(agent_dpop_jkt, idempotency_key)` partial UNIQUE
+index documented above remain the storage shape.
+
+### 2026-05-26: Persistence harness without a chain plane
+
+`scripts/test-persistence.sh` exercises the libSQL surface end-to-end
+without zinder, fauzec, or zentity. It builds the release runtime,
+spins it up on a tempdir-scoped libSQL file, and asserts three
+invariants:
+
+1. A `/prepare` call writes a row that survives a process kill (a
+   second `GET /payments/{id}` after restart returns the same status
+   and payment_id).
+2. The partial-UNIQUE idempotency index on
+   `(merchant_id, idempotency_key)` survives restart (replay with
+   the same key still resolves to the original payment_id, not a
+   freshly allocated one).
+3. Distinct idempotency keys remain distinct payment_ids across the
+   same restart (no accidental collapse onto a single row).
+
+The script is the regression gate for the persistence slice. Run it
+before any change to `zpay-store`, the migrations, or the
+`PreparedTxStore` / `SettlementLedgerStore` traits.

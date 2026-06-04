@@ -1,28 +1,46 @@
 //! Prepare a payment: compose the recipient URI, the protocol memo, and the
-//! `payment_id` that the agent attaches to its merchant request.
+//! `payment_id` that the agent attaches to its payee request.
 //!
 //! Two surfaces live here:
 //!
-//! - The pure [`compose_protocol_memo`] function that lays out the 98-byte
-//!   ZIP-302 memo prefix (protocol byte + version + three 32-byte hashes).
-//!   Used by every prepare path; safe to call without any cache.
 //! - The [`PrepareRequest`] / [`Preparation`] types and the [`propose`]
-//!   function that combine the memo with a server-issued `payment_id` and
-//!   write the result to a [`PreparedTxCache`].
+//!   function that combine a server-issued `payment_id` with the protocol
+//!   memo and write the result to a [`PreparedTxCache`]. Memo composition
+//!   itself lives in [`crate::binding::compose_binding_memo`]; the prepare
+//!   path is its only sanctioned caller.
+//! - The store-shaped persistence trait [`PreparedTxStore`] plus the
+//!   in-memory implementation gated behind the `in_memory` Cargo feature.
 //!
-//! In-memory cache only: prepared transactions live for the TTL window and
-//! are dropped on process restart. A future change can swap the cache for a
-//! libSQL-backed implementation without touching the [`PreparedTxCache`]
-//! trait surface.
+//! `propose` is registry-authoritative: the wire request names a payee,
+//! scheme, and network; the [`crate::accepts::PayeeRegistry`] supplies
+//! the recipient address, the expected amount, and the validity window.
+//! Callers cannot override those values from the wire.
+//!
+//! Memo composition is server-side: the wire carries the resource URI
+//! the agent advertised plus a caller-supplied nonce, and the binding
+//! module derives the challenge and resource hashes via domain-separated
+//! SHA-256. Clients no longer pre-hash anything. When an evidence pack
+//! is bound to the payment, its 32-byte hash rides as the trailing slot
+//! of the memo prefix; absent that, the memo is 66 bytes and stops at the
+//! resource hash.
+//!
+//! Expiry math is oracle-driven: `propose` calls a [`ChainTipOracle`] and
+//! adds [`DEFAULT_EXPIRY_DELTA_BLOCKS`] (or the matched entry's per-payee
+//! override) to derive the prepared row's `expiry_height`. This eliminates
+//! the prior contract where callers had to pre-compute and hand in a height
+//! that had to match the wallet's signed transaction.
 
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::accepts::PayeeRegistry;
+use crate::binding::compose_binding_memo;
 use crate::store::StoreError;
+use crate::tip::{ChainTipOracle, TipError};
 use crate::types::{
-    EvidencePackHash, MerchantId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
+    EvidencePackHash, PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis,
 };
 
 #[cfg(feature = "in_memory")]
@@ -32,14 +50,28 @@ use parking_lot::Mutex;
 
 /// Default validity window for a prepared transaction.
 ///
-/// Five minutes matches the PRD-42 prepared-tx cache TTL default. Callers
-/// can override per-request via [`PrepareRequest::validity_seconds`].
+/// Five minutes balances retry tolerance against the cost of stale
+/// prepared rows pinned in libSQL. Per-payee overrides apply via the
+/// registry's `max_validity_seconds` field.
 pub const DEFAULT_VALIDITY_SECONDS: u64 = 300;
 
-/// Length of the protocol-defined memo prefix in bytes.
+/// Default delta (in blocks) added to the chain-tip oracle's report
+/// when deriving a prepared row's `expiry_height`.
+///
+/// Mirrors `zcash_client_backend::wallet::DEFAULT_TX_EXPIRY_DELTA`
+/// (40 blocks): wallets target `tip + 40` for signed transactions, so
+/// the prepared row uses the same delta to keep settle's exact-match
+/// gate from rejecting a wallet that synced against a slightly earlier
+/// tip than zpay did. Per-payee overrides apply via [`AcceptsEntry::expiry_delta_blocks`].
+///
+/// [`AcceptsEntry::expiry_delta_blocks`]: crate::accepts::AcceptsEntry::expiry_delta_blocks
+pub const DEFAULT_EXPIRY_DELTA_BLOCKS: u32 = 40;
+
+/// Length of the protocol-defined memo prefix in bytes when an evidence
+/// pack is bound to the payment.
 ///
 /// Layout: protocol byte (1) + version byte (1) + challenge hash (32) +
-/// resource hash (32) + evidence-pack hash (32). See PRD-42 Decision 11.
+/// resource hash (32) + evidence-pack hash (32).
 ///
 /// On chain this 98-byte prefix occupies the leading region of a 512-byte
 /// ZIP-302 [`Arbitrary`] memo: the wallet writes the prefix, zero-pads to
@@ -49,63 +81,66 @@ pub const DEFAULT_VALIDITY_SECONDS: u64 = 300;
 /// [`Arbitrary`]: https://zips.z.cash/zip-0302#arbitrary
 pub const PROTOCOL_MEMO_BYTE_COUNT: usize = 98;
 
+/// Length of the protocol-defined memo prefix in bytes when no evidence
+/// pack is bound to the payment.
+///
+/// Same layout as [`PROTOCOL_MEMO_BYTE_COUNT`], minus the trailing
+/// 32-byte evidence-pack slot. The memo stops after the resource hash.
+pub const PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE: usize = 66;
+
 /// Leading byte of the zpay protocol memo.
 ///
 /// ZIP-302 (`zips/zip-0302.rst:58-61`) reserves `0xFF` for arbitrary
 /// application-defined payloads, with the remaining 511 bytes
 /// unconstrained. Any value in `0x00..=0xF4` would force the rest of the
-/// memo to parse as valid UTF-8, which our 96 bytes of hash material
-/// cannot satisfy.
+/// memo to parse as valid UTF-8, which our hash material cannot satisfy.
 pub const PROTOCOL_MEMO_TAG: u8 = 0xff;
 
-/// Current protocol memo layout version. Bumped when the layout changes; a
-/// memo with an unknown version is rejected by the disclosure verifier.
-pub const PROTOCOL_MEMO_VERSION: u8 = 0x01;
+/// Current protocol memo layout version. Bumped when the layout changes;
+/// the settle path rejects any other version with
+/// [`crate::settle::SettleError::ObsoleteMemoVersion`].
+///
+/// `0x02` introduced server-side memo composition: the wire stopped
+/// carrying pre-hashed `challenge_hash` / `resource_hash` arrays and
+/// started carrying the resource URI and the caller nonce that
+/// [`crate::binding::compose_binding_memo`] hashes into the prefix.
+pub const PROTOCOL_MEMO_VERSION: u8 = 0x02;
 
-/// 32-byte hash binding the payment to a specific request the agent
-/// presented to the merchant (typically a SHA-256 over merchant id +
-/// resource URI + nonce).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ChallengeHash(pub [u8; 32]);
-
-/// 32-byte hash of the merchant resource URI the agent is paying for.
-/// Treated as an opaque tag; the verifier only checks equality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ResourceHash(pub [u8; 32]);
-
-/// Input to [`propose`]. Composed by a wire adapter from a protocol-specific
-/// request shape.
+/// Input to [`propose`].
+///
+/// Composed by a wire adapter from a protocol-specific request shape.
+/// Registry-authoritative: only the keys (payee, scheme, network) plus
+/// the human-meaningful binding inputs ride on the wire; the registry
+/// supplies the recipient, amount, and validity, and the binding
+/// module hashes the URI + nonce into the protocol memo prefix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareRequest {
-    /// Merchant whose `accepts[]` template applies.
-    pub merchant_id: MerchantId,
+    /// Payee whose `accepts[]` template the registry resolves against.
+    pub payee_id: PayeeId,
     /// Network the payment will settle on.
     pub network: PaymentNetwork,
-    /// Payment scheme advertised in the merchant's `accepts[]` entry.
+    /// Payment scheme advertised in the payee's `accepts[]` entry.
     pub scheme: PaymentScheme,
-    /// Unified address the merchant expects to receive payment at. Format
-    /// validation is the wire adapter's responsibility; zpay-core stores
-    /// the encoded string verbatim.
-    pub recipient_unified_address: String,
-    /// Amount the merchant expects in zatoshis.
-    pub amount_zat: Zatoshis,
-    /// Hash binding this payment to a specific merchant challenge.
-    pub challenge_hash: ChallengeHash,
-    /// Hash of the merchant resource the agent is paying for.
-    pub resource_hash: ResourceHash,
-    /// Evidence-pack hash binding this payment to a zentity proof set.
-    pub evidence_pack_hash: EvidencePackHash,
-    /// Block height after which the prepared transaction cannot settle.
-    pub expiry_height: u32,
-    /// Wall-clock validity window in seconds. Defaults to
-    /// [`DEFAULT_VALIDITY_SECONDS`] when omitted.
+    /// Resource the agent advertised to the payer (the URL the payer
+    /// is paying for). Stored verbatim on the wire and folded into
+    /// both the challenge and resource hashes server-side; clients
+    /// never pre-hash it.
+    pub resource_uri: String,
+    /// Caller-supplied nonce that uniquifies the challenge. Typically a
+    /// UUID or hash; stored verbatim in the SHA-256 pre-image.
+    pub nonce: String,
+    /// Optional evidence-pack hash binding this payment to a zentity
+    /// proof set. When present, the protocol memo grows from 66 to 98
+    /// bytes and the supplied hash occupies the trailing slot.
     #[serde(default)]
-    pub validity_seconds: Option<u64>,
+    pub evidence_pack_hash: Option<EvidencePackHash>,
     /// Caller-supplied idempotency key. When set, a second `propose`
-    /// call with the same `(merchant_id, idempotency_key)` pair returns
-    /// the original preparation instead of allocating a new one.
+    /// call from the same agent (same DPoP `jkt`) with the same
+    /// `idempotency_key` returns the original preparation instead of
+    /// allocating a new one. The composite uniqueness is enforced at
+    /// the store layer as `(agent_dpop_jkt, idempotency_key)`; the
+    /// wire surface does not carry the jkt because the DPoP proof
+    /// header does.
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }
@@ -118,54 +153,57 @@ pub struct Preparation {
     pub payment_id: PaymentId,
     /// ZIP-321 payment URI for the user's wallet to consume.
     pub payment_uri: String,
-    /// 98-byte protocol memo content (protocol byte + version + three
-    /// 32-byte hashes).
+    /// Protocol memo content: 66 bytes when no evidence pack is bound,
+    /// 98 bytes when one is. Layout is the
+    /// [`crate::binding::compose_binding_memo`] return value verbatim.
     pub memo_bytes: Vec<u8>,
     /// Block height after which this preparation cannot be settled.
     pub expiry_height: u32,
+    /// Amount the payee expects in zatoshis. Resolved from the registry
+    /// at propose time; agents read this back from the response so the
+    /// receipt and the wallet both reflect the same authoritative value.
+    pub amount_zat: Zatoshis,
 }
 
 /// Errors that can arise during preparation.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PrepareError {
-    /// Recipient address was empty or otherwise not acceptable for the
-    /// configured scheme. Retry posture: `not_retryable`.
-    #[error("recipient_unified_address must be a non-empty ZIP-316 unified address")]
-    RecipientInvalid,
-    /// Caller asked for a payment with zero zatoshis. Retry posture:
+    /// Caller named a payee the registry does not have. Retry posture:
+    /// `not_retryable`. The operator must register the payee or the
+    /// agent must use a payee id that already exists.
+    #[error("payee unknown: {payee_id:?}")]
+    PayeeUnknown {
+        /// The payee identifier that failed to resolve.
+        payee_id: PayeeId,
+    },
+    /// The named payee is registered but has no `accepts[]` entry for
+    /// the requested `(scheme, network)` pair. Retry posture:
     /// `not_retryable`.
-    #[error("amount_zat must be greater than zero")]
-    AmountZero,
-    /// Caller's expiry height is at or below the lower bound. Retry posture:
-    /// `not_retryable`.
-    #[error("expiry_height must be greater than zero")]
+    #[error(
+        "payee {payee_id:?} does not advertise scheme={scheme:?} on network={network:?}"
+    )]
+    SchemeNetworkUnsupported {
+        /// The payee identifier the caller asked about.
+        payee_id: PayeeId,
+        /// The scheme that was not advertised.
+        scheme: PaymentScheme,
+        /// The network that was not advertised.
+        network: PaymentNetwork,
+    },
+    /// The chain-tip oracle returned zero. Retry posture: `requires_operator`.
+    /// Either the chain plane is misreporting or the static fallback
+    /// height was misconfigured.
+    #[error("expiry_height derived from chain tip is zero")]
     ExpiryHeightInvalid,
+    /// The chain-tip oracle itself surfaced an error. Retry posture:
+    /// inherits from the wrapped [`TipError`] variant.
+    #[error("chain tip oracle failure: {0}")]
+    TipOracle(#[from] TipError),
     /// The prepared-tx store could not complete the read or write.
     /// Retry posture: inherits from the surfaced [`StoreError`] variant.
     #[error("prepared-tx store failure: {0}")]
     Storage(#[from] StoreError),
-}
-
-/// Compose the 98-byte ZIP-302 memo prefix that binds the payment to the
-/// challenge, resource, and evidence pack.
-///
-/// The layout is fixed: byte 0 is [`PROTOCOL_MEMO_TAG`], byte 1 is
-/// [`PROTOCOL_MEMO_VERSION`], bytes 2..34 are `challenge_hash`, bytes
-/// 34..66 are `resource_hash`, bytes 66..98 are `evidence_pack_hash`.
-#[must_use]
-pub fn compose_protocol_memo(
-    challenge_hash: ChallengeHash,
-    resource_hash: ResourceHash,
-    evidence_pack_hash: EvidencePackHash,
-) -> [u8; PROTOCOL_MEMO_BYTE_COUNT] {
-    let mut bytes = [0u8; PROTOCOL_MEMO_BYTE_COUNT];
-    bytes[0] = PROTOCOL_MEMO_TAG;
-    bytes[1] = PROTOCOL_MEMO_VERSION;
-    bytes[2..34].copy_from_slice(&challenge_hash.0);
-    bytes[34..66].copy_from_slice(&resource_hash.0);
-    bytes[66..98].copy_from_slice(&evidence_pack_hash.0);
-    bytes
 }
 
 /// Cached prepared transaction.
@@ -178,8 +216,8 @@ pub fn compose_protocol_memo(
 pub struct PreparedTxEntry {
     /// The full preparation returned to the agent.
     pub preparation: Preparation,
-    /// Merchant the prepare request targeted.
-    pub merchant_id: MerchantId,
+    /// Payee the prepare request targeted.
+    pub payee_id: PayeeId,
     /// Network the payment is bound to.
     pub network: PaymentNetwork,
     /// Recipient address the user's wallet must pay.
@@ -188,9 +226,15 @@ pub struct PreparedTxEntry {
     pub amount_zat: Zatoshis,
     /// Wall-clock deadline after which the sweeper removes the entry.
     pub expires_at_unix_seconds: u64,
-    /// Caller-supplied idempotency key, scoped to `merchant_id`. None
-    /// when the prepare request did not carry one.
+    /// Caller-supplied idempotency key, scoped to `agent_dpop_jkt`.
+    /// None when the prepare request did not carry one.
     pub idempotency_key: Option<String>,
+    /// RFC 7638 JWK thumbprint of the agent's DPoP signing key. The
+    /// wire layer extracts this from the verified `DPoP` proof on
+    /// `POST /prepare` and threads it down to [`propose`]. Settle
+    /// compares the cached value against the proof presented on
+    /// `POST /settle` and refuses any mismatch.
+    pub agent_dpop_jkt: String,
 }
 
 /// Storage trait for prepared transactions awaiting settlement.
@@ -202,8 +246,9 @@ pub trait PreparedTxStore: Send + Sync {
     /// Persist a prepared-tx entry. Replaces any existing entry under
     /// the same `payment_id`. When `idempotency_key` is set, the
     /// implementation also indexes the entry under the
-    /// `(merchant_id, idempotency_key)` pair so a retried prepare
-    /// returns the original entry instead of allocating a new one.
+    /// `(agent_dpop_jkt, idempotency_key)` pair so a retried prepare
+    /// from the same agent returns the original entry instead of
+    /// allocating a new one.
     fn insert(
         &self,
         entry: PreparedTxEntry,
@@ -215,12 +260,13 @@ pub trait PreparedTxStore: Send + Sync {
         payment_id: &PaymentId,
     ) -> impl Future<Output = Result<Option<PreparedTxEntry>, StoreError>> + Send;
 
-    /// Resolve a `(merchant_id, idempotency_key)` to the prepared entry
-    /// the first call produced. Returns `None` when no entry exists or
-    /// the prior entry has already expired.
+    /// Resolve a `(jkt, idempotency_key)` to the prepared entry the
+    /// first call produced. Returns `None` when no entry exists or the
+    /// prior entry has already expired. The `jkt` is the RFC 7638 JWK
+    /// thumbprint of the calling agent's DPoP signing key.
     fn find_by_idempotency(
         &self,
-        merchant_id: &MerchantId,
+        jkt: &str,
         idempotency_key: &str,
     ) -> impl Future<Output = Result<Option<PreparedTxEntry>, StoreError>> + Send;
 
@@ -247,7 +293,7 @@ pub trait PreparedTxStore: Send + Sync {
 
 /// In-memory implementation of [`PreparedTxStore`].
 ///
-/// Storage is keyed by [`PaymentId`] with a secondary `(merchant_id,
+/// Storage is keyed by [`PaymentId`] with a secondary `(payee_id,
 /// idempotency_key)` index so a retried prepare returns the same
 /// preparation. Both maps live behind a single mutex to make insert
 /// and sweep transitions atomic.
@@ -265,7 +311,7 @@ pub struct PreparedTxCache {
 #[derive(Debug, Default)]
 struct CacheInner {
     by_payment_id: HashMap<PaymentId, PreparedTxEntry>,
-    by_idempotency: HashMap<(MerchantId, String), PaymentId>,
+    by_idempotency: HashMap<(String, String), PaymentId>,
 }
 
 #[cfg(feature = "in_memory")]
@@ -283,7 +329,7 @@ impl PreparedTxStore for PreparedTxCache {
         let mut guard = self.inner.lock();
         if let Some(key) = entry.idempotency_key.clone() {
             guard.by_idempotency.insert(
-                (entry.merchant_id.clone(), key),
+                (entry.agent_dpop_jkt.clone(), key),
                 entry.preparation.payment_id.clone(),
             );
         }
@@ -304,13 +350,13 @@ impl PreparedTxStore for PreparedTxCache {
 
     async fn find_by_idempotency(
         &self,
-        merchant_id: &MerchantId,
+        jkt: &str,
         idempotency_key: &str,
     ) -> Result<Option<PreparedTxEntry>, StoreError> {
         let guard = self.inner.lock();
         let Some(payment_id) = guard
             .by_idempotency
-            .get(&(merchant_id.clone(), idempotency_key.to_owned()))
+            .get(&(jkt.to_owned(), idempotency_key.to_owned()))
         else {
             return Ok(None);
         };
@@ -325,7 +371,7 @@ impl PreparedTxStore for PreparedTxCache {
         {
             guard
                 .by_idempotency
-                .remove(&(entry.merchant_id.clone(), key.clone()));
+                .remove(&(entry.agent_dpop_jkt.clone(), key.clone()));
         }
         drop(guard);
         Ok(removed)
@@ -354,82 +400,125 @@ impl PreparedTxStore for PreparedTxCache {
 ///
 /// The returned `payment_id` is a fresh ULID; the caller pairs it with the
 /// agent's DPoP thumbprint at the wire boundary. The composed `memo_bytes`
-/// is the 98-byte protocol prefix (see [`compose_protocol_memo`]); the
-/// agent transmits it to the user's wallet alongside the `payment_uri`.
+/// is the protocol prefix returned by
+/// [`crate::binding::compose_binding_memo`]: 66 bytes when the request
+/// omits `evidence_pack_hash`, 98 bytes when it carries one. The agent
+/// transmits the bytes to the user's wallet alongside the `payment_uri`.
+///
+/// Registry-authoritative resolution:
+/// `(payee_id, scheme, network)` looks up an [`crate::accepts::AcceptsEntry`]
+/// that supplies the recipient address, the expected amount, the validity
+/// window, and the optional per-entry expiry delta. The chain-tip oracle
+/// supplies the current tip; expiry is `tip + delta`.
 ///
 /// # Errors
 ///
-/// - [`PrepareError::RecipientInvalid`] when `recipient_unified_address`
-///   is empty.
-/// - [`PrepareError::AmountZero`] when `amount_zat` is zero.
-/// - [`PrepareError::ExpiryHeightInvalid`] when `expiry_height` is zero.
-/// - [`PrepareError::Storage`] when the underlying
-///   [`PreparedTxStore`] surfaces a [`crate::store::StoreError`].
-pub async fn propose<S: PreparedTxStore + ?Sized>(
+/// - [`PrepareError::PayeeUnknown`] when the registry has no entries for
+///   `payee_id`.
+/// - [`PrepareError::SchemeNetworkUnsupported`] when the payee is
+///   registered but does not advertise the requested `(scheme, network)`.
+/// - [`PrepareError::ExpiryHeightInvalid`] when the oracle reports a zero
+///   tip (a misconfigured static fallback, typically).
+/// - [`PrepareError::TipOracle`] when the chain-tip oracle itself fails.
+/// - [`PrepareError::Storage`] when the underlying [`PreparedTxStore`]
+///   surfaces a [`crate::store::StoreError`].
+pub async fn propose<S, T>(
     request: PrepareRequest,
+    jkt: String,
     store: &S,
-) -> Result<Preparation, PrepareError> {
-    if request.recipient_unified_address.trim().is_empty() {
-        return Err(PrepareError::RecipientInvalid);
-    }
-    if request.amount_zat.0 == 0 {
-        return Err(PrepareError::AmountZero);
-    }
-    if request.expiry_height == 0 {
-        return Err(PrepareError::ExpiryHeightInvalid);
-    }
-
-    // Idempotency replay: if a prior prepare with the same (merchant,
-    // idempotency_key) is still in the store, hand the agent the same
-    // preparation. Expiry sweep already drops stale entries so a hit here
-    // is always within the validity window.
+    registry: &PayeeRegistry,
+    tip_oracle: &T,
+) -> Result<Preparation, PrepareError>
+where
+    S: PreparedTxStore + ?Sized,
+    T: ChainTipOracle + ?Sized,
+{
+    // Idempotency replay: a prior prepare with the same (jkt,
+    // idempotency_key) returns the original preparation verbatim. Done
+    // before any registry / oracle work so a retried prepare never
+    // pays the resolution cost twice. A different agent presenting the
+    // same idempotency_key (and therefore a different jkt) gets a
+    // fresh payment_id.
     if let Some(key) = request
         .idempotency_key
         .as_ref()
         .filter(|raw| !raw.trim().is_empty())
         && let Some(prior) = store
-            .find_by_idempotency(&request.merchant_id, key)
+            .find_by_idempotency(&jkt, key)
             .await
             .map_err(PrepareError::Storage)?
     {
         return Ok(prior.preparation);
     }
 
-    let memo = compose_protocol_memo(
-        request.challenge_hash,
-        request.resource_hash,
-        request.evidence_pack_hash,
+    // Registry-authoritative resolution. The wire request cannot
+    // override the recipient, amount, or validity; the operator's
+    // accepts.toml is the only source of truth for those values.
+    let Some(entries) = registry.find(&request.payee_id) else {
+        return Err(PrepareError::PayeeUnknown {
+            payee_id: request.payee_id,
+        });
+    };
+    let Some(entry) = entries
+        .iter()
+        .find(|candidate| candidate.scheme == request.scheme && candidate.network == request.network)
+    else {
+        return Err(PrepareError::SchemeNetworkUnsupported {
+            payee_id: request.payee_id,
+            scheme: request.scheme,
+            network: request.network,
+        });
+    };
+
+    // Chain-tip-driven expiry. The wallet builds its signed tx against
+    // (tip + DEFAULT_TX_EXPIRY_DELTA); the prepared row uses the same
+    // math so the settle-time exact-match gate accepts it.
+    let tip_height = tip_oracle.current_tip(request.network).await?;
+    let delta = entry
+        .expiry_delta_blocks
+        .unwrap_or(DEFAULT_EXPIRY_DELTA_BLOCKS);
+    let expiry_height = tip_height.saturating_add(delta);
+    if expiry_height == 0 {
+        return Err(PrepareError::ExpiryHeightInvalid);
+    }
+
+    let memo = compose_binding_memo(
+        &request.payee_id,
+        request.scheme,
+        request.network,
+        &request.resource_uri,
+        &request.nonce,
+        request.evidence_pack_hash.as_ref(),
     );
-    let payment_uri = compose_payment_uri(
-        &request.recipient_unified_address,
-        request.amount_zat,
-        &memo,
-    );
+    let payment_uri = compose_payment_uri(&entry.pay_to, entry.amount_zat, &memo);
 
     let preparation = Preparation {
         payment_id: PaymentId::new(),
         payment_uri,
-        memo_bytes: memo.to_vec(),
-        expiry_height: request.expiry_height,
+        memo_bytes: memo,
+        expiry_height,
+        amount_zat: entry.amount_zat,
     };
 
-    let validity_seconds = request
-        .validity_seconds
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_VALIDITY_SECONDS);
+    let validity_seconds = if entry.max_validity_seconds > 0 {
+        entry.max_validity_seconds
+    } else {
+        DEFAULT_VALIDITY_SECONDS
+    };
     let expires_at_unix_seconds = current_unix_seconds().saturating_add(validity_seconds);
 
     store
         .insert(PreparedTxEntry {
             preparation: preparation.clone(),
-            merchant_id: request.merchant_id,
+            payee_id: request.payee_id,
             network: request.network,
-            recipient_unified_address: request.recipient_unified_address,
-            amount_zat: request.amount_zat,
+            recipient_unified_address: entry.pay_to.clone(),
+            amount_zat: entry.amount_zat,
             expires_at_unix_seconds,
             idempotency_key: request
                 .idempotency_key
                 .filter(|raw| !raw.trim().is_empty()),
+            agent_dpop_jkt: jkt,
         })
         .await
         .map_err(PrepareError::Storage)?;
@@ -449,10 +538,17 @@ fn current_unix_seconds() -> u64 {
 /// is wired into the workspace, this delegates to that surface so the URI
 /// vocabulary lives in zally. The memo is base64url-encoded inline per
 /// ZIP-321.
-fn compose_payment_uri(
+///
+/// `pub` so the libSQL store adapter can re-derive the URI from the
+/// persisted components (recipient + amount + memo) when answering
+/// `find_by_idempotency`. The URI is intentionally not persisted as
+/// a column because every byte of it is recoverable from the typed
+/// fields the schema already carries.
+#[must_use]
+pub fn compose_payment_uri(
     recipient_unified_address: &str,
     amount_zat: Zatoshis,
-    memo: &[u8; PROTOCOL_MEMO_BYTE_COUNT],
+    memo: &[u8],
 ) -> String {
     use base64::Engine;
     let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(memo);
@@ -474,55 +570,143 @@ fn format_zec_from_zat(amount_zat: Zatoshis) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        ChallengeHash, PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_TAG, PROTOCOL_MEMO_VERSION,
-        PrepareError, PrepareRequest, PreparedTxCache, PreparedTxStore, ResourceHash,
-        compose_protocol_memo, format_zec_from_zat, propose,
-    };
-    use crate::types::{EvidencePackHash, MerchantId, PaymentNetwork, PaymentScheme, Zatoshis};
+pub(crate) mod test_support {
+    //! Shared fixtures for the prepare / settle / status / events tests.
+    //!
+    //! `propose` now takes a `PayeeRegistry` and a `ChainTipOracle`.
+    //! Keeping the fakes here avoids re-declaring them in every test
+    //! module.
 
-    fn valid_request() -> PrepareRequest {
+    use parking_lot::Mutex;
+
+    use super::PrepareRequest;
+    use crate::accepts::{AcceptsEntry, PayeeRegistry};
+    use crate::tip::{ChainTipOracle, TipError};
+    use crate::types::{PayeeId, PaymentNetwork, PaymentScheme, Zatoshis};
+
+    /// Default payee id used by every shared fixture.
+    pub(crate) const FIXTURE_PAYEE_ID: &str = "aether-ai";
+
+    /// Recipient address baked into the registry fixture. Tests assert
+    /// the URI / persisted row carry this value verbatim.
+    pub(crate) const FIXTURE_RECIPIENT: &str = "utest1exampleaddress";
+
+    /// Amount baked into the registry fixture (`50_000` zat).
+    pub(crate) const FIXTURE_AMOUNT_ZAT: u64 = 50_000;
+
+    /// Tip height returned by [`FixedTipOracle`] in shared fixtures.
+    pub(crate) const FIXTURE_TIP_HEIGHT: u32 = 3_217_900;
+
+    /// JWK thumbprint stand-in for tests that do not exercise the
+    /// DPoP-bound idempotency composite. Distinct from
+    /// [`ALTERNATE_FIXTURE_JKT`] so a test can flip the agent
+    /// identity in-place.
+    pub(crate) const FIXTURE_JKT: &str = "test-jkt-aether-agent";
+
+    /// Second JWK thumbprint stand-in used by the
+    /// idempotency-scoped-by-jkt regression test.
+    pub(crate) const ALTERNATE_FIXTURE_JKT: &str = "test-jkt-rival-agent";
+
+    /// Build a [`PrepareRequest`] that resolves cleanly against the
+    /// shared registry + tip oracle fixtures.
+    pub(crate) fn valid_request() -> PrepareRequest {
         PrepareRequest {
-            merchant_id: MerchantId("aether-ai".to_owned()),
+            payee_id: PayeeId(FIXTURE_PAYEE_ID.to_owned()),
             network: PaymentNetwork::Testnet,
             scheme: PaymentScheme::Zcash,
-            recipient_unified_address: "utest1exampleaddress".to_owned(),
-            amount_zat: Zatoshis(50_000),
-            challenge_hash: ChallengeHash([0x11; 32]),
-            resource_hash: ResourceHash([0x22; 32]),
-            evidence_pack_hash: EvidencePackHash([0x33; 32]),
-            expiry_height: 3_217_900,
-            validity_seconds: None,
+            resource_uri: "https://example.test/resources/fixture".to_owned(),
+            nonce: "00000000-0000-0000-0000-000000000000".to_owned(),
+            evidence_pack_hash: None,
             idempotency_key: None,
         }
     }
 
-    #[test]
-    fn protocol_memo_layout_is_98_bytes() {
-        let memo = compose_protocol_memo(
-            ChallengeHash([1u8; 32]),
-            ResourceHash([2u8; 32]),
-            EvidencePackHash([3u8; 32]),
-        );
-        assert_eq!(memo.len(), PROTOCOL_MEMO_BYTE_COUNT);
-        assert_eq!(memo[0], PROTOCOL_MEMO_TAG);
-        assert_eq!(memo[1], PROTOCOL_MEMO_VERSION);
-        assert_eq!(&memo[2..34], &[1u8; 32]);
-        assert_eq!(&memo[34..66], &[2u8; 32]);
-        assert_eq!(&memo[66..98], &[3u8; 32]);
+    /// Registry with a single zcash/testnet accepts entry for
+    /// [`FIXTURE_PAYEE_ID`]. Tests that need a different payee can call
+    /// [`registry_with`] directly.
+    pub(crate) fn fixture_registry() -> PayeeRegistry {
+        registry_with(FIXTURE_PAYEE_ID)
     }
+
+    /// Registry seeded with one zcash/testnet entry for `payee_id`.
+    pub(crate) fn registry_with(payee_id: &str) -> PayeeRegistry {
+        let mut registry = PayeeRegistry::new();
+        registry.register(
+            PayeeId(payee_id.to_owned()),
+            vec![AcceptsEntry {
+                scheme: PaymentScheme::Zcash,
+                network: PaymentNetwork::Testnet,
+                pay_to: FIXTURE_RECIPIENT.to_owned(),
+                amount_zat: Zatoshis(FIXTURE_AMOUNT_ZAT),
+                max_validity_seconds: 600,
+                expiry_delta_blocks: None,
+                merchant_requires_verify: false,
+            }],
+        );
+        registry
+    }
+
+    /// In-memory [`ChainTipOracle`] that always returns the supplied tip.
+    pub(crate) struct FixedTipOracle {
+        tip: Mutex<u32>,
+    }
+
+    impl FixedTipOracle {
+        pub(crate) fn new(tip: u32) -> Self {
+            Self {
+                tip: Mutex::new(tip),
+            }
+        }
+
+        pub(crate) fn fixture() -> Self {
+            Self::new(FIXTURE_TIP_HEIGHT)
+        }
+    }
+
+    impl ChainTipOracle for FixedTipOracle {
+        async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
+            Ok(*self.tip.lock())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_EXPIRY_DELTA_BLOCKS, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE, PrepareError,
+        PreparedTxCache, PreparedTxStore, format_zec_from_zat, propose,
+    };
+    use super::test_support::{
+        ALTERNATE_FIXTURE_JKT, FIXTURE_JKT, FIXTURE_PAYEE_ID, FIXTURE_TIP_HEIGHT, FixedTipOracle,
+        fixture_registry, registry_with, valid_request,
+    };
+    use crate::tip::{ChainTipOracle, TipError};
+    use crate::types::{PayeeId, PaymentNetwork, Zatoshis};
 
     #[tokio::test]
     async fn propose_inserts_into_store_and_returns_full_preparation()
     -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let preparation = propose(valid_request(), &store)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &registry,
+            &oracle,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
 
-        assert_eq!(preparation.memo_bytes.len(), PROTOCOL_MEMO_BYTE_COUNT);
-        assert_eq!(preparation.expiry_height, 3_217_900);
+        assert_eq!(
+            preparation.memo_bytes.len(),
+            PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE,
+        );
+        let expected_expiry =
+            FIXTURE_TIP_HEIGHT.saturating_add(DEFAULT_EXPIRY_DELTA_BLOCKS);
+        assert_eq!(preparation.expiry_height, expected_expiry);
+        assert_eq!(preparation.amount_zat, Zatoshis(50_000));
         assert!(
             preparation
                 .payment_uri
@@ -541,16 +725,19 @@ mod tests {
             .ok_or("store must echo the prepared payment_id")?;
         assert_eq!(cached.amount_zat, Zatoshis(50_000));
         assert_eq!(cached.recipient_unified_address, "utest1exampleaddress");
+        assert_eq!(cached.agent_dpop_jkt, FIXTURE_JKT);
         Ok(())
     }
 
     #[tokio::test]
-    async fn propose_refuses_empty_recipient() -> Result<(), &'static str> {
-        let mut request = valid_request();
-        request.recipient_unified_address = "   ".to_owned();
+    async fn propose_refuses_unknown_payee() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let outcome = propose(request, &store).await;
-        assert!(matches!(outcome, Err(PrepareError::RecipientInvalid)));
+        let registry = registry_with("known-payee");
+        let oracle = FixedTipOracle::fixture();
+        let mut request = valid_request();
+        request.payee_id = PayeeId("missing".to_owned());
+        let outcome = propose(request, FIXTURE_JKT.to_owned(), &store, &registry, &oracle).await;
+        assert!(matches!(outcome, Err(PrepareError::PayeeUnknown { .. })));
         assert_eq!(
             store.entry_count().await.map_err(|_| "entry_count failed")?,
             0
@@ -559,12 +746,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_refuses_zero_amount() -> Result<(), &'static str> {
-        let mut request = valid_request();
-        request.amount_zat = Zatoshis(0);
+    async fn propose_refuses_scheme_network_mismatch() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let outcome = propose(request, &store).await;
-        assert!(matches!(outcome, Err(PrepareError::AmountZero)));
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
+        let mut request = valid_request();
+        request.network = PaymentNetwork::Mainnet;
+        let outcome = propose(request, FIXTURE_JKT.to_owned(), &store, &registry, &oracle).await;
+        assert!(matches!(
+            outcome,
+            Err(PrepareError::SchemeNetworkUnsupported { .. })
+        ));
         assert_eq!(
             store.entry_count().await.map_err(|_| "entry_count failed")?,
             0
@@ -573,25 +765,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_refuses_zero_expiry_height() -> Result<(), &'static str> {
-        let mut request = valid_request();
-        request.expiry_height = 0;
+    async fn propose_refuses_zero_tip() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let outcome = propose(request, &store).await;
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::new(0);
+        let mut request = valid_request();
+        // Override the registry entry's delta to zero so tip+delta == 0.
+        // (Cannot reach via the wire; we have to mutate the registry.)
+        let mut zero_registry = registry;
+        if let Some(entries) = zero_registry
+            .find(&PayeeId(FIXTURE_PAYEE_ID.to_owned()))
+            .map(<[crate::accepts::AcceptsEntry]>::to_vec)
+        {
+            let mut adjusted = entries;
+            for entry in &mut adjusted {
+                entry.expiry_delta_blocks = Some(0);
+            }
+            zero_registry.register(PayeeId(FIXTURE_PAYEE_ID.to_owned()), adjusted);
+        }
+        request.idempotency_key = None;
+        let outcome = propose(
+            request,
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &zero_registry,
+            &oracle,
+        )
+        .await;
         assert!(matches!(outcome, Err(PrepareError::ExpiryHeightInvalid)));
-        assert_eq!(
-            store.entry_count().await.map_err(|_| "entry_count failed")?,
-            0
-        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn propose_surfaces_tip_oracle_unavailable() -> Result<(), &'static str> {
+        struct FailingOracle;
+
+        impl ChainTipOracle for FailingOracle {
+            async fn current_tip(
+                &self,
+                _network: PaymentNetwork,
+            ) -> Result<u32, TipError> {
+                Err(TipError::Unavailable {
+                    reason: "no chain plane".to_owned(),
+                })
+            }
+        }
+
+        let store = PreparedTxCache::new();
+        let registry = fixture_registry();
+        let outcome = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &registry,
+            &FailingOracle,
+        )
+        .await;
+        assert!(matches!(outcome, Err(PrepareError::TipOracle(_))));
         Ok(())
     }
 
     #[tokio::test]
     async fn store_remove_makes_payment_id_unfindable() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let preparation = propose(valid_request(), &store)
-            .await
-            .map_err(|_| "propose must accept valid input")?;
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
+        let preparation = propose(
+            valid_request(),
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &registry,
+            &oracle,
+        )
+        .await
+        .map_err(|_| "propose must accept valid input")?;
         let removed = store
             .remove(&preparation.payment_id)
             .await
@@ -621,27 +868,75 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture-heavy regression test; splitting would obscure the temporal ordering this test asserts"
+    )]
     async fn sweep_drops_expired_entries_and_keeps_active_ones() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
-        let mut short_lived = valid_request();
-        short_lived.validity_seconds = Some(1);
-        let mut long_lived = valid_request();
-        long_lived.validity_seconds = Some(3600);
+        let oracle = FixedTipOracle::fixture();
+        // Two distinct registries with different max_validity_seconds.
+        let short_registry = {
+            let mut registry = crate::accepts::PayeeRegistry::new();
+            registry.register(
+                PayeeId(FIXTURE_PAYEE_ID.to_owned()),
+                vec![crate::accepts::AcceptsEntry {
+                    scheme: crate::types::PaymentScheme::Zcash,
+                    network: PaymentNetwork::Testnet,
+                    pay_to: "utest1exampleaddress".to_owned(),
+                    amount_zat: Zatoshis(50_000),
+                    max_validity_seconds: 1,
+                    expiry_delta_blocks: None,
+                    merchant_requires_verify: false,
+                }],
+            );
+            registry
+        };
+        let long_registry = {
+            let mut registry = crate::accepts::PayeeRegistry::new();
+            registry.register(
+                PayeeId(FIXTURE_PAYEE_ID.to_owned()),
+                vec![crate::accepts::AcceptsEntry {
+                    scheme: crate::types::PaymentScheme::Zcash,
+                    network: PaymentNetwork::Testnet,
+                    pay_to: "utest1exampleaddress".to_owned(),
+                    amount_zat: Zatoshis(50_000),
+                    max_validity_seconds: 3600,
+                    expiry_delta_blocks: None,
+                    merchant_requires_verify: false,
+                }],
+            );
+            registry
+        };
 
-        let short = propose(short_lived, &store)
-            .await
-            .map_err(|_| "short propose must succeed")?;
-        let long = propose(long_lived, &store)
-            .await
-            .map_err(|_| "long propose must succeed")?;
+        let mut short_lived = valid_request();
+        short_lived.idempotency_key = Some("short".to_owned());
+        let mut long_lived = valid_request();
+        long_lived.idempotency_key = Some("long".to_owned());
+
+        let short = propose(
+            short_lived,
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &short_registry,
+            &oracle,
+        )
+        .await
+        .map_err(|_| "short propose must succeed")?;
+        let long = propose(
+            long_lived,
+            FIXTURE_JKT.to_owned(),
+            &store,
+            &long_registry,
+            &oracle,
+        )
+        .await
+        .map_err(|_| "long propose must succeed")?;
         assert_eq!(
             store.entry_count().await.map_err(|_| "entry_count failed")?,
             2
         );
 
-        // Pick a "now" that is past the short-lived entry's expiry but not
-        // the long-lived one's. The short entry uses validity_seconds = 1
-        // so its expiry sits about now+1; sweep at now+5 drops it.
         let now_plus_five = super::current_unix_seconds().saturating_add(5);
         let dropped = store
             .sweep_expired(now_plus_five)
@@ -668,15 +963,17 @@ mod tests {
     #[tokio::test]
     async fn idempotent_propose_returns_same_payment_id() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
         let mut first = valid_request();
         first.idempotency_key = Some("order-abc-001".to_owned());
         let mut second = valid_request();
         second.idempotency_key = Some("order-abc-001".to_owned());
 
-        let initial = propose(first, &store)
+        let initial = propose(first, FIXTURE_JKT.to_owned(), &store, &registry, &oracle)
             .await
             .map_err(|_| "first propose must succeed")?;
-        let replay = propose(second, &store)
+        let replay = propose(second, FIXTURE_JKT.to_owned(), &store, &registry, &oracle)
             .await
             .map_err(|_| "replay propose must succeed")?;
         assert_eq!(initial.payment_id, replay.payment_id);
@@ -689,22 +986,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idempotency_key_is_merchant_scoped() -> Result<(), &'static str> {
+    async fn idempotency_key_is_jkt_scoped() -> Result<(), &'static str> {
+        // Same payee and same idempotency_key, but different DPoP keys
+        // (different jkt) must allocate distinct payment_ids. This is
+        // the regression gate for the Commit E (jkt, idempotency_key)
+        // composite: a rival agent cannot replay another agent's
+        // prepared row by guessing its idempotency_key.
         let store = PreparedTxCache::new();
-        let mut a = valid_request();
-        a.merchant_id = MerchantId("aether-ai".to_owned());
-        a.idempotency_key = Some("order-001".to_owned());
-        let mut b = valid_request();
-        b.merchant_id = MerchantId("demo-rp".to_owned());
-        b.idempotency_key = Some("order-001".to_owned());
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
+        let mut first = valid_request();
+        first.idempotency_key = Some("order-001".to_owned());
+        let mut second = valid_request();
+        second.idempotency_key = Some("order-001".to_owned());
 
-        let first = propose(a, &store)
+        let one = propose(first, FIXTURE_JKT.to_owned(), &store, &registry, &oracle)
             .await
             .map_err(|_| "first propose must succeed")?;
-        let second = propose(b, &store)
-            .await
-            .map_err(|_| "second propose must succeed")?;
-        assert_ne!(first.payment_id, second.payment_id);
+        let two = propose(
+            second,
+            ALTERNATE_FIXTURE_JKT.to_owned(),
+            &store,
+            &registry,
+            &oracle,
+        )
+        .await
+        .map_err(|_| "second propose must succeed")?;
+        assert_ne!(one.payment_id, two.payment_id);
         assert_eq!(
             store.entry_count().await.map_err(|_| "entry_count failed")?,
             2
@@ -715,15 +1023,17 @@ mod tests {
     #[tokio::test]
     async fn empty_idempotency_key_is_treated_as_absent() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
+        let registry = fixture_registry();
+        let oracle = FixedTipOracle::fixture();
         let mut first = valid_request();
         first.idempotency_key = Some("   ".to_owned());
         let mut second = valid_request();
         second.idempotency_key = Some(String::new());
 
-        let a = propose(first, &store)
+        let a = propose(first, FIXTURE_JKT.to_owned(), &store, &registry, &oracle)
             .await
             .map_err(|_| "first propose must succeed")?;
-        let b = propose(second, &store)
+        let b = propose(second, FIXTURE_JKT.to_owned(), &store, &registry, &oracle)
             .await
             .map_err(|_| "second propose must succeed")?;
         assert_ne!(a.payment_id, b.payment_id);

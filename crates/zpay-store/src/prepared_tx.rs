@@ -2,19 +2,20 @@
 
 use libsql::params;
 
-use zpay_core::prepare::{Preparation, PreparedTxEntry, PreparedTxStore};
+use zpay_core::prepare::{Preparation, PreparedTxEntry, PreparedTxStore, compose_payment_uri};
 use zpay_core::store::StoreError;
-use zpay_core::types::{MerchantId, PaymentId, PaymentNetwork, Zatoshis};
+use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, Zatoshis};
 
 use crate::connection::StoreConnection;
 
 /// libSQL-backed prepared-tx store.
 ///
 /// Persists every prepared payment into the `prepared_tx` table per
-/// the 0001 migration. The schema mirrors [`PreparedTxEntry`] exactly;
-/// columns the entry does not carry (`agent_dpop_jkt`,
-/// `evidence_pack_hash`) land with their own migrations when the
-/// PRD-42 phases that need them go in.
+/// the 0001 migration. The schema mirrors [`PreparedTxEntry`] exactly,
+/// including the `agent_dpop_jkt` column the DPoP middleware (in
+/// `zpay-x402`) threads in from the verified `POST /prepare` proof.
+/// `evidence_pack_hash` lands with its own migration when the MCP
+/// evidence-delivery surface ships.
 #[derive(Clone)]
 pub struct LibsqlPreparedTxStore {
     connection: StoreConnection,
@@ -31,7 +32,7 @@ impl LibsqlPreparedTxStore {
 impl PreparedTxStore for LibsqlPreparedTxStore {
     async fn insert(&self, entry: PreparedTxEntry) -> Result<(), StoreError> {
         // The `payment_id` is the primary key; on retry of the same
-        // `(merchant_id, idempotency_key)` pair, the caller resolves
+        // `(agent_dpop_jkt, idempotency_key)` pair, the caller resolves
         // via `find_by_idempotency` first and never gets here.
         // `ON CONFLICT (payment_id) DO UPDATE` mirrors the in-memory
         // impl's `HashMap::insert` replace-on-collision behaviour.
@@ -52,27 +53,29 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
         self.connection
             .execute(
                 "INSERT INTO prepared_tx (\
-                    payment_id, merchant_id, network, recipient_unified_address, \
-                    amount_zat, memo_bytes, expiry_height, idempotency_key, \
-                    expires_at_unix_seconds\
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                    payment_id, payee_id, network, recipient_unified_address, \
+                    amount_zat, memo_bytes, expiry_height, agent_dpop_jkt, \
+                    idempotency_key, expires_at_unix_seconds\
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                 ON CONFLICT(payment_id) DO UPDATE SET \
-                    merchant_id = excluded.merchant_id, \
+                    payee_id = excluded.payee_id, \
                     network = excluded.network, \
                     recipient_unified_address = excluded.recipient_unified_address, \
                     amount_zat = excluded.amount_zat, \
                     memo_bytes = excluded.memo_bytes, \
                     expiry_height = excluded.expiry_height, \
+                    agent_dpop_jkt = excluded.agent_dpop_jkt, \
                     idempotency_key = excluded.idempotency_key, \
                     expires_at_unix_seconds = excluded.expires_at_unix_seconds",
                 params![
                     entry.preparation.payment_id.0.clone(),
-                    entry.merchant_id.0.clone(),
+                    entry.payee_id.0.clone(),
                     network,
                     entry.recipient_unified_address.clone(),
                     amount_zat,
                     memo_bytes,
                     expiry_height,
+                    entry.agent_dpop_jkt.clone(),
                     entry.idempotency_key.clone(),
                     expires_at,
                 ],
@@ -89,9 +92,9 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
         let mut rows = self
             .connection
             .query(
-                "SELECT payment_id, merchant_id, network, recipient_unified_address, \
-                    amount_zat, memo_bytes, expiry_height, idempotency_key, \
-                    expires_at_unix_seconds \
+                "SELECT payment_id, payee_id, network, recipient_unified_address, \
+                    amount_zat, memo_bytes, expiry_height, agent_dpop_jkt, \
+                    idempotency_key, expires_at_unix_seconds \
                 FROM prepared_tx WHERE payment_id = ?",
                 params![payment_id.0.clone()],
             )
@@ -105,18 +108,18 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
 
     async fn find_by_idempotency(
         &self,
-        merchant_id: &MerchantId,
+        jkt: &str,
         idempotency_key: &str,
     ) -> Result<Option<PreparedTxEntry>, StoreError> {
         let mut rows = self
             .connection
             .query(
-                "SELECT payment_id, merchant_id, network, recipient_unified_address, \
-                    amount_zat, memo_bytes, expiry_height, idempotency_key, \
-                    expires_at_unix_seconds \
+                "SELECT payment_id, payee_id, network, recipient_unified_address, \
+                    amount_zat, memo_bytes, expiry_height, agent_dpop_jkt, \
+                    idempotency_key, expires_at_unix_seconds \
                 FROM prepared_tx \
-                WHERE merchant_id = ? AND idempotency_key = ?",
-                params![merchant_id.0.clone(), idempotency_key.to_owned()],
+                WHERE agent_dpop_jkt = ? AND idempotency_key = ?",
+                params![jkt.to_owned(), idempotency_key.to_owned()],
             )
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
@@ -188,8 +191,8 @@ fn row_to_prepared_tx_entry(row: &libsql::Row) -> Result<PreparedTxEntry, StoreE
     let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
         reason: format!("payment_id read failed: {err}"),
     })?;
-    let merchant_id: String = row.get(1).map_err(|err| StoreError::RowMalformed {
-        reason: format!("merchant_id read failed: {err}"),
+    let payee_id: String = row.get(1).map_err(|err| StoreError::RowMalformed {
+        reason: format!("payee_id read failed: {err}"),
     })?;
     let network: String = row.get(2).map_err(|err| StoreError::RowMalformed {
         reason: format!("network read failed: {err}"),
@@ -222,39 +225,55 @@ fn row_to_prepared_tx_entry(row: &libsql::Row) -> Result<PreparedTxEntry, StoreE
     let expiry_height_raw: i64 = row.get(6).map_err(|err| StoreError::RowMalformed {
         reason: format!("expiry_height read failed: {err}"),
     })?;
+    let agent_dpop_jkt: String = row.get(7).map_err(|err| StoreError::RowMalformed {
+        reason: format!("agent_dpop_jkt read failed: {err}"),
+    })?;
     let idempotency_key: Option<String> =
-        row.get(7).map_err(|err| StoreError::RowMalformed {
+        row.get(8).map_err(|err| StoreError::RowMalformed {
             reason: format!("idempotency_key read failed: {err}"),
         })?;
-    let expires_at_raw: i64 = row.get(8).map_err(|err| StoreError::RowMalformed {
+    let expires_at_raw: i64 = row.get(9).map_err(|err| StoreError::RowMalformed {
         reason: format!("expires_at_unix_seconds read failed: {err}"),
     })?;
+
+    let amount_zat = Zatoshis(u64::try_from(amount_zat_raw).map_err(|_| {
+        StoreError::RowMalformed {
+            reason: "amount_zat does not fit u64".to_owned(),
+        }
+    })?);
+
+    // Re-derive payment_uri from persisted components instead of
+    // storing it as a redundant column. Every byte of the URI is a
+    // deterministic function of (recipient, amount, memo), so an
+    // idempotent /prepare replay rebuilds the same URI the first
+    // call returned. Without this, find_by_idempotency surfaced
+    // `payment_uri: ""` and any client that retried lost the wallet
+    // bridge handoff.
+    let payment_uri = compose_payment_uri(&recipient_unified_address, amount_zat, &memo_bytes);
 
     Ok(PreparedTxEntry {
         preparation: Preparation {
             payment_id: PaymentId(payment_id),
-            payment_uri: String::new(),
+            payment_uri,
             memo_bytes,
             expiry_height: u32::try_from(expiry_height_raw).map_err(|_| {
                 StoreError::RowMalformed {
                     reason: "expiry_height does not fit u32".to_owned(),
                 }
             })?,
+            amount_zat,
         },
-        merchant_id: MerchantId(merchant_id),
+        payee_id: PayeeId(payee_id),
         network: sql_to_network(&network)?,
         recipient_unified_address,
-        amount_zat: Zatoshis(u64::try_from(amount_zat_raw).map_err(|_| {
-            StoreError::RowMalformed {
-                reason: "amount_zat does not fit u64".to_owned(),
-            }
-        })?),
+        amount_zat,
         expires_at_unix_seconds: u64::try_from(expires_at_raw).map_err(|_| {
             StoreError::RowMalformed {
                 reason: "expires_at_unix_seconds does not fit u64".to_owned(),
             }
         })?,
         idempotency_key,
+        agent_dpop_jkt,
     })
 }
 

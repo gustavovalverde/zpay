@@ -103,6 +103,7 @@ every key starting with `ZPAY_TEST_` from their env read.
 | Var | Default | Description |
 |-----|---------|-------------|
 | `ZPAY_NETWORK` | none | `mainnet`, `testnet`, or `regtest`. Required. |
+| `ZPAY_VERIFY__NETWORK` | none | `mainnet` or `testnet`. Required. Pins the SLIP-44 coin type that personalizes the ZIP-311 `BLAKE2b` digest the local verifier reconstructs. No default: an unset value fails startup with `StartupError::VerifyNetworkMissing`. Regtest deployments pin to `testnet` explicitly (regtest carries no distinct SLIP-44 number). See [ADR-0007](../adrs/0007-local-zip311-verifier.md). |
 | `ZPAY_SERVER__BIND_ADDR` | `127.0.0.1:8080` | Main HTTP listener. |
 | `ZPAY_OPS__BIND_ADDR` | `127.0.0.1:9295` | Ops listener. |
 | `ZPAY_NODE__INDEXER_GRPC_ADDR` | none | zinder query endpoint. Required for broadcast. |

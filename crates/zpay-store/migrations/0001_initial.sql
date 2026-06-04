@@ -14,18 +14,21 @@ CREATE TABLE IF NOT EXISTS zpay_schema_migrations (
 
 -- Prepared transactions awaiting settlement.
 --
--- Idempotency: the `(merchant_id, idempotency_key)` pair is unique
+-- Idempotency: the `(agent_dpop_jkt, idempotency_key)` pair is unique
 -- when `idempotency_key` is non-null; a partial unique index enforces
--- this. The DPoP-bound key composite ADR-0004 originally specified
--- waits for the PRD-42 Phase 4 DPoP middleware to land in zpay-x402.
+-- this. The composite is the ADR-0004 shape: scoping by the DPoP JWK
+-- thumbprint prevents a rival agent from replaying another agent's
+-- idempotency_key, and the wire layer rejects requests without a
+-- valid DPoP proof at `POST /prepare` and `POST /settle`.
 CREATE TABLE IF NOT EXISTS prepared_tx (
     payment_id                  TEXT    PRIMARY KEY,
-    merchant_id                 TEXT    NOT NULL,
+    payee_id                    TEXT    NOT NULL,
     network                     TEXT    NOT NULL CHECK (network IN ('mainnet', 'testnet', 'regtest')),
     recipient_unified_address   TEXT    NOT NULL,
     amount_zat                  INTEGER NOT NULL CHECK (amount_zat >= 0),
     memo_bytes                  BLOB    NOT NULL,
     expiry_height               INTEGER NOT NULL,
+    agent_dpop_jkt              TEXT    NOT NULL,
     idempotency_key             TEXT,
     expires_at_unix_seconds     INTEGER NOT NULL
 );
@@ -34,7 +37,7 @@ CREATE INDEX IF NOT EXISTS prepared_tx_expires_idx
     ON prepared_tx (expires_at_unix_seconds);
 
 CREATE UNIQUE INDEX IF NOT EXISTS prepared_tx_idempotency_idx
-    ON prepared_tx (merchant_id, idempotency_key)
+    ON prepared_tx (agent_dpop_jkt, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
 -- Settlement ledger, keyed by `payment_id`.
@@ -61,4 +64,4 @@ CREATE INDEX IF NOT EXISTS settlement_ledger_transaction_id_idx
     WHERE transaction_id IS NOT NULL;
 
 INSERT OR IGNORE INTO zpay_schema_migrations (version, applied_at_ms, description)
-VALUES (1, (unixepoch() * 1000), 'initial: prepared_tx, settlement_ledger');
+VALUES (1, (unixepoch() * 1000), 'initial: prepared_tx (DPoP-bound), settlement_ledger');

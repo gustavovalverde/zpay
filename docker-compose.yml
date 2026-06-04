@@ -1,0 +1,60 @@
+# zpay docker stack.
+#
+# Designed to attach to the shared `zcash-x402-demo` network. The
+# network is created by whichever compose stack comes up first (either
+# this one or any consumer like demo-rp); both sides reference it as
+# `external: true` so neither pretends to own it. The name is
+# protocol-shaped, not vendor-shaped, so future consumers do not
+# inherit a name that belongs to a single relying party.
+#
+# Standalone use (no consumers): comment out the `networks:` blocks
+# below; `zpay` will sit on the default compose network and be
+# reachable on the host at http://127.0.0.1:8080.
+
+services:
+  zpay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zpay-runtime:dev
+    ports:
+      # App listener (the URL consumers talk to).
+      - "8080:8080"
+      # Ops listener (metrics, health probes).
+      - "9295:9295"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      ZPAY_NETWORK: ${ZPAY_NETWORK:-testnet}
+      # ZIP-311 BLAKE2b digest personalization pins to a SLIP-44 coin
+      # type. Required (no default at runtime); regtest stacks pin to
+      # testnet explicitly. See ADR-0007.
+      ZPAY_VERIFY__NETWORK: ${ZPAY_VERIFY__NETWORK:-testnet}
+      # libSQL file lives on a named volume so prepared/ledger rows
+      # survive `docker compose down` without `--volumes`.
+      ZPAY_STORE__BACKEND: libsql
+      ZPAY_STORE__URL: file:/var/lib/zpay/zpay.libsql
+      ZPAY_PAYEES__CONFIG_PATH: /etc/zpay/payees.toml
+      # Dev-only: bypass the placeholder-payee boot gate so the
+      # baked-in `aether-demo` payee can run in compose stacks.
+      # Railway and any other production deploy MUST NOT set this;
+      # the runtime refuses to start otherwise (see ADR-0007 and
+      # docs/runbooks/railway-deploy.md).
+      ZPAY_ALLOW_DEMO_PAYEE: ${ZPAY_ALLOW_DEMO_PAYEE:-1}
+    volumes:
+      - zpay-data:/var/lib/zpay
+      # Override the baked-in payees.toml by bind-mounting a host file
+      # here. The default file inside the image lists only `aether-demo`
+      # with a placeholder receiver.
+      # - ./etc/your-payees.toml:/etc/zpay/payees.toml:ro
+    restart: unless-stopped
+    networks:
+      - zcash-x402-demo
+
+volumes:
+  zpay-data:
+
+networks:
+  # External: created by whichever compose stack runs first.
+  # `docker network create zcash-x402-demo` ahead of time also works.
+  zcash-x402-demo:
+    external: true

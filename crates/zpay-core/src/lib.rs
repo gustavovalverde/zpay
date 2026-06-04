@@ -16,6 +16,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod accepts;
+pub mod binding;
 pub mod broadcast;
 pub mod capability;
 pub mod error;
@@ -24,5 +25,7 @@ pub mod prepare;
 pub mod settle;
 pub mod status;
 pub mod store;
+pub mod tip;
+pub mod transaction_fetcher;
 pub mod types;
 pub mod verify;

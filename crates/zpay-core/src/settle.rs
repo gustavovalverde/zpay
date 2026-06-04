@@ -17,6 +17,13 @@
 //! `expiry_height` equals the `expiry_height` zpay returned at
 //! `/prepare`.
 //!
+//! The cached preparation also carries the protocol memo prefix zpay
+//! composed at prepare time. Settle re-reads that prefix and refuses to
+//! relay any preparation whose version byte does not match the current
+//! [`crate::prepare::PROTOCOL_MEMO_VERSION`]; the byte is observable on
+//! the transparent path and is the only zpay-defined cleartext gate the
+//! relay can apply without breaking the shielded-memo trust boundary.
+//!
 //! Cryptographic recipient/amount/memo binding is the job of the
 //! [`crate::verify`] surface, which consumes a ZIP-311 payment
 //! disclosure that only the sender can construct. See ADR-0006.
@@ -34,7 +41,7 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
 use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
-use crate::prepare::PreparedTxStore;
+use crate::prepare::{PROTOCOL_MEMO_VERSION, PreparedTxStore};
 use crate::status::{SettlementLedgerEntry, SettlementLedgerStore};
 use crate::store::StoreError;
 use crate::types::{PaymentId, WatchId};
@@ -107,6 +114,24 @@ pub enum SettleError {
         /// `expiry_height` observed in the user-signed transaction.
         signed_expiry_height: u32,
     },
+    /// The cached preparation's protocol memo version does not match the
+    /// version this build of zpay knows how to broadcast. The agent must
+    /// re-prepare against a runtime whose
+    /// [`crate::prepare::PROTOCOL_MEMO_VERSION`] matches. Retry posture:
+    /// `not_retryable`.
+    #[error(
+        "protocol memo version mismatch: expected {expected:#04x}, observed {observed:#04x}",
+        expected = PROTOCOL_MEMO_VERSION,
+    )]
+    ObsoleteMemoVersion {
+        /// Version byte observed in the cached preparation's memo prefix.
+        observed: u8,
+    },
+    /// The DPoP `jkt` presented on settle does not match the jkt that
+    /// prepared the row. Retry posture: `not_retryable`; a different
+    /// agent attempted to settle a preparation it did not own.
+    #[error("DPoP key mismatch: prepared by a different agent")]
+    DpopMismatch,
     /// One of the underlying stores (prepared-tx cache or settlement
     /// ledger) surfaced a [`StoreError`]. Retry posture: inherits.
     #[error("settle store failure: {0}")]
@@ -131,6 +156,7 @@ pub enum SettleError {
 ///   itself errors. The cache entry is preserved on this path.
 pub async fn submit_settlement<C, P, L>(
     request: SettleRequest,
+    jkt: &str,
     prepared_store: &P,
     ledger: &L,
     chain: &C,
@@ -147,6 +173,20 @@ where
             payment_id: request.payment_id,
         });
     };
+
+    // The DPoP key that signed /settle must equal the one that prepared
+    // the row. A rival agent with a fresh keypair cannot settle another
+    // agent's prepared payment even if it learned the payment_id; the
+    // wire layer surfaces this as 403 dpop_mismatch.
+    if prepared.agent_dpop_jkt != jkt {
+        return Err(SettleError::DpopMismatch);
+    }
+
+    if let Some(observed) = prepared.preparation.memo_bytes.get(1).copied()
+        && observed != PROTOCOL_MEMO_VERSION
+    {
+        return Err(SettleError::ObsoleteMemoVersion { observed });
+    }
 
     let signed_expiry_height = parse_signed_expiry_height(&request.raw_tx_hex)?;
     if signed_expiry_height != prepared.preparation.expiry_height {
@@ -178,7 +218,7 @@ where
         )
         .await?;
 
-    let watch_id = if outcome.is_success_kind() {
+    let watch_id = if outcome.is_success() {
         prepared_store.remove(&request.payment_id).await?;
         Some(WatchId(format!("watch_{}", request.payment_id)))
     } else {
@@ -232,11 +272,11 @@ mod tests {
 
     use super::{SettleError, SettleRequest, submit_settlement};
     use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
-    use crate::prepare::{
-        ChallengeHash, PrepareRequest, PreparedTxCache, PreparedTxStore, ResourceHash, propose,
+    use crate::prepare::test_support::{
+        ALTERNATE_FIXTURE_JKT, FIXTURE_JKT, FixedTipOracle, fixture_registry, valid_request,
     };
+    use crate::prepare::{PreparedTxCache, PreparedTxStore, propose};
     use crate::status::SettlementLedger;
-    use crate::types::{EvidencePackHash, MerchantId, PaymentNetwork, PaymentScheme, Zatoshis};
 
     struct FakeChain {
         outcome: Mutex<BroadcastOutcome>,
@@ -266,28 +306,14 @@ mod tests {
         }
     }
 
-    fn valid_prepare_request() -> PrepareRequest {
-        PrepareRequest {
-            merchant_id: MerchantId("aether-ai".to_owned()),
-            network: PaymentNetwork::Testnet,
-            scheme: PaymentScheme::Zcash,
-            recipient_unified_address: "utest1exampleaddress".to_owned(),
-            amount_zat: Zatoshis(50_000),
-            challenge_hash: ChallengeHash([0x11; 32]),
-            resource_hash: ResourceHash([0x22; 32]),
-            evidence_pack_hash: EvidencePackHash([0x33; 32]),
-            expiry_height: 3_217_900,
-            validity_seconds: None,
-            idempotency_key: None,
-        }
-    }
-
     #[tokio::test]
     async fn accepted_broadcast_returns_watch_id_and_removes_preparation()
     -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -295,10 +321,11 @@ mod tests {
         });
 
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -320,7 +347,9 @@ mod tests {
     async fn rejected_broadcast_keeps_preparation_for_retry() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Rejected {
@@ -328,10 +357,11 @@ mod tests {
         });
 
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -363,7 +393,7 @@ mod tests {
             raw_tx_hex: "0500".to_owned(),
         };
 
-        let outcome = submit_settlement(request, &cache, &ledger, &chain).await;
+        let outcome = submit_settlement(request, FIXTURE_JKT, &cache, &ledger, &chain).await;
         assert!(matches!(
             outcome,
             Err(SettleError::PreparationNotFound { .. })
@@ -374,7 +404,9 @@ mod tests {
     async fn empty_raw_tx_hex_returns_raw_tx_hex_invalid() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -382,10 +414,11 @@ mod tests {
         });
 
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: String::new(),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -400,7 +433,9 @@ mod tests {
     async fn odd_length_raw_tx_hex_returns_raw_tx_hex_invalid() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -408,10 +443,11 @@ mod tests {
         });
 
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: "abc".to_owned(),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -426,16 +462,19 @@ mod tests {
     async fn chain_unavailable_returns_chain_unavailable_error() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = UnavailableChain;
 
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id,
                 raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -454,7 +493,9 @@ mod tests {
     async fn signed_tx_with_wrong_expiry_returns_expiry_mismatch() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -465,10 +506,11 @@ mod tests {
         // returned at /prepare. Settle must reject before broadcasting.
         let wrong_expiry = preparation.expiry_height.wrapping_add(1);
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: minimal_v5_tx_hex(wrong_expiry),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -490,7 +532,9 @@ mod tests {
     async fn raw_tx_hex_that_is_not_a_zcash_tx_returns_malformed() -> Result<(), &'static str> {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let preparation = propose(valid_prepare_request(), &cache)
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
             .await
             .map_err(|_| "propose must accept valid input")?;
         let chain = FakeChain::new(BroadcastOutcome::Accepted {
@@ -499,10 +543,11 @@ mod tests {
 
         // Hex-shaped but garbage bytes.
         let outcome = submit_settlement(
-            SettleRequest {
+SettleRequest {
                 payment_id: preparation.payment_id.clone(),
                 raw_tx_hex: "deadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
             },
+            FIXTURE_JKT,
             &cache,
             &ledger,
             &chain,
@@ -513,6 +558,99 @@ mod tests {
             outcome,
             Err(SettleError::TransactionMalformed { .. })
         ));
+        assert_eq!(
+            cache.entry_count().await.map_err(|_| "entry_count failed")?,
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn obsolete_memo_version_is_rejected_before_broadcast() -> Result<(), &'static str> {
+        use crate::prepare::{
+            PROTOCOL_MEMO_TAG, Preparation, PreparedTxEntry,
+        };
+        use crate::types::{PayeeId, PaymentId, PaymentNetwork, Zatoshis};
+
+        let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
+        // Stuff a preparation whose memo version is the retired 0x01
+        // straight into the cache so we can exercise the gate without
+        // forging a stale runtime.
+        let stale_memo = {
+            let mut bytes = vec![PROTOCOL_MEMO_TAG, 0x01];
+            bytes.extend_from_slice(&[0u8; 64]);
+            bytes
+        };
+        let entry = PreparedTxEntry {
+            preparation: Preparation {
+                payment_id: PaymentId("obsolete-memo".to_owned()),
+                payment_uri: "zcash:utest1stub?amount=0.0005".to_owned(),
+                memo_bytes: stale_memo,
+                expiry_height: 1_234,
+                amount_zat: Zatoshis(50_000),
+            },
+            payee_id: PayeeId("aether-ai".to_owned()),
+            network: PaymentNetwork::Testnet,
+            recipient_unified_address: "utest1stub".to_owned(),
+            amount_zat: Zatoshis(50_000),
+            expires_at_unix_seconds: u64::MAX,
+            idempotency_key: None,
+            agent_dpop_jkt: FIXTURE_JKT.to_owned(),
+        };
+        cache.insert(entry).await.map_err(|_| "insert failed")?;
+        let chain = FakeChain::new(BroadcastOutcome::Accepted {
+            transaction_id: "deadbeef".to_owned(),
+        });
+
+        let outcome = submit_settlement(
+SettleRequest {
+                payment_id: PaymentId("obsolete-memo".to_owned()),
+                raw_tx_hex: minimal_v5_tx_hex(1_234),
+            },
+            FIXTURE_JKT,
+            &cache,
+            &ledger,
+            &chain,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            Err(SettleError::ObsoleteMemoVersion { observed: 0x01 })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settle_rejects_jkt_mismatch_before_broadcast() -> Result<(), &'static str> {
+        // A different agent attempting to settle a prepared row gets
+        // SettleError::DpopMismatch. The wire layer surfaces this as
+        // 403 application/problem+json with code=dpop_mismatch.
+        let cache = PreparedTxCache::new();
+        let ledger = SettlementLedger::new();
+        let registry = fixture_registry();
+        let tip = FixedTipOracle::fixture();
+        let preparation = propose(valid_request(), FIXTURE_JKT.to_owned(), &cache, &registry, &tip)
+            .await
+            .map_err(|_| "propose must accept valid input")?;
+        let chain = FakeChain::new(BroadcastOutcome::Accepted {
+            transaction_id: "deadbeef".to_owned(),
+        });
+
+        let outcome = submit_settlement(
+            SettleRequest {
+                payment_id: preparation.payment_id.clone(),
+                raw_tx_hex: minimal_v5_tx_hex(preparation.expiry_height),
+            },
+            ALTERNATE_FIXTURE_JKT,
+            &cache,
+            &ledger,
+            &chain,
+        )
+        .await;
+
+        assert!(matches!(outcome, Err(SettleError::DpopMismatch)));
         assert_eq!(
             cache.entry_count().await.map_err(|_| "entry_count failed")?,
             1

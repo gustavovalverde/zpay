@@ -1,12 +1,14 @@
 # Proposal-0002: zinder ZIP-311 payment disclosure verifier
 
+> Superseded by [ADR-0007](../adrs/0007-local-zip311-verifier.md): the local verifier in `zpay-core` replaces the zinder-side approach this proposal described.
+
 | Field | Value |
 | ----- | ----- |
-| Status | Proposed |
+| Status | Superseded |
 | Consumer | zpay |
 | Upstream | zinder |
 | Pinned at | branch `main` (no consumer-blocking pin yet) |
-| Related | [PRD-42 Phase 2](https://github.com/gustavovalverde/zentity/blob/main/docs/plans/prd-42-zcash-agentic-payments-cross-stack.md), [ADR-0003](../adrs/0003-zinder-as-chain-plane.md) |
+| Related | [ADR-0007](../adrs/0007-local-zip311-verifier.md), [PRD-42 Phase 2](https://github.com/gustavovalverde/zentity/blob/main/docs/plans/prd-42-zcash-agentic-payments-cross-stack.md), [ADR-0003](../adrs/0003-zinder-as-chain-plane.md) |
 
 ## Context
 

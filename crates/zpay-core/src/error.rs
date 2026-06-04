@@ -4,31 +4,14 @@
 //! `not_retryable`, or `requires_operator`. See
 //! [error-vocabulary.md](https://github.com/gustavovalverde/zpay/blob/main/docs/reference/error-vocabulary.md)
 //! for the canonical registry.
+//!
+//! The active `PrepareError` lives in [`crate::prepare`] so it can name
+//! the prepare-specific collaborators (registry, tip oracle, store).
+//! This module carries the settle / oracle / verify / compliance
+//! vocabularies that the wire adapter maps onto RFC 7807 problem
+//! documents.
 
-use crate::types::{MerchantId, PaymentId};
-
-/// Errors that can arise during preparation.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum PrepareError {
-    /// Caller used an unregistered merchant. Retry posture: `not_retryable`.
-    #[error("merchant unknown: {merchant_id:?}")]
-    MerchantUnknown {
-        /// The merchant identifier that failed to resolve.
-        merchant_id: MerchantId,
-    },
-
-    /// libSQL connection failed; check `/readyz`. Retry posture: `requires_operator`.
-    #[error("store unavailable")]
-    StoreUnavailable,
-
-    /// Upstream zinder is lagging. Retry posture: `retryable`.
-    #[error("chain stale: derive_lag_blocks={derive_lag_blocks}")]
-    ChainStale {
-        /// How far behind zinder reports being.
-        derive_lag_blocks: u32,
-    },
-}
+use crate::types::PaymentId;
 
 /// Errors that can arise during settlement.
 #[derive(Debug, thiserror::Error)]

@@ -19,8 +19,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Mount the MPP wire adapter at /mpp/v1/*. Off by default until PRD-42 Phase 5.
-mpp = ["dep:zpay-mpp"]
 
 [dependencies]
 axum.workspace = true
@@ -39,7 +37,6 @@ tracing-subscriber.workspace = true
 zinder-client.workspace = true
 zinder-proto.workspace = true
 zpay-core = { workspace = true, features = ["in_memory"] }
-zpay-mpp = { workspace = true, optional = true }
 zpay-store.workspace = true
 zpay-x402.workspace = true
 

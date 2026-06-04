@@ -156,6 +156,6 @@ mod tests {
             message: "policy: dust output".to_owned(),
         });
         let outcome = map_broadcast_result(&broadcast_result);
-        assert!(!outcome.is_success_kind());
+        assert!(!outcome.is_success());
     }
 }

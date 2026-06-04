@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Outcome of a broadcast attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BroadcastOutcome {
     /// Transaction accepted into the mempool. Carries the upstream-reported
@@ -64,7 +64,7 @@ impl BroadcastOutcome {
     /// Returns `true` for outcomes where the transaction is on-chain or in a
     /// mempool from zpay's perspective (`Accepted`, `Duplicate`).
     #[must_use]
-    pub const fn is_success_kind(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         matches!(self, Self::Accepted { .. } | Self::Duplicate { .. })
     }
 }
@@ -121,16 +121,16 @@ mod tests {
             transaction_id: "abcd".to_owned(),
         };
         assert_eq!(outcome.transaction_id(), Some("abcd"));
-        assert!(outcome.is_success_kind());
+        assert!(outcome.is_success());
     }
 
     #[test]
-    fn duplicate_outcome_is_success_kind_but_has_no_txid() {
+    fn duplicate_outcome_is_success_but_has_no_txid() {
         let outcome = BroadcastOutcome::Duplicate {
             upstream_message: "already in mempool".to_owned(),
         };
         assert_eq!(outcome.transaction_id(), None);
-        assert!(outcome.is_success_kind());
+        assert!(outcome.is_success());
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
         let outcome = BroadcastOutcome::Rejected {
             upstream_message: "consensus failure".to_owned(),
         };
-        assert!(!outcome.is_success_kind());
+        assert!(!outcome.is_success());
         assert_eq!(outcome.transaction_id(), None);
     }
 

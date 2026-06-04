@@ -1,0 +1,16 @@
+# Default payee config baked into the zpay-runtime image.
+#
+# The `aether-demo` payee matches the demo-rp BFF's default
+# `ZPAY_PAYEE_ID`. Operators running a real deployment override
+# this file by bind-mounting their own at /etc/zpay/payees.toml
+# (see docker-compose.yml's `volumes:` block).
+#
+# `pay_to` is a placeholder; real deployments either substitute a
+# real testnet/mainnet unified address here or set the payee receiver
+# in their override file. The bridge-mount demo does not settle, so
+# the placeholder is non-load-bearing for the headphones scenario.
+
+[payees."aether-demo"]
+accepts = [
+  { scheme = "zcash", network = "testnet", pay_to = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq", amount_zat = 1, max_validity_seconds = 1800 },
+]

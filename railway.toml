@@ -1,9 +1,58 @@
+# yaml-language-server: $schema=https://railway.com/railway.schema.json
+# zpay-runtime - Rust x402 facilitator on port 8080 (app) + 9295 (ops)
+# Public domain: zpay.up.railway.app initially, pay.zentity.xyz later
+# Runs in the same Railway project as zinder; reaches it through
+# private networking (`zinder.railway.internal:<port>`).
+#
+# ── Required secrets / config ────────────────────────────────────────────
+#   ZPAY_NETWORK=testnet                     # mainnet | testnet | regtest
+#   ZPAY_VERIFY__NETWORK=testnet             # mainnet | testnet (ADR-0007; no default, fail-loud)
+#   ZPAY_EXPECTED_HOST=zpay.up.railway.app   # DPoP htu pin; flip to pay.zentity.xyz once DNS lands
+#   ZPAY_EXPECTED_SCHEME=https
+#
+# ── Chain plane (zinder cross-service wiring) ────────────────────────────
+#   ZPAY_NODE__INDEXER_GRPC_ADDR=http://zinder.railway.internal:9067
+#   ZPAY_NODE__EXPLORER_GRPC_ADDR=http://zinder.railway.internal:9067
+#
+# ── Persistence (libSQL on a Railway volume) ─────────────────────────────
+#   ZPAY_STORE__BACKEND=libsql
+#   ZPAY_STORE__URL=file:/var/lib/zpay/zpay.libsql
+#   # Turso escape hatch (set BOTH to switch backends):
+#   #   ZPAY_STORE__URL=libsql://<db>.turso.io
+#   #   ZPAY_STORE__AUTH_TOKEN=<secret>
+#
+# ── Payees ───────────────────────────────────────────────────────────────
+#   ZPAY_PAYEES__CONFIG_PATH=/etc/zpay/payees.toml
+#     The image bakes etc/aether-demo.toml at this path; production must
+#     point this at a real payees file (volume bind-mount or a custom
+#     image). The boot-time placeholder gate refuses to start when the
+#     baked-in demo placeholder receiver is still present.
+#
+# ── Optional ─────────────────────────────────────────────────────────────
+#   ZPAY_FINALITY_DEPTH=3                    # bump for mainnet
+#   ZPAY_STATIC_TIP_FALLBACK=4000000         # only when no tip oracle
+#   ZPAY_SERVER__BIND_ADDR=0.0.0.0:8080      # Dockerfile default
+#   ZPAY_OPS__BIND_ADDR=0.0.0.0:9295         # Dockerfile default
+#
+# ── DEV-ONLY (never set in production) ───────────────────────────────────
+#   ZPAY_ALLOW_DEMO_PAYEE=1
+#     Escape hatch for the placeholder-payee boot gate. Required only
+#     when intentionally running the baked-in `aether-demo` placeholder
+#     (e.g. local docker-compose). Production stacks must leave it
+#     unset; the runtime refuses to start otherwise.
+#
+# ── Volumes (create via Railway dashboard) ───────────────────────────────
+#   zpay-data → /var/lib/zpay
+#     - Persists libSQL prepared-tx + settlement ledger across deploys.
+#     - Also holds the payees override file when not baked into a
+#       custom image.
+
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "deploy/Dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
 healthcheckPath = "/healthz"
-healthcheckTimeout = 30
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"
+numReplicas = 1

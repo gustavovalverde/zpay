@@ -9,11 +9,14 @@ use tempfile::TempDir;
 use zpay_core::broadcast::BroadcastOutcome;
 use zpay_core::prepare::{Preparation, PreparedTxEntry, PreparedTxStore};
 use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore};
-use zpay_core::types::{MerchantId, PaymentId, PaymentNetwork, Zatoshis};
+use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, Zatoshis};
 
 use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+const FIXTURE_JKT: &str = "test-jkt-primary";
+const ALTERNATE_FIXTURE_JKT: &str = "test-jkt-rival";
 
 async fn fresh_stores()
 -> Result<(TempDir, LibsqlPreparedTxStore, LibsqlSettlementLedgerStore), Box<dyn Error>> {
@@ -27,19 +30,29 @@ async fn fresh_stores()
 }
 
 fn sample_entry(payment_id: &str, idempotency_key: Option<&str>) -> PreparedTxEntry {
+    sample_entry_with_jkt(payment_id, idempotency_key, FIXTURE_JKT)
+}
+
+fn sample_entry_with_jkt(
+    payment_id: &str,
+    idempotency_key: Option<&str>,
+    jkt: &str,
+) -> PreparedTxEntry {
     PreparedTxEntry {
         preparation: Preparation {
             payment_id: PaymentId(payment_id.to_owned()),
             payment_uri: String::new(),
             memo_bytes: vec![0xFF, 0x01, 0x42, 0x43, 0x44],
             expiry_height: 1_234,
+            amount_zat: Zatoshis(50_000),
         },
-        merchant_id: MerchantId("aether-ai".to_owned()),
+        payee_id: PayeeId("aether-ai".to_owned()),
         network: PaymentNetwork::Testnet,
         recipient_unified_address: "utest1example".to_owned(),
         amount_zat: Zatoshis(50_000),
         expires_at_unix_seconds: 1_700_000_000,
         idempotency_key: idempotency_key.map(str::to_owned),
+        agent_dpop_jkt: jkt.to_owned(),
     }
 }
 
@@ -54,18 +67,111 @@ async fn prepared_tx_round_trip() -> TestResult {
         .await?
         .ok_or("by_payment_id miss")?;
     assert_eq!(by_id.amount_zat, Zatoshis(50_000));
+    assert_eq!(by_id.preparation.amount_zat, Zatoshis(50_000));
 
     let by_key = store
-        .find_by_idempotency(&MerchantId("aether-ai".to_owned()), "order-001")
+        .find_by_idempotency(FIXTURE_JKT, "order-001")
         .await?
         .ok_or("by_idempotency miss")?;
     assert_eq!(by_key.preparation.payment_id.0, "pid-1");
+    assert_eq!(by_key.preparation.amount_zat, Zatoshis(50_000));
+    assert_eq!(by_key.agent_dpop_jkt, FIXTURE_JKT);
 
     assert_eq!(store.entry_count().await?, 1);
 
     let removed = store.remove(&PaymentId("pid-1".to_owned())).await?;
     assert!(removed.is_some());
     assert_eq!(store.entry_count().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn idempotency_is_scoped_by_jkt() -> TestResult {
+    // Same idempotency_key, different DPoP keys, distinct rows. The
+    // partial-UNIQUE index on `(agent_dpop_jkt, idempotency_key)` is
+    // the regression gate; without it a rival agent could collide
+    // onto another agent's prepared row.
+    let (_temp, store, _) = fresh_stores().await?;
+    store
+        .insert(sample_entry_with_jkt(
+            "pid-primary",
+            Some("order-001"),
+            FIXTURE_JKT,
+        ))
+        .await?;
+    store
+        .insert(sample_entry_with_jkt(
+            "pid-rival",
+            Some("order-001"),
+            ALTERNATE_FIXTURE_JKT,
+        ))
+        .await?;
+    assert_eq!(store.entry_count().await?, 2);
+
+    let primary = store
+        .find_by_idempotency(FIXTURE_JKT, "order-001")
+        .await?
+        .ok_or("primary jkt miss")?;
+    assert_eq!(primary.preparation.payment_id.0, "pid-primary");
+
+    let rival = store
+        .find_by_idempotency(ALTERNATE_FIXTURE_JKT, "order-001")
+        .await?
+        .ok_or("rival jkt miss")?;
+    assert_eq!(rival.preparation.payment_id.0, "pid-rival");
+
+    let none = store
+        .find_by_idempotency("test-jkt-stranger", "order-001")
+        .await?;
+    assert!(none.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn idempotent_find_rebuilds_payment_uri() -> TestResult {
+    let (_temp, store, _) = fresh_stores().await?;
+
+    // The wire path stores an entry whose preparation carries the
+    // ZIP-321 URI it just derived. The libSQL schema does NOT persist
+    // payment_uri, so it must be recomputed on read.
+    let mut entry = sample_entry("pid-1", Some("order-001"));
+    entry.preparation.payment_uri = "zcash:utest1example?amount=0.0005&memo=_wEBAQ".to_owned();
+    let expected_uri =
+        zpay_core::prepare::compose_payment_uri(
+            &entry.recipient_unified_address,
+            entry.amount_zat,
+            &entry.preparation.memo_bytes,
+        );
+
+    store.insert(entry.clone()).await?;
+
+    let by_id = store
+        .find_by_payment_id(&PaymentId("pid-1".to_owned()))
+        .await?
+        .ok_or("by_payment_id miss")?;
+    assert!(
+        !by_id.preparation.payment_uri.is_empty(),
+        "payment_uri must be non-empty on read",
+    );
+    assert!(
+        by_id.preparation.payment_uri.starts_with("zcash:"),
+        "payment_uri must be a ZIP-321 URI, got: {}",
+        by_id.preparation.payment_uri,
+    );
+    assert_eq!(
+        by_id.preparation.payment_uri, expected_uri,
+        "find_by_payment_id must re-derive the same URI compose_payment_uri produces",
+    );
+
+    let by_key = store
+        .find_by_idempotency(FIXTURE_JKT, "order-001")
+        .await?
+        .ok_or("by_idempotency miss")?;
+    assert_eq!(
+        by_key.preparation.payment_uri, expected_uri,
+        "find_by_idempotency must rebuild the SAME payment_uri as find_by_payment_id; clients that retry /prepare depend on this",
+    );
+
     Ok(())
 }
 
