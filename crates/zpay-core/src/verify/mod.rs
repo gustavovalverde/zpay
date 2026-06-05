@@ -11,7 +11,7 @@
 //!   composes [`mod@parse_zip311`], [`digest`], and [`transparent`].
 //! - [`ChainPresence`] answers "is the disclosed transaction visible
 //!   on the chain plane?". Driven by the
-//!   [`crate::transaction_fetcher::TransactionFetcher`] outcome.
+//!   [`crate::disclosure_fetcher::DisclosureFetcher`] outcome.
 //! - [`AmountReconciliation`] answers "does the disclosed value
 //!   match what the merchant expected?". Reserved for a follow-on
 //!   slice; today every response carries
@@ -26,7 +26,7 @@
 //!
 //! [`PaymentDisclosureVerifier`] runs only the cryptography; it
 //! never reaches the chain plane directly. The chain-side data lives
-//! behind [`crate::transaction_fetcher::TransactionFetcher`], a
+//! behind [`crate::disclosure_fetcher::DisclosureFetcher`], a
 //! top-level sibling trait that mirrors the existing
 //! `BroadcastClient` / `ChainTipOracle` / `ConfirmationOracle`
 //! convention.
@@ -43,7 +43,7 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 
-use crate::transaction_fetcher::{FetchError, TransactionFetcher};
+use crate::disclosure_fetcher::{FetchError, DisclosureFetcher};
 use crate::types::Zatoshis;
 use crate::verify::parse_zip311::parse as parse_zip311;
 
@@ -181,7 +181,7 @@ pub enum VerifyError {
 /// Abstraction over the in-process ZIP-311 disclosure verifier.
 ///
 /// Implementations consume the raw disclosure bytes plus a
-/// [`TransactionFetcher`] for the chain-side data and return the
+/// [`DisclosureFetcher`] for the chain-side data and return the
 /// 3-axis verdict directly. The trait gains a fetcher parameter
 /// rather than a separate "fetch first, verify second" composition so
 /// the implementation owns the parse/verify/fetch ordering and can
@@ -196,7 +196,7 @@ pub trait PaymentDisclosureVerifier: Send + Sync {
         fetcher: &F,
     ) -> impl Future<Output = Result<VerifyResponse, VerifyError>> + Send
     where
-        F: TransactionFetcher + ?Sized;
+        F: DisclosureFetcher + ?Sized;
 }
 
 /// Drive a verify request end-to-end.
@@ -221,7 +221,7 @@ pub async fn verify<V, F>(
 ) -> Result<VerifyResponse, VerifyError>
 where
     V: PaymentDisclosureVerifier,
-    F: TransactionFetcher,
+    F: DisclosureFetcher,
 {
     let disclosure_bytes =
         hex::decode(request.disclosure_payload_hex).map_err(|err| VerifyError::PayloadInvalid {
@@ -286,7 +286,7 @@ mod tests {
         CryptographicVerdict, LocalPaymentDisclosureVerifier, VerifyError, VerifyRequest,
         VerifyResponse, verify,
     };
-    use crate::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+    use crate::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
     use crate::types::{PaymentNetwork, Zatoshis};
     use crate::verify::parse_zip311::{
         ZIP311_VERSION_V1, Zip311Disclosure, Zip311TransparentInput, encode_signed,
@@ -312,7 +312,7 @@ mod tests {
         }
     }
 
-    impl TransactionFetcher for BannedFetcher {
+    impl DisclosureFetcher for BannedFetcher {
         async fn fetch_transaction(
             &self,
             _txid: [u8; 32],

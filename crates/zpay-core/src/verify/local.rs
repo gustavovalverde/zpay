@@ -6,7 +6,7 @@
 //! - [`super::digest::compute`] to reconstruct the ZIP-311 digest,
 //! - [`super::transparent::verify_inputs`] to run the BIP-322-legacy
 //!   transparent verification path,
-//! - and the supplied [`TransactionFetcher`] to resolve the on-chain
+//! - and the supplied [`DisclosureFetcher`] to resolve the on-chain
 //!   transaction.
 //!
 //! Sapling and any other non-transparent pool surface as
@@ -19,7 +19,7 @@
 //! `Malformed` so a future ZIP-311 revision can land without breaking
 //! older verifiers.
 
-use crate::transaction_fetcher::TransactionFetcher;
+use crate::disclosure_fetcher::DisclosureFetcher;
 use crate::types::PaymentNetwork;
 use crate::verify::parse_zip311::{
     DisclosurePool, ZIP311_VERSION_V1, Zip311Disclosure, parse as parse_zip311,
@@ -59,7 +59,7 @@ impl PaymentDisclosureVerifier for LocalPaymentDisclosureVerifier {
         fetcher: &F,
     ) -> Result<VerifyResponse, VerifyError>
     where
-        F: TransactionFetcher + ?Sized,
+        F: DisclosureFetcher + ?Sized,
     {
         let Ok(parsed) = parse_zip311(disclosure_bytes) else {
             return Ok(short_circuit_malformed(None));
@@ -113,7 +113,7 @@ impl LocalPaymentDisclosureVerifier {
         fetcher: &F,
     ) -> Result<VerifyResponse, VerifyError>
     where
-        F: TransactionFetcher + ?Sized,
+        F: DisclosureFetcher + ?Sized,
     {
         let txid_hex = hex::encode(parsed.txid);
 
@@ -256,8 +256,8 @@ fn short_circuit_inconclusive(
 #[cfg(test)]
 mod tests {
     use super::LocalPaymentDisclosureVerifier;
-    use crate::transaction_fetcher::{
-        DisclosedTransaction, DisclosedTransparentInput, FetchError, TransactionFetcher,
+    use crate::disclosure_fetcher::{
+        DisclosedTransaction, DisclosedTransparentInput, FetchError, DisclosureFetcher,
     };
     use crate::types::PaymentNetwork;
     use crate::verify::parse_zip311::{
@@ -286,7 +286,7 @@ mod tests {
         }
     }
 
-    impl TransactionFetcher for ScriptedFetcher {
+    impl DisclosureFetcher for ScriptedFetcher {
         async fn fetch_transaction(
             &self,
             _txid: [u8; 32],

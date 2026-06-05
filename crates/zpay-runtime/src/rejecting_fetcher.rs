@@ -1,4 +1,4 @@
-//! Placeholder [`TransactionFetcher`] for deployments without an
+//! Placeholder [`DisclosureFetcher`] for deployments without an
 //! explorer plane.
 //!
 //! Every call returns [`FetchError::Unavailable`], which the local
@@ -11,7 +11,7 @@
 //!
 //! See [ADR-0007](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0007-local-zip311-verifier.md).
 
-use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
 
 /// Placeholder fetcher used when no explorer endpoint is configured.
 ///
@@ -33,7 +33,7 @@ impl RejectingTransactionFetcher {
     }
 }
 
-impl TransactionFetcher for RejectingTransactionFetcher {
+impl DisclosureFetcher for RejectingTransactionFetcher {
     async fn fetch_transaction(&self, _txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         Err(FetchError::Unavailable {
             reason: Self::REASON.to_owned(),
@@ -44,7 +44,7 @@ impl TransactionFetcher for RejectingTransactionFetcher {
 #[cfg(test)]
 mod tests {
     use super::RejectingTransactionFetcher;
-    use zpay_core::transaction_fetcher::{FetchError, TransactionFetcher};
+    use zpay_core::disclosure_fetcher::{FetchError, DisclosureFetcher};
 
     #[tokio::test]
     async fn fetch_transaction_returns_unavailable() {

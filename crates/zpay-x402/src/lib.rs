@@ -44,7 +44,7 @@ use zpay_core::prepare::{PrepareError, PrepareRequest, PreparedTxStore, propose}
 use zpay_core::settle::{SettleError, SettleRequest, submit_settlement};
 use zpay_core::status::{SettlementLedgerStore, lookup_payment_status};
 use zpay_core::tip::{ChainTip, ChainTipOracle, TipError};
-use zpay_core::transaction_fetcher::TransactionFetcher;
+use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::{PaymentDisclosureVerifier, VerifyError, VerifyRequest, verify};
 
@@ -180,7 +180,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     Router::new()
         .route("/accepts", get(accepts_handler::<C, V, P, L, T, F>))
@@ -211,7 +211,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let jkt = match verify_request_dpop(
         "POST",
@@ -264,7 +264,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let jkt = match verify_request_dpop(
         "POST",
@@ -322,7 +322,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let payment_id = match payment_id_raw.parse::<PaymentId>() {
         Ok(id) => id,
@@ -365,7 +365,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let Some(payee_id) = query.payee_id else {
         return problem_response(
@@ -398,7 +398,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let Some(network_raw) = query.network else {
         return problem_response(
@@ -459,7 +459,7 @@ where
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
     T: ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     match verify(body, state.verifier.as_ref(), state.fetcher.as_ref()).await {
         Ok(response) => json_ok(&response),

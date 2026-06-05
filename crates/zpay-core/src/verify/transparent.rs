@@ -14,7 +14,7 @@
 //! For a Zcash transparent input the verifier:
 //!
 //! 1. Reads the prevout's scriptPubKey from the fetched
-//!    [`crate::transaction_fetcher::DisclosedTransaction`].
+//!    [`crate::disclosure_fetcher::DisclosedTransaction`].
 //! 2. Confirms the script is P2PKH and extracts the 20-byte
 //!    `hash160`.
 //! 3. Recovers the secp256k1 public key from the BIP-322-legacy
@@ -42,7 +42,7 @@ use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use secp256k1::{Message, Secp256k1};
 use sha2::Sha256;
 
-use crate::transaction_fetcher::DisclosedTransaction;
+use crate::disclosure_fetcher::DisclosedTransaction;
 use crate::verify::parse_zip311::Zip311TransparentInput;
 
 /// Length of a P2PKH scriptPubKey: `OP_DUP OP_HASH160 <push 20>
@@ -300,7 +300,7 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support;
     use super::{InputOutcome, extract_p2pkh_hash160, verify_inputs};
-    use crate::transaction_fetcher::{DisclosedTransaction, DisclosedTransparentInput};
+    use crate::disclosure_fetcher::{DisclosedTransaction, DisclosedTransparentInput};
     use crate::verify::parse_zip311::Zip311TransparentInput;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;

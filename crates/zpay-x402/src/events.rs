@@ -87,7 +87,7 @@ use zpay_core::status::{
     PaymentStatus, PaymentStatusSnapshot, SettlementLedgerStore, lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::transaction_fetcher::TransactionFetcher;
+use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::types::PaymentId;
 use zpay_core::verify::PaymentDisclosureVerifier;
 
@@ -278,7 +278,7 @@ where
     P: PreparedTxStore + Send + Sync + 'static,
     L: SettlementLedgerStore + Send + Sync + 'static,
     T: zpay_core::tip::ChainTipOracle + 'static,
-    F: TransactionFetcher + 'static,
+    F: DisclosureFetcher + 'static,
 {
     let payment_id = match payment_id_raw.parse::<PaymentId>() {
         Ok(id) => id,
@@ -577,7 +577,7 @@ mod tests {
     };
     use zpay_core::store::StoreError;
     use zpay_core::tip::{ChainTipOracle, TipError};
-    use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+    use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
     use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
     use zpay_core::verify::{
         AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
@@ -634,7 +634,7 @@ mod tests {
             _fetcher: &Fetcher,
         ) -> Result<VerifyResponse, VerifyError>
         where
-            Fetcher: TransactionFetcher + ?Sized,
+            Fetcher: DisclosureFetcher + ?Sized,
         {
             Ok(VerifyResponse {
                 cryptographic_verdict: CryptographicVerdict::Inconclusive,
@@ -650,7 +650,7 @@ mod tests {
 
     struct UnusedFetcher;
 
-    impl TransactionFetcher for UnusedFetcher {
+    impl DisclosureFetcher for UnusedFetcher {
         async fn fetch_transaction(
             &self,
             _txid: [u8; 32],

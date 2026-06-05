@@ -1,6 +1,6 @@
 //! Fetch the on-chain transaction a ZIP-311 payment disclosure references.
 //!
-//! [`TransactionFetcher`] is the chain-plane abstraction that the local
+//! [`DisclosureFetcher`] is the chain-plane abstraction that the local
 //! payment-disclosure verifier in [`crate::verify::local`] composes with to
 //! reach the on-chain bytes a disclosure pins to. It mirrors the sibling
 //! pattern used by [`crate::broadcast::BroadcastClient`],
@@ -92,7 +92,7 @@ pub struct DisclosedSaplingOutput {
     pub ephemeral_key: [u8; 32],
 }
 
-/// Errors raised by [`TransactionFetcher`] implementations.
+/// Errors raised by [`DisclosureFetcher`] implementations.
 ///
 /// Mirrors the transport-vs-categorical split used elsewhere in this
 /// crate: `Unavailable` is a retryable transport-class failure; a
@@ -120,7 +120,7 @@ pub enum FetchError {
 ///
 /// Implementors are pinned to `Send + Sync` so a single fetcher can be
 /// shared across the Axum router.
-pub trait TransactionFetcher: Send + Sync {
+pub trait DisclosureFetcher: Send + Sync {
     /// Fetch the transaction `txid` references.
     ///
     /// `txid` is in RPC byte order (the form users see in block

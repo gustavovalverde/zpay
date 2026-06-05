@@ -1,4 +1,4 @@
-//! Production [`TransactionFetcher`] backed by zinder's explorer plane.
+//! Production [`DisclosureFetcher`] backed by zinder's explorer plane.
 //!
 //! Reads `WalletQuery.TransactionById` (placement, raw transaction)
 //! plus `WalletQuery.TransparentOutputsByOutpoint` (prevout
@@ -8,7 +8,7 @@
 //! transport-class failures.
 //!
 //! Today this fetcher carries scaffolding for the integration: it
-//! holds the lazy channel and exposes the [`TransactionFetcher`]
+//! holds the lazy channel and exposes the [`DisclosureFetcher`]
 //! impl, but the bytes-to-`DisclosedTransaction` translator is not
 //! wired against a specific zinder capability yet. Calls return
 //! [`FetchError::Unavailable`] with a clear operator-facing reason,
@@ -22,7 +22,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tonic::transport::{Channel, Endpoint};
 use zinder_proto::v1::explorer::explorer_query_client::ExplorerQueryClient;
-use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
 
 /// Production transaction fetcher backed by zinder's explorer plane.
 pub(crate) struct ZinderTransactionFetcher {
@@ -91,7 +91,7 @@ impl ZinderTransactionFetcher {
     }
 }
 
-impl TransactionFetcher for ZinderTransactionFetcher {
+impl DisclosureFetcher for ZinderTransactionFetcher {
     async fn fetch_transaction(&self, _txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         // Keep the channel handle live so the connection is
         // pre-warmed for the upcoming translator.

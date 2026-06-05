@@ -35,7 +35,7 @@ use zpay_core::status::{
     lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::transaction_fetcher::{DisclosedTransaction, FetchError, TransactionFetcher};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
 use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::LocalPaymentDisclosureVerifier;
 use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
@@ -804,7 +804,7 @@ enum AnyTransactionFetcher {
     Zinder(Box<ZinderTransactionFetcher>),
 }
 
-impl TransactionFetcher for AnyTransactionFetcher {
+impl DisclosureFetcher for AnyTransactionFetcher {
     async fn fetch_transaction(&self, txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
         match self {
             Self::Rejecting(inner) => inner.fetch_transaction(txid).await,
