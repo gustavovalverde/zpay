@@ -1,0 +1,23 @@
+[package]
+name = "zspend-core"
+description = "Service-internal types for the zspend wallet runtime: payment_authorization RAR entry, PRC-7807 problem details, and startup-time signing policy."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "wallet", "rar", "oauth", "zpay"]
+categories = ["cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+zally-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

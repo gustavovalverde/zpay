@@ -5,6 +5,8 @@ members = [
   "crates/zpay-runtime",
   "crates/zpay-store",
   "crates/zpay-x402",
+  "crates/zspend-core",
+  "crates/zspend-runtime",
 ]
 resolver = "3"
 
@@ -65,6 +67,8 @@ zpay-e2e = { version = "0.1.0", path = "crates/zpay-e2e" }
 zpay-runtime = { version = "0.1.0", path = "crates/zpay-runtime" }
 zpay-store = { version = "0.1.0", path = "crates/zpay-store" }
 zpay-x402 = { version = "0.1.0", path = "crates/zpay-x402" }
+zspend-core = { version = "0.1.0", path = "crates/zspend-core" }
+zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 
 # Sibling workspaces consumed by pinned git rev so Railway's docker build (which
 # has no access to the sibling directory on disk) and `cargo` clones resolve

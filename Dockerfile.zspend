@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+
+# zspend-runtime: Phase 4 wallet runtime.
+#
+# Mirrors the layout of `Dockerfile` (the zpay-runtime image): multi-stage
+# Rust workspace build, cargo cache mounts in the builder, non-root user
+# in the runtime stage, gosu shim to fix bind-mount permissions, and a
+# curl-based healthcheck. The only differences are the binary name and
+# the default bind port (8090 instead of 8080) so the two services can
+# run side-by-side in a single Docker compose stack.
+
+ARG SOURCE_DATE_EPOCH=0
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+
+ARG APP_UID=10001
+ARG APP_GID=${APP_UID}
+ARG APP_USER=zspend
+ARG APP_HOME=/app
+
+# --- Stage 1: Builder ---
+FROM rust:1.95-trixie AS builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG APP_HOME
+WORKDIR ${APP_HOME}
+
+ARG SOURCE_DATE_EPOCH
+ARG GIT_SHA
+ARG BUILD_TIME
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    clang \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/* /tmp/*
+
+# Copy the full workspace. The workspace has multiple interlinked crates
+# (Phase 4 adds `zspend-core` and `zspend-runtime`); registry + target
+# cache mounts keep iterative builds fast.
+COPY --link Cargo.toml Cargo.lock ./
+COPY --link crates ./crates
+
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=${APP_HOME}/target \
+    cargo build --locked --release --bin zspend-runtime && \
+    cp ${APP_HOME}/target/release/zspend-runtime ${APP_HOME}/zspend-runtime
+
+# --- Stage 2: Runtime ---
+# Trixie-slim matches the rust:1.95-trixie builder so the binary's
+# glibc + libstdc++ symbol requirements are satisfied.
+FROM debian:trixie-slim AS runtime
+
+ARG APP_UID
+ARG APP_GID
+ARG APP_USER
+ARG APP_HOME
+
+WORKDIR ${APP_HOME}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gosu \
+    && rm -rf /var/lib/apt/lists/* /tmp/*
+
+COPY --link --from=builder ${APP_HOME}/zspend-runtime ${APP_HOME}/zspend-runtime
+COPY --link docker/start-zspend.sh ./start.sh
+
+RUN groupadd --gid ${APP_GID} ${APP_USER} && \
+    useradd --uid ${APP_UID} --gid ${APP_USER} --shell /sbin/nologin ${APP_USER} && \
+    mkdir -p /var/lib/zspend && \
+    touch /var/lib/zspend/.keep && \
+    chmod +x start.sh && \
+    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zspend
+
+ENV RUST_LOG=info \
+    ZSPEND_BIND_ADDR=0.0.0.0:8090 \
+    ZSPEND_NETWORK=testnet \
+    ZSPEND_SEALED_SEED_PATH=/var/lib/zspend/wallet.age \
+    ZSPEND_STORAGE_PATH=/var/lib/zspend/wallet.db
+
+EXPOSE 8090
+
+# Liveness probe: `/healthz` returns 200 + {"status":"alive"} on a
+# healthy listener.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS --max-time 5 -o /dev/null "http://localhost:8090/healthz" || exit 1
+
+CMD ["./start.sh"]

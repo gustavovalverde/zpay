@@ -50,8 +50,36 @@ services:
     networks:
       - zcash-x402-demo
 
+  # Phase 4 wallet runtime. Signs Zcash transactions under a bounded
+  # `payment_authorization` grant (Proposal-0003 D-1). Runs as its own
+  # service so the facilitator (`zpay`) stays broadcaster-only (D-9).
+  # The sealed seed and the wallet database are persisted on the
+  # `zspend-data` volume; rotate by removing the volume.
+  zspend:
+    build:
+      context: .
+      dockerfile: Dockerfile.zspend
+    image: zspend-runtime:dev
+    ports:
+      # Wallet runtime listener (the URL the agent BFF talks to).
+      - "8090:8090"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      ZSPEND_NETWORK: ${ZSPEND_NETWORK:-testnet}
+      ZSPEND_SEALED_SEED_PATH: /var/lib/zspend/wallet.age
+      ZSPEND_STORAGE_PATH: /var/lib/zspend/wallet.db
+      # Optional overrides; see crates/zspend-runtime/src/main.rs.
+      # ZSPEND_MAX_AMOUNT_ZAT: "100000000"
+      # ZSPEND_AUDIENCE_THUMBPRINT: "phase4-stub-thumbprint"
+    volumes:
+      - zspend-data:/var/lib/zspend
+    restart: unless-stopped
+    networks:
+      - zcash-x402-demo
+
 volumes:
   zpay-data:
+  zspend-data:
 
 networks:
   # External: created by whichever compose stack runs first.

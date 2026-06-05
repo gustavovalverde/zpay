@@ -7401,6 +7401,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "zspend-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "zally-core",
+]
+
+[[package]]
+name = "zspend-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0-pre.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "zally-chain",
+ "zally-core",
+ "zally-keys",
+ "zally-storage",
+ "zally-wallet",
+ "zinder-client",
+ "zinder-proto",
+ "zpay-core",
+ "zspend-core",
+]
+
+[[package]]
 name = "zstd-sys"
 version = "2.0.16+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
