@@ -225,8 +225,8 @@ async fn shield_funds(
     );
     let send_outcome = wallet.shield_transparent_funds(plan).await?;
     info!(
-        tx_id = %hex::encode(send_outcome.tx_id.as_bytes()),
-        broadcast_at_height = send_outcome.broadcast_at_height.as_u32(),
+        tx_id = %hex::encode(send_outcome.tx_id().as_bytes()),
+        broadcast_at_height = send_outcome.broadcast.broadcast_at_height.as_u32(),
         "shielding tx broadcast",
     );
     Ok(())
@@ -357,8 +357,8 @@ async fn run_flow(
     info!("invoking wallet.send_payment with custom zpay submitter");
     let send_outcome = wallet.send_payment(plan).await?;
     info!(
-        tx_id = %hex::encode(send_outcome.tx_id.as_bytes()),
-        broadcast_at_height = send_outcome.broadcast_at_height.as_u32(),
+        tx_id = %hex::encode(send_outcome.tx_id().as_bytes()),
+        broadcast_at_height = send_outcome.broadcast.broadcast_at_height.as_u32(),
         "send_payment returned",
     );
 

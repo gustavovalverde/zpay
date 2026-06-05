@@ -70,11 +70,11 @@ zpay-x402 = { version = "0.1.0", path = "crates/zpay-x402" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "65069edb6b7146106a044a48a53cf4f5abdd1075", features = ["zinder"] }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "8f2c997822fadc1d2951043ebf935453520ef578", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "8f2c997822fadc1d2951043ebf935453520ef578" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "8f2c997822fadc1d2951043ebf935453520ef578" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "8f2c997822fadc1d2951043ebf935453520ef578" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "8f2c997822fadc1d2951043ebf935453520ef578", features = ["zinder"] }
 zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "ca7fde9f0b28cf12cdcd2248a1b7759656357bbf" }
 zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "ca7fde9f0b28cf12cdcd2248a1b7759656357bbf" }
 
