@@ -257,7 +257,7 @@ fn short_circuit_inconclusive(
 mod tests {
     use super::LocalPaymentDisclosureVerifier;
     use crate::disclosure_fetcher::{
-        DisclosedTransaction, DisclosedTransparentInput, FetchError, DisclosureFetcher,
+        DisclosedTransaction, DisclosedTransparentInput, DisclosureFetcher, FetchError,
     };
     use crate::types::PaymentNetwork;
     use crate::verify::parse_zip311::{

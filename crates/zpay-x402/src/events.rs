@@ -81,13 +81,13 @@ use pin_project_lite::pin_project;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use zpay_core::broadcast::BroadcastClient;
+use zally_chain::Submitter;
+use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::prepare::PreparedTxStore;
 use zpay_core::status::{
     PaymentStatus, PaymentStatusSnapshot, SettlementLedgerStore, lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::types::PaymentId;
 use zpay_core::verify::PaymentDisclosureVerifier;
 
@@ -273,7 +273,7 @@ pub(crate) async fn events_handler<C, V, P, L, T, F>(
     Path(payment_id_raw): Path<String>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + Send + Sync + 'static,
     L: SettlementLedgerStore + Send + Sync + 'static,
@@ -564,12 +564,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use futures::StreamExt as _;
     use tokio::sync::broadcast;
     use tokio::time::timeout;
     use tokio_stream::wrappers::BroadcastStream;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
-    use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+    use zpay_core::broadcast::BroadcastOutcome;
+    use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
     use zpay_core::prepare::{PrepareRequest, PreparedTxCache, propose};
     use zpay_core::status::{
         DEFAULT_FINALITY_DEPTH, IntentPosture, PaymentStatus, PaymentStatusSnapshot,
@@ -577,7 +579,6 @@ mod tests {
     };
     use zpay_core::store::StoreError;
     use zpay_core::tip::{ChainTipOracle, TipError};
-    use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
     use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
     use zpay_core::verify::{
         AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
@@ -617,10 +618,17 @@ mod tests {
 
     struct UnusedChain;
 
-    impl BroadcastClient for UnusedChain {
-        async fn broadcast(&self, _raw_tx_hex: &str) -> Result<BroadcastOutcome, BroadcastError> {
-            Err(BroadcastError::Unavailable {
-                reason: "test fixture: broadcast must not be called".to_owned(),
+    #[async_trait]
+    impl zally_chain::Submitter for UnusedChain {
+        fn network(&self) -> zally_core::Network {
+            zally_core::Network::Testnet
+        }
+        async fn submit(
+            &self,
+            _raw_tx: &[u8],
+        ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
+            Err(zally_chain::SubmitterError::Unavailable {
+                reason: "test fixture: submit must not be called".to_owned(),
             })
         }
     }

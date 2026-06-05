@@ -43,7 +43,7 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 
-use crate::disclosure_fetcher::{FetchError, DisclosureFetcher};
+use crate::disclosure_fetcher::{DisclosureFetcher, FetchError};
 use crate::types::Zatoshis;
 use crate::verify::parse_zip311::parse as parse_zip311;
 
@@ -286,7 +286,7 @@ mod tests {
         CryptographicVerdict, LocalPaymentDisclosureVerifier, VerifyError, VerifyRequest,
         VerifyResponse, verify,
     };
-    use crate::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
+    use crate::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
     use crate::types::{PaymentNetwork, Zatoshis};
     use crate::verify::parse_zip311::{
         ZIP311_VERSION_V1, Zip311Disclosure, Zip311TransparentInput, encode_signed,

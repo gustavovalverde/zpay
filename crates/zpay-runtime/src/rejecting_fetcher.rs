@@ -11,7 +11,7 @@
 //!
 //! See [ADR-0007](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0007-local-zip311-verifier.md).
 
-use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
 
 /// Placeholder fetcher used when no explorer endpoint is configured.
 ///
@@ -44,7 +44,7 @@ impl DisclosureFetcher for RejectingTransactionFetcher {
 #[cfg(test)]
 mod tests {
     use super::RejectingTransactionFetcher;
-    use zpay_core::disclosure_fetcher::{FetchError, DisclosureFetcher};
+    use zpay_core::disclosure_fetcher::{DisclosureFetcher, FetchError};
 
     #[tokio::test]
     async fn fetch_transaction_returns_unavailable() {

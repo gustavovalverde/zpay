@@ -38,13 +38,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
+use zally_chain::Submitter;
 use zpay_core::accepts::PayeeRegistry;
-use zpay_core::broadcast::BroadcastClient;
+use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::prepare::{PrepareError, PrepareRequest, PreparedTxStore, propose};
 use zpay_core::settle::{SettleError, SettleRequest, submit_settlement};
 use zpay_core::status::{SettlementLedgerStore, lookup_payment_status};
 use zpay_core::tip::{ChainTip, ChainTipOracle, TipError};
-use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::{PaymentDisclosureVerifier, VerifyError, VerifyRequest, verify};
 
@@ -175,7 +175,7 @@ impl<C, V, P, L, T, F> AppState<C, V, P, L, T, F> {
 /// the mount point.
 pub fn router<C, V, P, L, T, F>(state: AppState<C, V, P, L, T, F>) -> Router
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -206,7 +206,7 @@ async fn prepare_handler<C, V, P, L, T, F>(
     Json(mut body): Json<PrepareRequest>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -259,7 +259,7 @@ async fn settle_handler<C, V, P, L, T, F>(
     Json(body): Json<SettleRequest>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -317,7 +317,7 @@ async fn payment_status_handler<C, V, P, L, T, F>(
     Path(payment_id_raw): Path<String>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -360,7 +360,7 @@ async fn accepts_handler<C, V, P, L, T, F>(
     Query(query): Query<AcceptsQuery>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -393,7 +393,7 @@ async fn tip_handler<C, V, P, L, T, F>(
     Query(query): Query<TipQuery>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,
@@ -454,7 +454,7 @@ async fn verify_handler<C, V, P, L, T, F>(
     Json(body): Json<VerifyRequest>,
 ) -> Response
 where
-    C: BroadcastClient + 'static,
+    C: Submitter + 'static,
     V: PaymentDisclosureVerifier + 'static,
     P: PreparedTxStore + 'static,
     L: SettlementLedgerStore + 'static,

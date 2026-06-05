@@ -1,19 +1,20 @@
-//! Broadcast a user-signed Zcash transaction through a chain plane.
+//! Settlement-side projection of a chain-plane broadcast outcome.
 //!
-//! [`BroadcastClient`] is the abstraction zpay-core uses to hand a raw
-//! transaction off to the network. Production deployments wire it to
-//! `zinder-client::broadcast_transaction`; tests wire it to an in-memory
-//! mock. The trait stays free of zinder types so zpay-core builds without
-//! a chain dependency.
+//! [`BroadcastOutcome`] is the persisted shape the settlement ledger holds
+//! for every settled payment; the categorical variants align with the
+//! upstream `zinder` `BroadcastTransactionResponse` and survive across
+//! restarts via libSQL.
 //!
-//! The categorical outcomes mirror zinder's `BroadcastTransactionResponse`
-//! without lossy translation: an `Accepted` response carries the
-//! transaction identifier the upstream reports, the other variants carry
-//! the upstream-supplied human-readable message.
+//! As of Phase 2f of Proposal-0003, the broadcast TRAIT lives in zally:
+//! `zally_chain::Submitter` is the canonical contract any chain plane must
+//! satisfy, and zpay's settle path consumes it directly. The mapping from
+//! `zally_chain::SubmitOutcome` to this projection lives in
+//! [`BroadcastOutcome::from_submit_outcome`] so the persistence shape stays
+//! stable even as the trait surface evolves upstream.
 
 use serde::{Deserialize, Serialize};
 
-/// Outcome of a broadcast attempt.
+/// Outcome of a broadcast attempt as persisted in the settlement ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -67,53 +68,46 @@ impl BroadcastOutcome {
     pub const fn is_success(&self) -> bool {
         matches!(self, Self::Accepted { .. } | Self::Duplicate { .. })
     }
-}
 
-/// Errors raised by [`BroadcastClient`] implementations. These wrap
-/// transport-level failures the upstream could not even respond to.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum BroadcastError {
-    /// The upstream chain plane was unreachable. Retry posture: `retryable`.
-    #[error("chain plane unavailable: {reason}")]
-    Unavailable {
-        /// Operator-facing reason; never includes raw transaction bytes.
-        reason: String,
-    },
-    /// The upstream responded but the response could not be interpreted.
-    /// Retry posture: `requires_operator` (almost certainly a wire-protocol
-    /// mismatch worth investigating).
-    #[error("chain plane response malformed: {reason}")]
-    ResponseMalformed {
-        /// Operator-facing reason; never includes raw transaction bytes.
-        reason: String,
-    },
+    /// Maps a [`zally_chain::SubmitOutcome`] into the settlement-side
+    /// projection. zally's `Queued` variant (broadcast accepted but not yet
+    /// in the chain's mempool snapshot) folds into `Accepted` because both
+    /// represent a successful handoff from zpay's perspective; the
+    /// confirmation oracle is the authoritative source for "actually on
+    /// chain" via [`Self::is_success`] and the subsequent watch.
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "zally_chain::SubmitOutcome is non_exhaustive; unknown variants fall through to Unknown so a future zally variant does not silently coerce to a success."
+    )]
+    #[must_use]
+    pub fn from_submit_outcome(outcome: zally_chain::SubmitOutcome) -> Self {
+        match outcome {
+            zally_chain::SubmitOutcome::Accepted { tx_id }
+            | zally_chain::SubmitOutcome::Queued { tx_id } => Self::Accepted {
+                transaction_id: tx_id.to_rpc_hex(),
+            },
+            zally_chain::SubmitOutcome::Duplicate { tx_id } => Self::Duplicate {
+                upstream_message: format!("already in mempool: {}", tx_id.to_rpc_hex()),
+            },
+            zally_chain::SubmitOutcome::Rejected { reason, detail } => Self::Rejected {
+                upstream_message: format!("{reason:?}: {detail}"),
+            },
+            _ => Self::Unknown {
+                upstream_message: "submitter returned an unrecognised outcome variant".to_owned(),
+            },
+        }
+    }
 }
-
-/// Abstraction over the chain plane that accepts a hex-encoded raw
-/// transaction and reports a categorical outcome.
-///
-/// Implementors are pinned to `Send + Sync` so a single client can be
-/// shared across the Axum router. The `'a` lifetime on the return future
-/// is inferred; callers do not need to spell it out.
-pub trait BroadcastClient: Send + Sync {
-    /// Broadcast the given hex-encoded transaction.
-    ///
-    /// Implementations must not log `raw_tx_hex` outside trace spans the
-    /// caller has explicitly opted in to. The hex string carries the
-    /// user's signed transaction and may contain shielded ciphertexts that
-    /// the operator never approved for logging.
-    fn broadcast(
-        &self,
-        raw_tx_hex: &str,
-    ) -> impl Future<Output = Result<BroadcastOutcome, BroadcastError>> + Send;
-}
-
-use std::future::Future;
 
 #[cfg(test)]
 mod tests {
-    use super::{BroadcastError, BroadcastOutcome};
+    use super::BroadcastOutcome;
+    use zally_chain::SubmitOutcome;
+    use zally_core::TxId;
+
+    fn fixture_txid() -> TxId {
+        TxId::from_bytes([0xab; 32])
+    }
 
     #[test]
     fn accepted_outcome_exposes_transaction_id() {
@@ -143,10 +137,32 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_error_unavailable_displays_reason() {
-        let err = BroadcastError::Unavailable {
-            reason: "dial timeout".to_owned(),
-        };
-        assert!(format!("{err}").contains("dial timeout"));
+    fn submit_outcome_accepted_maps_to_accepted_with_rpc_hex_txid() {
+        let mapped = BroadcastOutcome::from_submit_outcome(SubmitOutcome::Accepted {
+            tx_id: fixture_txid(),
+        });
+        assert!(mapped.is_success());
+        assert_eq!(
+            mapped.transaction_id(),
+            Some(fixture_txid().to_rpc_hex().as_str())
+        );
+    }
+
+    #[test]
+    fn submit_outcome_queued_maps_to_accepted_for_persistence() {
+        let mapped = BroadcastOutcome::from_submit_outcome(SubmitOutcome::Queued {
+            tx_id: fixture_txid(),
+        });
+        assert!(mapped.is_success());
+    }
+
+    #[test]
+    fn submit_outcome_rejected_maps_to_rejected_with_reason_and_detail() {
+        let mapped = BroadcastOutcome::from_submit_outcome(SubmitOutcome::Rejected {
+            reason: zally_chain::RejectionReason::Unknown,
+            detail: "consensus failure".to_owned(),
+        });
+        assert!(matches!(mapped, BroadcastOutcome::Rejected { .. }));
+        assert!(!mapped.is_success());
     }
 }

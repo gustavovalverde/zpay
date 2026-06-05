@@ -8,9 +8,9 @@
 
 mod rejecting_fetcher;
 mod tip_oracle;
-mod zinder_broadcast;
 mod zinder_fetcher;
 mod zinder_oracle;
+mod zinder_submitter;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,12 +22,12 @@ use axum::routing::get;
 use clap::Parser;
 use rejecting_fetcher::RejectingTransactionFetcher;
 use tip_oracle::{AnyTipOracle, StaticTipOracle, ZinderTipOracle};
-use zinder_broadcast::ZinderBroadcastClient;
 use zinder_client::Network as ZinderNetwork;
 use zinder_fetcher::ZinderTransactionFetcher;
 use zinder_oracle::ZinderConfirmationOracle;
+use zinder_submitter::ZinderSubmitter;
 use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
-use zpay_core::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
 use zpay_core::prepare::{PreparedTxCache, PreparedTxEntry, PreparedTxStore};
 use zpay_core::status::{
@@ -35,7 +35,6 @@ use zpay_core::status::{
     lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
 use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::LocalPaymentDisclosureVerifier;
 use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
@@ -76,7 +75,7 @@ enum StartupError {
         source: tracing_subscriber::util::TryInitError,
     },
     #[error("zinder broadcast client construction failed for endpoint {endpoint}: {source}")]
-    BroadcastClient {
+    Submitter {
         endpoint: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -458,7 +457,7 @@ fn spawn_confirmation_oracle(
         endpoint.clone(),
         zinder_network_from_str(&config.network)?,
     )
-    .map_err(|source| StartupError::BroadcastClient {
+    .map_err(|source| StartupError::Submitter {
         endpoint,
         source: Box::new(source),
     })?;
@@ -602,26 +601,35 @@ fn build_dpop_expectations(config: &ResolvedConfig) -> DpopExpectations {
     )
 }
 
-fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnyBroadcastClient, StartupError> {
+fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, StartupError> {
+    let zally_network = zally_network_from_config_str(&config.network)?;
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
             "ZPAY_NODE__INDEXER_GRPC_ADDR unset; /x402/v2/settle will return 502 until a chain plane is configured",
         );
-        return Ok(AnyBroadcastClient::Rejecting);
+        return Ok(AnySubmitter::Rejecting(zally_network));
     };
     let zinder_network = zinder_network_from_str(&config.network)?;
-    let client =
-        ZinderBroadcastClient::connect(endpoint.clone(), zinder_network).map_err(|source| {
-            StartupError::BroadcastClient {
-                endpoint,
-                source: Box::new(source),
-            }
+    let client = ZinderSubmitter::connect(endpoint.clone(), zinder_network, zally_network)
+        .map_err(|source| StartupError::Submitter {
+            endpoint,
+            source: Box::new(source),
         })?;
     tracing::info!(
         network = %config.network,
-        "zinder broadcast client wired",
+        "zinder submitter wired",
     );
-    Ok(AnyBroadcastClient::Zinder(Box::new(client)))
+    Ok(AnySubmitter::Zinder(Box::new(client)))
+}
+
+fn zally_network_from_config_str(raw: &str) -> Result<zally_core::Network, StartupError> {
+    match raw {
+        "mainnet" => Ok(zally_core::Network::Mainnet),
+        "testnet" | "regtest" => Ok(zally_core::Network::Testnet),
+        other => Err(StartupError::NetworkInvalid {
+            provided: other.to_owned(),
+        }),
+    }
 }
 
 fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupError> {
@@ -636,7 +644,7 @@ fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupErro
     };
     let zinder_network = zinder_network_from_str(&config.network)?;
     let oracle = ZinderTipOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
-        StartupError::BroadcastClient {
+        StartupError::Submitter {
             endpoint,
             source: Box::new(source),
         }
@@ -757,32 +765,45 @@ fn zinder_network_from_str(raw: &str) -> Result<ZinderNetwork, StartupError> {
     }
 }
 
-/// Concrete broadcast client variant chosen at startup.
+/// Concrete submitter variant chosen at startup.
 ///
-/// Using an enum (rather than `Arc<dyn BroadcastClient>`) keeps the
-/// `impl Future + Send` return type from [`BroadcastClient::broadcast`]
-/// statically resolvable without an `async-trait` allocation per call.
-enum AnyBroadcastClient {
-    /// Placeholder when no chain plane is configured. Every call returns
-    /// `BroadcastError::Unavailable` so the settle handler returns 502.
-    Rejecting,
-    /// Production client backed by zinder's `WalletQuery.BroadcastTransaction`.
-    ///
-    /// Boxed because the underlying `RemoteChainIndex` carries a tonic
-    /// `Endpoint` of several hundred bytes, while the `Rejecting` variant
-    /// is unit-sized; clippy's `large_enum_variant` rule prefers
-    /// indirection.
-    Zinder(Box<ZinderBroadcastClient>),
+/// Using an enum (rather than `Arc<dyn Submitter>`) keeps the dispatch
+/// statically resolvable. The unit-sized `Rejecting` variant carries the
+/// network it is bound to so the `Submitter::network()` method is
+/// answerable without inspecting an absent inner.
+enum AnySubmitter {
+    /// Placeholder when no chain plane is configured. Every `submit` call
+    /// returns `SubmitterError::Unavailable`, which the settle handler maps
+    /// to `SettleError::ChainUnavailable` and the wire layer surfaces as 502.
+    Rejecting(zally_core::Network),
+    /// Production submitter backed by zinder's
+    /// `WalletQuery.BroadcastTransaction`. Boxed because the underlying
+    /// `RemoteChainIndex` carries a tonic `Endpoint` of several hundred
+    /// bytes, while the `Rejecting` variant is unit-sized; clippy's
+    /// `large_enum_variant` rule prefers indirection.
+    Zinder(Box<ZinderSubmitter>),
 }
 
-impl BroadcastClient for AnyBroadcastClient {
-    async fn broadcast(&self, raw_tx_hex: &str) -> Result<BroadcastOutcome, BroadcastError> {
+#[async_trait::async_trait]
+impl zally_chain::Submitter for AnySubmitter {
+    fn network(&self) -> zally_core::Network {
         match self {
-            Self::Rejecting => Err(BroadcastError::Unavailable {
-                reason: "broadcast client not configured; set ZPAY_NODE__INDEXER_GRPC_ADDR to enable settle"
-                    .to_owned(),
+            Self::Rejecting(network) => *network,
+            Self::Zinder(submitter) => submitter.network(),
+        }
+    }
+
+    async fn submit(
+        &self,
+        raw_tx: &[u8],
+    ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
+        match self {
+            Self::Rejecting(_) => Err(zally_chain::SubmitterError::Unavailable {
+                reason:
+                    "submitter not configured; set ZPAY_NODE__INDEXER_GRPC_ADDR to enable settle"
+                        .to_owned(),
             }),
-            Self::Zinder(client) => client.broadcast(raw_tx_hex).await,
+            Self::Zinder(submitter) => submitter.submit(raw_tx).await,
         }
     }
 }
@@ -825,7 +846,7 @@ fn build_transaction_fetcher(
         ));
     };
     let fetcher = ZinderTransactionFetcher::connect(endpoint.clone()).map_err(|source| {
-        StartupError::BroadcastClient {
+        StartupError::Submitter {
             endpoint,
             source: Box::new(source),
         }

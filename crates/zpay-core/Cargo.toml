@@ -30,6 +30,9 @@ verify_sapling = []
 base64.workspace = true
 blake2b_simd = "1.0.3"
 hex.workspace = true
+async-trait.workspace = true
+zally-chain = { workspace = true, features = ["zinder"] }
+zally-core = { workspace = true }
 parking_lot = { workspace = true, optional = true }
 ripemd = "0.1.3"
 secp256k1 = { version = "0.29.1", features = ["recovery"] }

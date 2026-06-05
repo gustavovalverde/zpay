@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
-use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+use crate::broadcast::BroadcastOutcome;
 use crate::prepare::{PROTOCOL_MEMO_VERSION, PreparedTxStore};
 use crate::status::{SettlementLedgerEntry, SettlementLedgerStore};
 use crate::store::StoreError;
@@ -152,17 +152,17 @@ pub enum SettleError {
 ///   bogus `payment_id`).
 /// - [`SettleError::RawTxHexInvalid`] when the supplied hex string fails
 ///   the basic alphabet check.
-/// - [`SettleError::ChainUnavailable`] when [`BroadcastClient::broadcast`]
+/// - [`SettleError::ChainUnavailable`] when [`zally_chain::Submitter::submit`]
 ///   itself errors. The cache entry is preserved on this path.
-pub async fn submit_settlement<C, P, L>(
+pub async fn submit_settlement<S, P, L>(
     request: SettleRequest,
     jkt: &str,
     prepared_store: &P,
     ledger: &L,
-    chain: &C,
+    chain: &S,
 ) -> Result<SettlementOutcome, SettleError>
 where
-    C: BroadcastClient + ?Sized,
+    S: zally_chain::Submitter + ?Sized,
     P: PreparedTxStore + ?Sized,
     L: SettlementLedgerStore + ?Sized,
 {
@@ -199,15 +199,21 @@ where
         });
     }
 
-    let outcome = chain
-        .broadcast(&request.raw_tx_hex)
-        .await
-        .map_err(|err| match err {
-            BroadcastError::Unavailable { reason }
-            | BroadcastError::ResponseMalformed { reason } => {
-                SettleError::ChainUnavailable { reason }
-            }
-        })?;
+    let raw_tx_bytes = hex::decode(&request.raw_tx_hex).map_err(|err| {
+        // Hex parsing was validated above; reaching here means the request
+        // payload bytes changed under us. Treat as transport-layer issue.
+        SettleError::ChainUnavailable {
+            reason: format!("raw_tx_hex decode failed after validation: {err}"),
+        }
+    })?;
+    let submit_outcome =
+        chain
+            .submit(&raw_tx_bytes)
+            .await
+            .map_err(|err| SettleError::ChainUnavailable {
+                reason: err.to_string(),
+            })?;
+    let outcome = BroadcastOutcome::from_submit_outcome(submit_outcome);
 
     ledger
         .record(
@@ -271,39 +277,71 @@ fn parse_signed_expiry_height(raw_tx_hex: &str) -> Result<u32, SettleError> {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use parking_lot::Mutex;
 
     use super::{SettleError, SettleRequest, submit_settlement};
-    use crate::broadcast::{BroadcastClient, BroadcastError, BroadcastOutcome};
+    use crate::broadcast::BroadcastOutcome;
     use crate::prepare::test_support::{
         ALTERNATE_FIXTURE_JKT, FIXTURE_JKT, FixedTipOracle, fixture_registry, valid_request,
     };
     use crate::prepare::{PreparedTxCache, PreparedTxStore, propose};
     use crate::status::SettlementLedger;
 
+    fn fixture_txid_bytes(seed: u8) -> [u8; 32] {
+        [seed; 32]
+    }
+
     struct FakeChain {
-        outcome: Mutex<BroadcastOutcome>,
+        outcome: Mutex<zally_chain::SubmitOutcome>,
     }
 
     impl FakeChain {
-        fn new(outcome: BroadcastOutcome) -> Self {
+        fn accepted(seed: u8) -> Self {
             Self {
-                outcome: Mutex::new(outcome),
+                outcome: Mutex::new(zally_chain::SubmitOutcome::Accepted {
+                    tx_id: zally_core::TxId::from_bytes(fixture_txid_bytes(seed)),
+                }),
+            }
+        }
+
+        fn rejected() -> Self {
+            Self {
+                outcome: Mutex::new(zally_chain::SubmitOutcome::Rejected {
+                    reason: zally_chain::RejectionReason::Unknown,
+                    detail: "consensus failure".to_owned(),
+                }),
             }
         }
     }
 
-    impl BroadcastClient for FakeChain {
-        async fn broadcast(&self, _raw_tx_hex: &str) -> Result<BroadcastOutcome, BroadcastError> {
+    #[async_trait]
+    impl zally_chain::Submitter for FakeChain {
+        fn network(&self) -> zally_core::Network {
+            zally_core::Network::Testnet
+        }
+
+        async fn submit(
+            &self,
+            _raw_tx: &[u8],
+        ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
             Ok(self.outcome.lock().clone())
         }
     }
 
     struct UnavailableChain;
 
-    impl BroadcastClient for UnavailableChain {
-        async fn broadcast(&self, _raw_tx_hex: &str) -> Result<BroadcastOutcome, BroadcastError> {
-            Err(BroadcastError::Unavailable {
+    #[async_trait]
+    impl zally_chain::Submitter for UnavailableChain {
+        fn network(&self) -> zally_core::Network {
+            zally_core::Network::Testnet
+        }
+
+        async fn submit(
+            &self,
+            _raw_tx: &[u8],
+        ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
+            Err(zally_chain::SubmitterError::Unavailable {
                 reason: "dial timeout".to_owned(),
             })
         }
@@ -325,9 +363,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         let outcome = submit_settlement(
             SettleRequest {
@@ -343,7 +379,10 @@ mod tests {
         .map_err(|_| "settle must accept the prepared payment")?;
 
         assert_eq!(outcome.payment_id, preparation.payment_id);
-        assert_eq!(outcome.broadcast_outcome.transaction_id(), Some("deadbeef"));
+        assert_eq!(
+            outcome.broadcast_outcome.transaction_id(),
+            Some("abababababababababababababababababababababababababababababababab")
+        );
         assert!(outcome.watch_id.is_some());
         assert_eq!(
             cache
@@ -370,9 +409,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Rejected {
-            upstream_message: "policy: dust output".to_owned(),
-        });
+        let chain = FakeChain::rejected();
 
         let outcome = submit_settlement(
             SettleRequest {
@@ -406,9 +443,7 @@ mod tests {
     async fn unknown_payment_id_returns_preparation_not_found() {
         let cache = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
         let request = SettleRequest {
             payment_id: crate::types::PaymentId("unknown".to_owned()),
             raw_tx_hex: "0500".to_owned(),
@@ -436,9 +471,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         let outcome = submit_settlement(
             SettleRequest {
@@ -471,9 +504,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         let outcome = submit_settlement(
             SettleRequest {
@@ -546,9 +577,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         // Wallet signed a tx whose expiry_height is not the one zpay
         // returned at /prepare. Settle must reject before broadcasting.
@@ -594,9 +623,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         // Hex-shaped but garbage bytes.
         let outcome = submit_settlement(
@@ -657,9 +684,7 @@ mod tests {
             agent_dpop_jkt: FIXTURE_JKT.to_owned(),
         };
         cache.insert(entry).await.map_err(|_| "insert failed")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         let outcome = submit_settlement(
             SettleRequest {
@@ -698,9 +723,7 @@ mod tests {
         )
         .await
         .map_err(|_| "propose must accept valid input")?;
-        let chain = FakeChain::new(BroadcastOutcome::Accepted {
-            transaction_id: "deadbeef".to_owned(),
-        });
+        let chain = FakeChain::accepted(0xab);
 
         let outcome = submit_settlement(
             SettleRequest {

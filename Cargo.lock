@@ -7295,6 +7295,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zpay-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "blake2b_simd",
  "hex",
@@ -7308,6 +7309,8 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "ulid",
+ "zally-chain",
+ "zally-core",
  "zcash_primitives 0.26.4",
  "zcash_protocol 0.7.2",
 ]
@@ -7338,6 +7341,7 @@ name = "zpay-runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "axum 0.8.9",
  "clap",
  "hex",
@@ -7350,6 +7354,8 @@ dependencies = [
  "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
+ "zally-chain",
+ "zally-core",
  "zinder-client",
  "zinder-proto",
  "zpay-core",
@@ -7372,6 +7378,7 @@ dependencies = [
 name = "zpay-x402"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
  "futures",
@@ -7388,6 +7395,8 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "zally-chain",
+ "zally-core",
  "zpay-core",
 ]
 

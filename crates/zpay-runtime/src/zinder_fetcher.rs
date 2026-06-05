@@ -22,7 +22,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tonic::transport::{Channel, Endpoint};
 use zinder_proto::v1::explorer::explorer_query_client::ExplorerQueryClient;
-use zpay_core::disclosure_fetcher::{DisclosedTransaction, FetchError, DisclosureFetcher};
+use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
 
 /// Production transaction fetcher backed by zinder's explorer plane.
 pub(crate) struct ZinderTransactionFetcher {
