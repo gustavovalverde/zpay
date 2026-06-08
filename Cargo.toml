@@ -74,12 +74,12 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac", features = ["zinder"] }
 zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
 zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
 
@@ -122,3 +122,11 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 wildcard_enum_match_arm = "deny"
+
+# Pinned to a standalone fork of `zcash_client_backend` 0.23.0 with the
+# `target_expiry_height` argument added (matches https://github.com/zcash/librustzcash/pull/2412).
+# The fork is single-crate (not the librustzcash workspace) so cargo resolves transitive
+# deps from crates.io. Drop once upstream merges and a `zcash_client_backend`
+# release ships the patch on crates.io.
+[patch.crates-io]
+zcash_client_backend = { git = "https://github.com/gustavovalverde/zcash_client_backend-target-expiry.git", tag = "v0.23.1-target-expiry" }
