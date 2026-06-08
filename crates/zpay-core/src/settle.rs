@@ -37,8 +37,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::BranchId;
+use zally_storage::parse_v5_expiry_height;
 
 use crate::broadcast::BroadcastOutcome;
 use crate::prepare::{PROTOCOL_MEMO_VERSION, PreparedTxStore};
@@ -261,18 +260,16 @@ fn validate_raw_tx_hex(raw_tx_hex: &str) -> Result<(), SettleError> {
 /// Parse `raw_tx_hex` as a v5 Zcash transaction and return its
 /// `expiry_height`.
 ///
-/// `Transaction::read` requires a `BranchId` but uses it only for v3/v4
-/// txid computation; v5 carries the consensus branch id in its own
-/// header. zpay is post-NU5 only, so we pass [`BranchId::Nu5`] as a
-/// placeholder and trust the v5 path.
+/// Delegates to [`zally_storage::parse_v5_expiry_height`] so the read
+/// path shares a `zcash_primitives` version with the write path. The
+/// previous local implementation pinned a different `zcash_primitives`
+/// release than zally's writer, opening a version-skew window where a
+/// ZIP-225-valid transaction zally emitted could fail to re-parse here.
 fn parse_signed_expiry_height(raw_tx_hex: &str) -> Result<u32, SettleError> {
     let raw_bytes = hex::decode(raw_tx_hex).map_err(|_| SettleError::RawTxHexInvalid)?;
-    let tx = Transaction::read(raw_bytes.as_slice(), BranchId::Nu5).map_err(|err| {
-        SettleError::TransactionMalformed {
-            reason: err.to_string(),
-        }
-    })?;
-    Ok(u32::from(tx.expiry_height()))
+    parse_v5_expiry_height(&raw_bytes).map_err(|err| SettleError::TransactionMalformed {
+        reason: err.to_string(),
+    })
 }
 
 #[cfg(test)]

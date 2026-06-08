@@ -621,11 +621,11 @@ fn settle_error_response(err: &SettleError) -> Response {
             "chain plane is currently unavailable",
             true,
         ),
-        SettleError::TransactionMalformed { .. } => problem_response(
+        SettleError::TransactionMalformed { reason } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
             "transaction_malformed",
-            "raw_tx_hex did not parse as a Zcash v5 transaction",
+            &format!("raw_tx_hex did not parse as a Zcash v5 transaction: {reason}"),
             false,
         ),
         SettleError::ExpiryHeightMismatch { .. } => problem_response(

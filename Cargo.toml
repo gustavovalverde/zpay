@@ -74,21 +74,14 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "34401c4d407412d7e45f90ec64a52fedc47ebcd9", features = ["zinder"] }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
 zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
 zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
-
-[patch.crates-io]
-# Zebra (transitively pulled through zinder-client and zally-chain) resolves
-# through equihash 0.2.2, whose core2 0.3.x dependency was yanked on crates.io.
-# Mirror the upstream pin to the last published source rev. Remove once
-# equihash or Zebra publishes a clean resolution path.
-core2 = { git = "https://github.com/bbqsrc/core2", rev = "7bf2611" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
