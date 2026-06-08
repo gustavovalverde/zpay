@@ -449,7 +449,7 @@ fn spawn_confirmation_oracle(
 ) -> Result<(), StartupError> {
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; confirmation oracle disabled until a chain plane is configured",
+            "ZPAY_CHAIN_SOURCE_URL unset; confirmation oracle disabled until a chain plane is configured",
         );
         return Ok(());
     };
@@ -605,7 +605,7 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, Start
     let zally_network = zally_network_from_config_str(&config.network)?;
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; /x402/v2/settle will return 502 until a chain plane is configured",
+            "ZPAY_CHAIN_SOURCE_URL unset; /x402/v2/settle will return 502 until a chain plane is configured",
         );
         return Ok(AnySubmitter::Rejecting(zally_network));
     };
@@ -636,7 +636,7 @@ fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupErro
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
             fallback_tip = config.static_tip_fallback,
-            "ZPAY_NODE__INDEXER_GRPC_ADDR unset; using static fallback tip for /prepare and /tip",
+            "ZPAY_CHAIN_SOURCE_URL unset; using static fallback tip for /prepare and /tip",
         );
         return Ok(AnyTipOracle::Static(StaticTipOracle::new(
             config.static_tip_fallback,
@@ -800,7 +800,7 @@ impl zally_chain::Submitter for AnySubmitter {
         match self {
             Self::Rejecting(_) => Err(zally_chain::SubmitterError::Unavailable {
                 reason:
-                    "submitter not configured; set ZPAY_NODE__INDEXER_GRPC_ADDR to enable settle"
+                    "submitter not configured; set ZPAY_CHAIN_SOURCE_URL to enable settle"
                         .to_owned(),
             }),
             Self::Zinder(submitter) => submitter.submit(raw_tx).await,
@@ -839,7 +839,7 @@ fn build_transaction_fetcher(
 ) -> Result<AnyTransactionFetcher, StartupError> {
     let Some(endpoint) = config.explorer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_NODE__EXPLORER_GRPC_ADDR unset; /x402/v2/verify reports chain_presence=oracle_unavailable until an explorer plane is configured",
+            "ZPAY_EXPLORER_URL unset; /x402/v2/verify reports chain_presence=oracle_unavailable until an explorer plane is configured",
         );
         return Ok(AnyTransactionFetcher::Rejecting(
             RejectingTransactionFetcher::new(),
@@ -924,10 +924,10 @@ impl ResolvedConfig {
         let ops_bind_raw =
             std::env::var("ZPAY_OPS__BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9295".to_string());
         let network = std::env::var("ZPAY_NETWORK").unwrap_or_else(|_| "regtest".to_string());
-        let indexer_grpc_addr = std::env::var("ZPAY_NODE__INDEXER_GRPC_ADDR")
+        let indexer_grpc_addr = std::env::var("ZPAY_CHAIN_SOURCE_URL")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
-        let explorer_grpc_addr = std::env::var("ZPAY_NODE__EXPLORER_GRPC_ADDR")
+        let explorer_grpc_addr = std::env::var("ZPAY_EXPLORER_URL")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
         let payees_config_path = std::env::var("ZPAY_PAYEES__CONFIG_PATH")

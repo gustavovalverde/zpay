@@ -34,8 +34,8 @@ invalid (fail-loud per ADR-0007).
 | `ZPAY_STORE__BACKEND` | yes | `libsql` | Only `libsql` and `memory` recognised. |
 | `ZPAY_STORE__URL` | yes | `file:/var/lib/zpay/zpay.libsql` | Use a `file:` URL for the mounted volume; `libsql://…` for Turso. |
 | `ZPAY_PAYEES__CONFIG_PATH` | yes | `/etc/zpay/payees.toml` | The image bakes a placeholder file here; production overrides via bind-mount or custom image. |
-| `ZPAY_NODE__INDEXER_GRPC_ADDR` | yes (settle) | `http://zinder.railway.internal:9067` | Internal DNS provided by Railway. Without it, `/settle` returns 502. |
-| `ZPAY_NODE__EXPLORER_GRPC_ADDR` | yes (verify) | `http://zinder.railway.internal:9067` | Same shape. Without it, `/verify` reports `chain_presence: oracle_unavailable`. |
+| `ZPAY_CHAIN_SOURCE_URL` | yes (settle) | `http://zinder.railway.internal:9067` | Internal DNS provided by Railway. Without it, `/settle` returns 502. |
+| `ZPAY_EXPLORER_URL` | yes (verify) | `http://zinder.railway.internal:9067` | Same shape. Without it, `/verify` reports `chain_presence: oracle_unavailable`. |
 | `ZPAY_FINALITY_DEPTH` | optional | `3` | Default 3; bump for mainnet. |
 | `ZPAY_STORE__AUTH_TOKEN` | optional | `<turso-token>` | Turso only. |
 | `ZPAY_STATIC_TIP_FALLBACK` | optional | `4000000` | Only meaningful without a tip oracle. |
@@ -63,8 +63,8 @@ Set both endpoints to the same gRPC port unless zinder exposes the
 explorer plane on a different port:
 
 ```
-ZPAY_NODE__INDEXER_GRPC_ADDR=http://zinder.railway.internal:9067
-ZPAY_NODE__EXPLORER_GRPC_ADDR=http://zinder.railway.internal:9067
+ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
+ZPAY_EXPLORER_URL=http://zinder.railway.internal:9067
 ```
 
 Private networking carries plaintext gRPC; there is no TLS termination

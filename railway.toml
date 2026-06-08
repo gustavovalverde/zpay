@@ -11,8 +11,8 @@
 #   ZPAY_EXPECTED_SCHEME=https
 #
 # ── Chain plane (zinder cross-service wiring) ────────────────────────────
-#   ZPAY_NODE__INDEXER_GRPC_ADDR=http://zinder.railway.internal:9067
-#   ZPAY_NODE__EXPLORER_GRPC_ADDR=http://zinder.railway.internal:9067
+#   ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
+#   ZPAY_EXPLORER_URL=http://zinder.railway.internal:9067
 #
 # ── Persistence (libSQL on a Railway volume) ─────────────────────────────
 #   ZPAY_STORE__BACKEND=libsql

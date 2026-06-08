@@ -39,16 +39,34 @@ services:
       # Railway and any other production deploy MUST NOT set this;
       # the runtime refuses to start otherwise (see ADR-0007 and
       # docs/runbooks/railway-deploy.md).
-      ZPAY_ALLOW_DEMO_PAYEE: ${ZPAY_ALLOW_DEMO_PAYEE:-1}
+      ZPAY_ALLOW_DEMO_PAYEE: "1"
+      # Testnet zinder/lightwalletd gRPC endpoint used by the broadcast
+      # plane, tip oracle, and confirmation oracle. The default points
+      # at the in-network `zinder-query` alias on the shared
+      # `z3-testnet` network; bring up the zinder-testnet stack first
+      # (`docker compose -f /path/to/zinder/compose.yml up -d`) or
+      # override with your own zinder/lightwalletd endpoint.
+      ZPAY_CHAIN_SOURCE_URL: ${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9101}
+      # Stable DPoP correlation seed so jti replay state and key
+      # thumbprints survive a container restart in the demo stack.
+      # Production deployments MUST override this with a per-instance
+      # high-entropy secret; the value below is intentionally
+      # well-known and not safe outside dev.
+      ZPAY_DPOP_KEY_SEED: ${ZPAY_DPOP_KEY_SEED:-dev-only-aether-bff-dpop-seed-do-not-use-in-prod-stable-48chars}
     volumes:
       - zpay-data:/var/lib/zpay
       # Override the baked-in payees.toml by bind-mounting a host file
       # here. The default file inside the image lists only `aether-demo`
-      # with a placeholder receiver.
-      # - ./etc/your-payees.toml:/etc/zpay/payees.toml:ro
+      # with a placeholder receiver. The local override below points
+      # `aether-demo` at a real parseable testnet unified address so
+      # the end-to-end probe walks past zspend's ZIP-321 parse.
+      - ./etc/aether-demo.local.toml:/etc/zpay/payees.toml:ro
     restart: unless-stopped
     networks:
       - zcash-x402-demo
+      # Joins the zinder-testnet stack's network so the in-network
+      # `zinder-query` alias resolves for ZPAY_CHAIN_SOURCE_URL.
+      - z3-testnet
 
   # Phase 4 wallet runtime. Signs Zcash transactions under a bounded
   # `payment_authorization` grant (Proposal-0003 D-1). Runs as its own
@@ -68,14 +86,47 @@ services:
       ZSPEND_NETWORK: ${ZSPEND_NETWORK:-testnet}
       ZSPEND_SEALED_SEED_PATH: /var/lib/zspend/wallet.age
       ZSPEND_STORAGE_PATH: /var/lib/zspend/wallet.db
+      # Point home_dir() at a writable path whose `.zcash-params`
+      # subdirectory is the host params bind-mount below. zcash_proofs
+      # locates sapling-spend.params and sapling-output.params via
+      # `home::home_dir().join(".zcash-params")` on Linux and does not
+      # honor an explicit env override.
+      HOME: /opt/zspend-home
+      # Required on first boot to materialise the wallet account row from the
+      # sealed seed. The bootstrap reads the chain tip from this endpoint when
+      # ZSPEND_BIRTHDAY_HEIGHT is unset, then writes a single account anchored
+      # at that height. Subsequent boots reuse the existing row and do not
+      # contact this endpoint. Defaults to the in-network `zinder-query` alias
+      # on the `z3-testnet` network shared with zpay.
+      ZSPEND_CHAIN_SOURCE_URL: ${ZSPEND_CHAIN_SOURCE_URL:-http://zinder-query:9101}
       # Optional overrides; see crates/zspend-runtime/src/main.rs.
       # ZSPEND_MAX_AMOUNT_ZAT: "100000000"
       # ZSPEND_AUDIENCE_THUMBPRINT: "phase4-stub-thumbprint"
+      # Pinned to a height well below zinder's safe_tip so the
+      # first-boot tree_state_at(birthday - 1) lookup hits an
+      # already-indexed checkpoint. zinder's safe_tip lags the actual
+      # tip by ~100 blocks; chain_tip() returns the actual tip, so
+      # without this override the bootstrap queries tree state past
+      # safe_tip and zinder returns ServiceUnavailable.
+      ZSPEND_BIRTHDAY_HEIGHT: ${ZSPEND_BIRTHDAY_HEIGHT:-4050200}
     volumes:
       - zspend-data:/var/lib/zspend
+      # Sapling trusted-setup parameters needed by the Local prover.
+      # Defaults to the host's macOS XDG location; override with
+      # ZCASH_PARAMS_HOST_DIR to point at a custom location. Read-only
+      # so the container cannot mutate the trusted-setup blobs. Mounted
+      # at both candidate locations so the binary resolves them whether
+      # `home::home_dir()` returns the `HOME` env value or the
+      # `/etc/passwd` pwent for uid 10001.
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/opt/zspend-home/.zcash-params:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/home/zspend/.zcash-params:ro
     restart: unless-stopped
     networks:
       - zcash-x402-demo
+      # Joins the zinder-testnet stack's network so the in-network
+      # `zinder-query` alias resolves for ZSPEND_CHAIN_SOURCE_URL
+      # during the first-boot account bootstrap.
+      - z3-testnet
 
 volumes:
   zpay-data:
@@ -85,4 +136,9 @@ networks:
   # External: created by whichever compose stack runs first.
   # `docker network create zcash-x402-demo` ahead of time also works.
   zcash-x402-demo:
+    external: true
+  # External: owned by the zinder-testnet stack. zpay joins it so the
+  # in-network `zinder-query` alias resolves for the indexer gRPC
+  # endpoint.
+  z3-testnet:
     external: true

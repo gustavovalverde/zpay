@@ -203,7 +203,7 @@ At wire boundaries, typed errors map to HTTP status codes via a single
 ## Config and env var conventions
 
 - Env var prefix: `ZPAY_*`. Nested fields use `__` separator.
-  Example: `ZPAY_NODE__INDEXER_GRPC_ADDR`.
+  Example: `ZPAY_CHAIN_SOURCE_URL`.
 - Test-only env vars: `ZPAY_TEST_*`. Production binaries strip them.
 - Live-node gate: `ZPAY_TEST_LIVE=1`. Mainnet allowance: `ZPAY_TEST_ALLOW_MAINNET=1`.
 - Sensitive leaves never set via env var alone; they come from a secret

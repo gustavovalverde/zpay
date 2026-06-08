@@ -9,6 +9,11 @@
 # real testnet/mainnet unified address here or set the payee receiver
 # in their override file. The bridge-mount demo does not settle, so
 # the placeholder is non-load-bearing for the headphones scenario.
+#
+# Because this `pay_to` is still the baked-in placeholder, the runtime
+# refuses to start unless ZPAY_ALLOW_DEMO_PAYEE=1 is set. The compose
+# stack sets that flag for the demo; production deploys must replace
+# the address below and leave ZPAY_ALLOW_DEMO_PAYEE unset.
 
 [payees."aether-demo"]
 accepts = [

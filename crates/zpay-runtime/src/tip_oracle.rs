@@ -89,7 +89,7 @@ impl ChainTipOracle for StaticTipOracle {
         tracing::warn!(
             network = ?network,
             fallback_tip = self.fallback_tip,
-            "chain tip oracle is static fallback; configure ZPAY_NODE__INDEXER_GRPC_ADDR to track real chain state",
+            "chain tip oracle is static fallback; configure ZPAY_CHAIN_SOURCE_URL to track real chain state",
         );
         Ok(self.fallback_tip)
     }

@@ -3100,6 +3100,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "549e471b99ccaf2f89101bec68f4d244457d5a95a9c3d0672e9564124397741d"
 
 [[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5419,9 +5428,11 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "rustls-native-certs 0.8.3",
  "socket2 0.6.3",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-stream",
  "tower 0.5.3",
  "tower-layer",
@@ -5652,6 +5663,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
+ "nu-ansi-term",
  "once_cell",
  "regex-automata",
  "serde",
@@ -6453,7 +6465,7 @@ dependencies = [
 [[package]]
 name = "zally-chain"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6471,7 +6483,7 @@ dependencies = [
 [[package]]
 name = "zally-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "hex",
  "serde_json",
@@ -6484,7 +6496,7 @@ dependencies = [
 [[package]]
 name = "zally-keys"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "age",
  "async-trait",
@@ -6501,7 +6513,7 @@ dependencies = [
 [[package]]
 name = "zally-pczt"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "orchard 0.14.0",
  "pczt",
@@ -6519,7 +6531,7 @@ dependencies = [
 [[package]]
 name = "zally-storage"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "async-trait",
  "orchard 0.14.0",
@@ -6546,9 +6558,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "zally-testkit"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing-subscriber",
+ "zally-chain",
+ "zally-core",
+ "zally-keys",
+ "zcash_client_backend",
+]
+
+[[package]]
 name = "zally-wallet"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=8f2c997822fadc1d2951043ebf935453520ef578#8f2c997822fadc1d2951043ebf935453520ef578"
+source = "git+https://github.com/gustavovalverde/zally?rev=34401c4d407412d7e45f90ec64a52fedc47ebcd9#34401c4d407412d7e45f90ec64a52fedc47ebcd9"
 dependencies = [
  "futures-util",
  "hex",
@@ -7151,7 +7182,7 @@ dependencies = [
 [[package]]
 name = "zinder-client"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7172,7 +7203,7 @@ dependencies = [
 [[package]]
 name = "zinder-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "hex",
  "sha2 0.10.9",
@@ -7184,7 +7215,7 @@ dependencies = [
 [[package]]
 name = "zinder-derive"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "prost 0.14.3",
  "rust-rocksdb",
@@ -7197,7 +7228,7 @@ dependencies = [
 [[package]]
 name = "zinder-proto"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "prost 0.14.3",
  "prost-build",
@@ -7210,7 +7241,7 @@ dependencies = [
 [[package]]
 name = "zinder-source"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7240,7 +7271,7 @@ dependencies = [
 [[package]]
 name = "zinder-store"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=ca7fde9f0b28cf12cdcd2248a1b7759656357bbf#ca7fde9f0b28cf12cdcd2248a1b7759656357bbf"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7255,6 +7286,7 @@ dependencies = [
  "tokio",
  "tonic 0.14.6",
  "tonic-types",
+ "tracing",
  "zinder-core",
  "zinder-proto",
 ]
@@ -7417,11 +7449,13 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
+ "clap",
  "hex",
  "parking_lot",
  "serde",
  "serde_json",
  "sha2 0.11.0-pre.4",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7431,6 +7465,7 @@ dependencies = [
  "zally-core",
  "zally-keys",
  "zally-storage",
+ "zally-testkit",
  "zally-wallet",
  "zinder-client",
  "zinder-proto",

@@ -10,7 +10,9 @@
 //! the [`ProblemKind::NotReady`] response so the operational shape is
 //! visible end-to-end while the auth wiring lands incrementally.
 
+mod bootstrap;
 mod capture_submitter;
+mod init;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -24,12 +26,12 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use bootstrap::{BootstrapError, BootstrapInputs, ChainSourceFactory};
 use capture_submitter::CaptureSubmitter;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use zally_core::{AccountId, IdempotencyKey, Network, PaymentRecipient};
-use zally_keys::{AgeFileSealing, AgeFileSealingOptions};
-use zally_storage::{Sqlite, SqliteOptions};
-use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet};
+use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet, WalletError};
 use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy, SigningPolicyError};
 
 /// Wire format identifier returned on `/v1/payments/sign`.
@@ -47,6 +49,35 @@ const SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL: &str = "raw-zcash-v5";
 /// Liveness/readiness/probe contracts the runtime emits, kept here so the
 /// strings can be compared in tests without re-allocating.
 const READYZ_BODY: &str = r#"{"sealed_seed":"available","posture":"dev","jwks_cache":"unused","revocation_cache":"unused"}"#;
+
+/// `zspend-runtime` command-line entry point.
+///
+/// `serve` (the default when no subcommand is given) preserves the Phase 4
+/// axum behavior: open the wallet against the configured sealed seed and
+/// expose `/v1/payments/sign` plus the probes. `init` provisions a fresh
+/// sealed seed at `$ZSPEND_SEALED_SEED_PATH` so a freshly mounted volume
+/// can boot the runtime without an operator stepping in.
+#[derive(Debug, Parser)]
+#[command(name = "zspend-runtime", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Start the wallet runtime HTTP listener (default).
+    Serve,
+    /// Generate a fresh wallet seed and seal it at `$ZSPEND_SEALED_SEED_PATH`.
+    Init {
+        /// Overwrite an existing sealed seed instead of refusing.
+        #[arg(long)]
+        force: bool,
+        /// Override `$ZSPEND_SEALED_SEED_PATH` for this invocation.
+        #[arg(long, env = "ZSPEND_SEALED_SEED_PATH")]
+        sealed_seed_path: PathBuf,
+    },
+}
 
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
@@ -76,15 +107,20 @@ enum StartupError {
     NetworkInvalid { provided: String },
     #[error("required env var {name} is missing")]
     EnvMissing { name: &'static str },
-    #[error("wallet open failed: {source}")]
-    WalletOpen {
+    #[error("wallet bootstrap failed: {source}")]
+    Bootstrap {
         #[source]
-        source: zally_wallet::WalletError,
+        source: BootstrapError,
     },
     #[error("signing policy build failed: {source}")]
     SigningPolicy {
         #[source]
         source: SigningPolicyError,
+    },
+    #[error("init subcommand failed: {source}")]
+    Init {
+        #[source]
+        source: init::InitError,
     },
 }
 
@@ -95,20 +131,57 @@ struct AppState {
     policy: Arc<SigningPolicy>,
 }
 
+impl AppState {
+    /// Returns the canonical Unified Address an operator can fund.
+    ///
+    /// Idempotent: surfaces the first previously-exposed UA when one is on
+    /// record, otherwise derives a fresh UA with a transparent receiver so a
+    /// vanilla testnet wallet can credit it. The result is encoded against the
+    /// policy network so the wire string carries the `utest1…` (or
+    /// `u1…`/`uregtest1…`) prefix consumers grep for.
+    pub(crate) async fn current_unified_address(&self) -> Result<String, WalletError> {
+        let network = self.policy.network();
+        let params = network.to_parameters();
+        let exposed = self.wallet.list_exposed_addresses(self.account_id).await?;
+        if let Some(row) = exposed.into_iter().next() {
+            return Ok(row.unified_address.encode(&params));
+        }
+        let ua = self
+            .wallet
+            .derive_next_address_with_transparent(self.account_id)
+            .await?;
+        Ok(ua.encode(&params))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
     install_tracing()?;
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve().await,
+        Command::Init {
+            force,
+            sealed_seed_path,
+        } => init::run(sealed_seed_path, force)
+            .await
+            .map_err(|source| StartupError::Init { source }),
+    }
+}
+
+async fn serve() -> Result<(), StartupError> {
     let config = ResolvedConfig::from_env()?;
 
-    let sealing = AgeFileSealing::new(AgeFileSealingOptions::at_path(config.sealed_seed_path));
-    let storage = Sqlite::new(SqliteOptions::for_network(
-        config.network,
-        config.storage_path,
-    ));
-    let (wallet, account_id) = Wallet::builder(config.network, sealing, storage)
-        .open()
-        .await
-        .map_err(|source| StartupError::WalletOpen { source })?;
+    let (wallet, account_id) = bootstrap::bootstrap(BootstrapInputs {
+        network: config.network,
+        sealed_seed_path: config.sealed_seed_path,
+        storage_path: config.storage_path,
+        indexer_grpc_addr: config.indexer_grpc_addr,
+        birthday_override: config.birthday_override,
+        chain_source_factory: ChainSourceFactory::Live,
+    })
+    .await
+    .map_err(|source| StartupError::Bootstrap { source })?;
 
     let policy = SigningPolicy::builder()
         .network(config.network)
@@ -132,6 +205,7 @@ async fn main() -> Result<(), StartupError> {
             get(get_wallet_configuration),
         )
         .route("/v1/payments/sign", post(sign_payment))
+        .route("/v1/wallet/address", get(get_wallet_address))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
@@ -217,6 +291,26 @@ async fn get_capabilities() -> impl IntoResponse {
     Json(serde_json::json!({ "capabilities": [] }))
 }
 
+/// Returns the funded Unified Address for the bootstrapped account.
+///
+/// Lets an operator credit the wallet from any local testnet wallet without
+/// inspecting the storage backend. Idempotent across calls: the first call may
+/// derive a fresh UA, subsequent calls surface the same address.
+async fn get_wallet_address(
+    State(state): State<AppState>,
+) -> Result<Json<WalletAddressResponse>, ProblemResponse> {
+    let ua = state.current_unified_address().await.map_err(|err| {
+        tracing::warn!(error = %err, "wallet address lookup failed");
+        ProblemResponse::server_error(ProblemDetail::not_retryable(
+            ProblemKind::NotReady,
+            "wallet not ready",
+            err.to_string(),
+        ))
+    })?;
+    let network = WireNetworkOut::from(WireNetwork::from_zally(state.policy.network()));
+    Ok(Json(WalletAddressResponse { ua, network }))
+}
+
 /// `.well-known` discovery per Proposal-0003 D-12.
 async fn get_wallet_configuration(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
@@ -261,6 +355,38 @@ impl WireNetwork {
             Self::Regtest => Network::regtest(),
         }
     }
+
+    fn from_zally(network: Network) -> Self {
+        match network {
+            Network::Mainnet => Self::Mainnet,
+            Network::Regtest(_) => Self::Regtest,
+            Network::Testnet | _ => Self::Testnet,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum WireNetworkOut {
+    Mainnet,
+    Testnet,
+    Regtest,
+}
+
+impl From<WireNetwork> for WireNetworkOut {
+    fn from(net: WireNetwork) -> Self {
+        match net {
+            WireNetwork::Mainnet => Self::Mainnet,
+            WireNetwork::Testnet => Self::Testnet,
+            WireNetwork::Regtest => Self::Regtest,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct WalletAddressResponse {
+    ua: String,
+    network: WireNetworkOut,
 }
 
 /// `signed_payload` envelope returned by `/v1/payments/sign`.
@@ -488,6 +614,8 @@ struct ResolvedConfig {
     storage_path: PathBuf,
     max_amount_zat: u64,
     audience_thumbprint: String,
+    indexer_grpc_addr: Option<String>,
+    birthday_override: Option<u32>,
 }
 
 impl ResolvedConfig {
@@ -529,6 +657,14 @@ impl ResolvedConfig {
         let audience_thumbprint = std::env::var("ZSPEND_AUDIENCE_THUMBPRINT")
             .unwrap_or_else(|_| "phase4-stub-thumbprint".to_owned());
 
+        let indexer_grpc_addr = std::env::var("ZSPEND_CHAIN_SOURCE_URL")
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty());
+        let birthday_override = std::env::var("ZSPEND_BIRTHDAY_HEIGHT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok());
+
         Ok(Self {
             bind_addr,
             network,
@@ -536,6 +672,8 @@ impl ResolvedConfig {
             storage_path,
             max_amount_zat,
             audience_thumbprint,
+            indexer_grpc_addr,
+            birthday_override,
         })
     }
 }
@@ -562,13 +700,19 @@ fn parse_network(raw: &str) -> Result<Network, StartupError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AmountWire, ExpiresAtWire, ProblemResponse, READYZ_BODY,
-        SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL, SignPaymentResponse, SignedPayloadWire, parse_network,
+        AmountWire, AppState, ExpiresAtWire, ProblemResponse, READYZ_BODY,
+        SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL, SignPaymentResponse, SignedPayloadWire, WireNetwork,
+        WireNetworkOut, parse_network,
     };
+    use crate::bootstrap::{BootstrapInputs, ChainSourceFactory, bootstrap};
+    use crate::init;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use tempfile::tempdir;
     use zally_core::Network;
-    use zspend_core::{ProblemDetail, ProblemKind};
+    use zally_testkit::MockChainSource;
+    use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy};
 
     #[test]
     fn parse_network_accepts_documented_vocabulary() -> Result<(), super::StartupError> {
@@ -641,5 +785,96 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
         assert_eq!(ct, "application/problem+json");
+    }
+
+    #[test]
+    fn wire_network_round_trips_through_zally_network() {
+        for net in [Network::Mainnet, Network::Testnet, Network::regtest()] {
+            let wire = WireNetwork::from_zally(net);
+            let back = wire.to_zally();
+            assert_eq!(
+                std::mem::discriminant(&net),
+                std::mem::discriminant(&back),
+                "round-trip must preserve the network variant"
+            );
+        }
+    }
+
+    async fn build_state_for_network(
+        network: Network,
+        birthday: u32,
+    ) -> Result<AppState, Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let sealed_seed = dir.path().join("wallet.age");
+        let storage = dir.path().join("wallet.db");
+        init::run(sealed_seed.clone(), false).await?;
+
+        let mock = Arc::new(MockChainSource::new(network));
+        let (wallet, account_id) = bootstrap(BootstrapInputs {
+            network,
+            sealed_seed_path: sealed_seed,
+            storage_path: storage,
+            indexer_grpc_addr: None,
+            birthday_override: Some(birthday),
+            chain_source_factory: ChainSourceFactory::Custom(mock),
+        })
+        .await?;
+
+        let policy = SigningPolicy::builder()
+            .network(network)
+            .max_amount_zat(1_000_000_000)
+            .audience_thumbprint("test-thumbprint")
+            .build()?;
+
+        // Hold `dir` for the wallet's lifetime by leaking it: the temp dir
+        // lives as long as the test process so the sqlite handle stays valid.
+        std::mem::forget(dir);
+
+        Ok(AppState {
+            wallet,
+            account_id,
+            policy: Arc::new(policy),
+        })
+    }
+
+    #[tokio::test]
+    async fn current_unified_address_returns_testnet_ua()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
+
+        let ua = state.current_unified_address().await?;
+
+        assert!(
+            ua.starts_with("utest1"),
+            "testnet UA must carry the utest1 HRP; got {ua}"
+        );
+        assert!(
+            (80..=256).contains(&ua.len()),
+            "UA length should fall in the expected range; got {} ({ua})",
+            ua.len(),
+        );
+
+        let again = state.current_unified_address().await?;
+        assert_eq!(
+            ua, again,
+            "second call must surface the same address (idempotent allocator)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wallet_address_response_serialises_with_network_label()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
+        let body = super::WalletAddressResponse {
+            ua: state.current_unified_address().await?,
+            network: WireNetworkOut::from(WireNetwork::from_zally(state.policy.network())),
+        };
+
+        let wire = serde_json::to_value(&body)?;
+        assert_eq!(wire["network"].as_str(), Some("testnet"));
+        let ua_field = wire["ua"].as_str().unwrap_or_default();
+        assert!(ua_field.starts_with("utest1"), "ua must be a utest1 UA");
+        Ok(())
     }
 }

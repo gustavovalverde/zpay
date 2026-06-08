@@ -57,7 +57,7 @@ directly reachable.**
 - For the per-txid confirmation lifecycle on a polling agent, the oracle
   reads from zpay's settlement ledger (updated by the subscription) and
   returns the typed `ConfirmationStatus`.
-- Fallback: when `ZPAY_NODE__INDEXER_GRPC_ADDR` is unset or unreachable,
+- Fallback: when `ZPAY_CHAIN_SOURCE_URL` is unset or unreachable,
   the oracle calls zexplorer's `POST /api/v1/{network}/transactions/{txid}/watch`
   (delivered to zpay's own `/x402/v2/internal/watch-callback` endpoint).
 - ZIP-311 disclosure verification calls zinder's

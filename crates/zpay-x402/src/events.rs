@@ -286,8 +286,9 @@ where
             return problem_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Invalid Argument",
-                422,
+                "payment_id_invalid",
                 &reason.to_string(),
+                false,
             );
         }
     };
@@ -309,8 +310,9 @@ where
         return problem_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            503,
+            "status_store_unavailable",
             "payment status store is currently unavailable",
+            true,
         );
     };
 
@@ -318,8 +320,9 @@ where
         return problem_response(
             StatusCode::NOT_FOUND,
             "Not Found",
-            404,
+            "payment_id_unknown",
             "payment_id is not registered with this deployment",
+            false,
         );
     }
 
@@ -342,8 +345,9 @@ where
         return problem_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            503,
+            "status_store_unavailable",
             "payment status store is currently unavailable",
+            true,
         );
     };
 

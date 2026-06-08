@@ -330,8 +330,9 @@ where
             return problem_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Invalid Argument",
-                422,
+                "payment_id_invalid",
                 &reason.to_string(),
+                false,
             );
         }
     };
@@ -347,8 +348,9 @@ where
             problem_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service Unavailable",
-                503,
+                "status_store_unavailable",
                 "payment status store is currently unavailable",
+                true,
             )
         },
         |snapshot| json_ok(&snapshot),
@@ -371,8 +373,9 @@ where
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "payee_id_required",
             "payee_id query parameter is required",
+            false,
         );
     };
     state.payees.find(&PayeeId(payee_id.clone())).map_or_else(
@@ -380,8 +383,9 @@ where
             problem_response(
                 StatusCode::NOT_FOUND,
                 "Not Found",
-                404,
+                "payee_unknown",
                 &format!("payee_id {payee_id:?} is not registered with this deployment"),
+                false,
             )
         },
         |entries| json_ok(&entries.to_vec()),
@@ -404,8 +408,9 @@ where
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "network_required",
             "network query parameter is required",
+            false,
         );
     };
     let network = match parse_network(&network_raw) {
@@ -414,8 +419,9 @@ where
             return problem_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Invalid Argument",
-                422,
+                "network_invalid",
                 &reason,
+                false,
             );
         }
     };
@@ -472,8 +478,9 @@ fn verify_error_response(err: &VerifyError) -> Response {
         VerifyError::PayloadInvalid { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "disclosure_payload_invalid",
             "disclosure_payload_hex must be valid hex",
+            false,
         ),
         // VerifyError is #[non_exhaustive]; today PayloadInvalid is
         // the only variant. Any future transport-class error gets a
@@ -481,8 +488,9 @@ fn verify_error_response(err: &VerifyError) -> Response {
         _ => problem_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal",
-            500,
+            "verify_internal",
             "verify returned an unrecognised error variant",
+            false,
         ),
     }
 }
@@ -493,8 +501,9 @@ fn json_ok<T: Serialize>(body: &T) -> Response {
             problem_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal",
-                500,
+                "serialization_failed",
                 "response serialization failed",
+                false,
             )
         },
         |serialized| {
@@ -513,32 +522,37 @@ fn prepare_error_response(err: &PrepareError) -> Response {
         PrepareError::PayeeUnknown { .. } => problem_response(
             StatusCode::NOT_FOUND,
             "Not Found",
-            404,
+            "payee_unknown",
             "payee_id is not registered with this deployment",
+            false,
         ),
         PrepareError::SchemeNetworkUnsupported { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "scheme_network_unsupported",
             "registered payee does not advertise the requested scheme on the requested network",
+            false,
         ),
         PrepareError::ExpiryHeightInvalid => problem_response(
             StatusCode::BAD_GATEWAY,
             "Bad Gateway",
-            502,
+            "tip_oracle_zero_tip",
             "chain tip oracle returned a zero tip; the operator must point the runtime at a healthy chain plane",
+            true,
         ),
         PrepareError::TipOracle(_) => problem_response(
             StatusCode::BAD_GATEWAY,
             "Bad Gateway",
-            502,
+            "tip_oracle_unavailable",
             "chain tip oracle is currently unavailable",
+            true,
         ),
         PrepareError::Storage(_) => problem_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            503,
+            "prepared_store_unavailable",
             "prepared-tx store is currently unavailable",
+            true,
         ),
         #[allow(
             clippy::wildcard_enum_match_arm,
@@ -547,8 +561,9 @@ fn prepare_error_response(err: &PrepareError) -> Response {
         _ => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "prepare_invalid",
             "prepare rejected the request for a reason this build does not recognise",
+            false,
         ),
     }
 }
@@ -558,14 +573,16 @@ fn tip_error_response(err: &TipError) -> Response {
         TipError::Unavailable { .. } => problem_response(
             StatusCode::BAD_GATEWAY,
             "Bad Gateway",
-            502,
+            "tip_oracle_unavailable",
             "chain tip oracle is currently unavailable",
+            true,
         ),
         TipError::NetworkUnsupported { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "network_unsupported",
             "chain tip oracle does not serve the requested network",
+            false,
         ),
         #[allow(
             clippy::wildcard_enum_match_arm,
@@ -574,8 +591,9 @@ fn tip_error_response(err: &TipError) -> Response {
         _ => problem_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal",
-            500,
+            "tip_internal",
             "tip oracle returned an unrecognised error variant",
+            false,
         ),
     }
 }
@@ -585,51 +603,58 @@ fn settle_error_response(err: &SettleError) -> Response {
         SettleError::PreparationNotFound { .. } => problem_response(
             StatusCode::NOT_FOUND,
             "Not Found",
-            404,
+            "preparation_not_found",
             "preparation not found or already settled",
+            false,
         ),
         SettleError::RawTxHexInvalid => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "raw_tx_hex_invalid",
             "raw_tx_hex must be non-empty and contain only hex characters",
+            false,
         ),
         SettleError::ChainUnavailable { .. } => problem_response(
             StatusCode::BAD_GATEWAY,
             "Bad Gateway",
-            502,
+            "chain_unavailable",
             "chain plane is currently unavailable",
+            true,
         ),
         SettleError::TransactionMalformed { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "transaction_malformed",
             "raw_tx_hex did not parse as a Zcash v5 transaction",
+            false,
         ),
         SettleError::ExpiryHeightMismatch { .. } => problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid Argument",
-            422,
+            "expiry_height_mismatch",
             "expiry_height in the signed transaction does not match the prepared row",
+            false,
         ),
         SettleError::ObsoleteMemoVersion { .. } => problem_response(
             StatusCode::CONFLICT,
             "Obsolete Memo Version",
-            409,
+            "obsolete_memo_version",
             "cached preparation carries an obsolete protocol memo version; re-prepare against this runtime",
+            false,
         ),
-        SettleError::DpopMismatch => problem_response_with_code(
+        SettleError::DpopMismatch => problem_response(
             StatusCode::FORBIDDEN,
             "Forbidden",
-            403,
-            "settle was signed with a different DPoP key than prepare",
             "dpop_mismatch",
+            "settle was signed with a different DPoP key than prepare",
+            false,
         ),
         SettleError::Storage(_) => problem_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            503,
+            "settle_store_unavailable",
             "settle store is currently unavailable",
+            true,
         ),
         #[allow(
             clippy::wildcard_enum_match_arm,
@@ -638,8 +663,9 @@ fn settle_error_response(err: &SettleError) -> Response {
         _ => problem_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal",
-            500,
+            "settle_internal",
             "settle returned an unrecognised error variant",
+            false,
         ),
     }
 }
@@ -685,70 +711,49 @@ async fn verify_request_dpop(
 
 fn dpop_error_response(err: &dpop::DpopError) -> Response {
     match err {
-        dpop::DpopError::Missing => problem_response_with_code(
+        dpop::DpopError::Missing => problem_response(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",
-            401,
-            "DPoP proof header is required for this endpoint",
             "dpop_missing",
+            "DPoP proof header is required for this endpoint",
+            false,
         ),
-        dpop::DpopError::InvalidProof { reason } => problem_response_with_code(
+        dpop::DpopError::InvalidProof { reason } => problem_response(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",
-            401,
-            &format!("DPoP proof invalid: {reason}"),
             "dpop_invalid_proof",
+            &format!("DPoP proof invalid: {reason}"),
+            false,
         ),
-        dpop::DpopError::ClockSkew { drift_seconds } => problem_response_with_code(
+        dpop::DpopError::ClockSkew { drift_seconds } => problem_response(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",
-            401,
-            &format!("DPoP proof clock drift {drift_seconds}s exceeds tolerance"),
             "dpop_clock_skew",
+            &format!("DPoP proof clock drift {drift_seconds}s exceeds tolerance"),
+            true,
         ),
-        dpop::DpopError::Replay => problem_response_with_code(
+        dpop::DpopError::Replay => problem_response(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",
-            401,
-            "DPoP proof has already been used",
             "dpop_replay",
+            "DPoP proof has already been used",
+            false,
         ),
     }
-}
-
-fn problem_response_with_code(
-    status: StatusCode,
-    title: &str,
-    status_code: u16,
-    detail: &str,
-    code: &str,
-) -> Response {
-    let body = serde_json::json!({
-        "type": "about:blank",
-        "title": title,
-        "status": status_code,
-        "detail": detail,
-        "code": code,
-    });
-    (
-        status,
-        [("content-type", "application/problem+json")],
-        body.to_string(),
-    )
-        .into_response()
 }
 
 pub(crate) fn problem_response(
     status: StatusCode,
     title: &str,
-    status_code: u16,
+    kind: &str,
     detail: &str,
+    retryable: bool,
 ) -> Response {
     let body = serde_json::json!({
-        "type": "about:blank",
         "title": title,
-        "status": status_code,
+        "kind": kind,
         "detail": detail,
+        "retryable": retryable,
     });
     (
         status,

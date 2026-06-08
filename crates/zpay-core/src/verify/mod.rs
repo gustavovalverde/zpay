@@ -141,7 +141,7 @@ pub enum ChainPresence {
     /// Chain plane has no record of the disclosed transaction.
     NotFound,
     /// Chain plane could not be reached. Operator should investigate
-    /// the configured `ZPAY_NODE__EXPLORER_GRPC_ADDR`.
+    /// the configured `ZPAY_EXPLORER_URL`.
     OracleUnavailable,
 }
 
