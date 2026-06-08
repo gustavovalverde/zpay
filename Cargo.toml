@@ -74,12 +74,12 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "9b2694e6192e148906d164f6ba3b59a64d1e67ed", features = ["zinder"] }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "d4c13b754a824ecc3cf3378d7e736e858d90d73e", features = ["zinder"] }
 zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
 zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
 

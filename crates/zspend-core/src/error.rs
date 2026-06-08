@@ -48,16 +48,6 @@ pub enum ProblemKind {
     DpopProofInvalid,
     /// The access token failed JWKS or claim verification.
     AccessTokenInvalid,
-    /// The caller-supplied `target_expiry_height` is at or below the wallet's
-    /// observed chain tip. The caller must pick a fresher height (typically
-    /// from a re-issued `/prepare`) and retry. Not retryable with identical
-    /// inputs; surfaced with HTTP 409.
-    TargetExpiryStale,
-    /// The signed transaction's `expiry_height` did not match the
-    /// caller-supplied `target_expiry_height`. Indicates a bug in the
-    /// wallet's PCZT Updater path; not actionable by the caller. Surfaced
-    /// with HTTP 500.
-    TargetExpiryMismatchInternal,
 }
 
 /// Operator-facing remediation hint attached to a [`ProblemDetail`].
