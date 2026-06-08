@@ -6359,7 +6359,7 @@ dependencies = [
 [[package]]
 name = "zally-chain"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6377,7 +6377,7 @@ dependencies = [
 [[package]]
 name = "zally-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "hex",
  "serde_json",
@@ -6390,7 +6390,7 @@ dependencies = [
 [[package]]
 name = "zally-keys"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "age",
  "async-trait",
@@ -6407,12 +6407,14 @@ dependencies = [
 [[package]]
 name = "zally-pczt"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "orchard",
  "pczt",
+ "postcard",
  "sapling-crypto",
  "secp256k1",
+ "serde",
  "thiserror 2.0.18",
  "zally-core",
  "zally-keys",
@@ -6425,7 +6427,7 @@ dependencies = [
 [[package]]
 name = "zally-storage"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "async-trait",
  "orchard",
@@ -6454,7 +6456,7 @@ dependencies = [
 [[package]]
 name = "zally-testkit"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6473,7 +6475,7 @@ dependencies = [
 [[package]]
 name = "zally-wallet"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=d4c13b754a824ecc3cf3378d7e736e858d90d73e#d4c13b754a824ecc3cf3378d7e736e858d90d73e"
+source = "git+https://github.com/gustavovalverde/zally?rev=9b2694e6192e148906d164f6ba3b59a64d1e67ed#9b2694e6192e148906d164f6ba3b59a64d1e67ed"
 dependencies = [
  "futures-util",
  "hex",

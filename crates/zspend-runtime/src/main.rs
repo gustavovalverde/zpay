@@ -30,7 +30,7 @@ use bootstrap::{BootstrapError, BootstrapInputs, ChainSourceFactory};
 use capture_submitter::CaptureSubmitter;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use zally_core::{AccountId, IdempotencyKey, Network, PaymentRecipient};
+use zally_core::{AccountId, BlockHeight, IdempotencyKey, Network, PaymentRecipient};
 use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet, WalletError};
 use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy, SigningPolicyError};
 
@@ -322,13 +322,17 @@ async fn get_wallet_configuration(State(state): State<AppState>) -> impl IntoRes
 }
 
 /// Inputs to `POST /v1/payments/sign`.
+///
+/// `target_expiry_height` is required (not a hint): the caller passes the
+/// height it committed to at `/prepare` time so the wallet signs bytes whose
+/// expiry matches the RAR. The wallet rejects values at or below its observed
+/// tip with `target_expiry_stale`.
 #[derive(Debug, Deserialize)]
 struct SignPaymentRequest {
     payment_request: WirePaymentRequest,
     network: WireNetwork,
     payment_id: String,
-    #[serde(default)]
-    expiry_height_hint: Option<u32>,
+    target_expiry_height: u32,
 }
 
 /// Scheme-tagged payment request body per D-11.
@@ -510,13 +514,15 @@ async fn sign_payment(
     })?;
 
     let capture = CaptureSubmitter::new(requested_network);
+    let target_expiry_height = BlockHeight::from(body.target_expiry_height);
     let plan = SendPaymentPlan::conventional(
         state.account_id,
         idempotency,
         recipient_for_plan,
         amount_for_plan,
         &capture,
-    );
+    )
+    .with_target_expiry_height(target_expiry_height);
 
     let send_outcome = state
         .wallet
@@ -532,9 +538,7 @@ async fn sign_payment(
         ))
     })?;
 
-    let expiry_value = body
-        .expiry_height_hint
-        .unwrap_or_else(|| send_outcome.signed.tx_expiry_height.as_u32());
+    let expiry_value = send_outcome.signed.tx_expiry_height.as_u32();
 
     let response = SignPaymentResponse {
         signed_payload: SignedPayloadWire {
@@ -558,17 +562,50 @@ fn clone_recipient(recipient: &PaymentRecipient) -> PaymentRecipient {
 }
 
 fn map_wallet_err(err: &zally_wallet::WalletError) -> ProblemResponse {
-    let detail = err.to_string();
-    let kind = if detail.contains("insufficient") {
-        ProblemKind::InsufficientFunds
-    } else {
-        ProblemKind::NotReady
-    };
-    ProblemResponse::server_error(ProblemDetail::not_retryable(
-        kind,
-        "wallet send_payment failed",
-        detail,
-    ))
+    match err {
+        zally_wallet::WalletError::TargetExpiryStale { target, chain_tip } => ProblemResponse {
+            status: StatusCode::CONFLICT,
+            body: ProblemDetail::not_retryable(
+                ProblemKind::TargetExpiryStale,
+                "target_expiry_height is past the chain tip",
+                format!(
+                    "caller-supplied target_expiry_height={} is at or below the wallet's \
+                     observed tip={}; request a fresh /prepare and retry",
+                    u32::from(*target),
+                    u32::from(*chain_tip),
+                ),
+            ),
+        },
+        zally_wallet::WalletError::TargetExpiryMismatch { target, signed } => {
+            ProblemResponse::server_error(ProblemDetail::not_retryable(
+                ProblemKind::TargetExpiryMismatchInternal,
+                "signed expiry_height did not match target_expiry_height",
+                format!(
+                    "wallet signed bytes with expiry_height={} but caller asked to commit to {}; \
+                     this indicates a bug in the PCZT Updater path",
+                    u32::from(*signed),
+                    u32::from(*target),
+                ),
+            ))
+        }
+        zally_wallet::WalletError::InsufficientBalance {
+            requested_zat,
+            spendable_zat,
+        } => ProblemResponse::server_error(ProblemDetail::not_retryable(
+            ProblemKind::InsufficientFunds,
+            "insufficient spendable balance",
+            format!(
+                "requested {} zat, spendable {} zat",
+                requested_zat.as_u64(),
+                spendable_zat.as_u64(),
+            ),
+        )),
+        other => ProblemResponse::server_error(ProblemDetail::not_retryable(
+            ProblemKind::NotReady,
+            "wallet send_payment failed",
+            other.to_string(),
+        )),
+    }
 }
 
 /// PRC-7807 problem-detail response wrapper.
