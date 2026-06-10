@@ -455,3 +455,33 @@ Phases reference decisions by D-N.
 8. **`age` seed format for dev.** Standard `age` identity sidecar (fauzec pattern) versus a zspend-specific extension. Reuse fauzec verbatim unless a concrete reason emerges.
 9. **Conformance vector publication path.** Inside `zally-testkit` only versus a public spec repo. Affects how third-party wallets verify they match.
 10. **Sentry / observability backend.** Whether the operator deploys with the Vercel observability stack, Railway's built-in logs, or an external Prometheus + Grafana pair. Shapes the `/metrics` exposition format choice.
+
+## 11. Revision history
+
+### 2026-06-08 — Slice 1 implementation review (zentity PRD-43)
+
+A two-repo code review ahead of Slice 1 (the BFF→wallet trust boundary) found drift between this locked design and the shipped code, plus learnings that postdate the original lock. The locked decisions (D-1–D-15) stand; the amendments below correct stale references and refine three decisions for the current single-instance/testnet scale. Tracked in zentity `docs/plans/prd-43-agent-wallet-trust-boundary.md`.
+
+**Stale references (code wins; this doc was the stale part):**
+
+- **Protocol file home.** §6.3 and D-4 place the TypeScript `intent-hash` and `payment-authorization` mirrors at `apps/web/src/lib/agents/`. They actually live at `packages/sdk/src/protocol/`, exported via `@zentity/sdk/protocol`, consumed by both the issuer (apps/web) and the BFF (apps/demo-rp). The SDK location is correct (shared package, no brand leak). The Rust doc-comments in `zspend-core/src/payment_authorization.rs` and `zally-core/src/intent_hash.rs` that point at the dead `apps/web` path are being fixed.
+- **`revocation-stream.ts` consolidated.** §6.3 lists a standalone `apps/web/src/lib/agents/revocation-stream.ts`; the code consolidated it into `apps/web/src/lib/auth/oidc/token-revocation.ts` (RFC 7009 writes + the since-cursor delta read). Keep the consolidation.
+- **`IntentHasher` → `IntentHash`.** The §4 vocabulary names the type `IntentHasher` (a function); the shipped zally-core API is a struct `IntentHash` with `compute(&IntentInput)` plus an `IntentInput` input. Use the shipped names.
+- **D-4 preimage notation.** §4 line 63 writes the preimage as a plain concatenation. The shipped hasher (zally-core and the SDK) inserts a `u16`-big-endian length prefix before each variable-length field, which defeats the byte-shift concatenation collision. A reader re-implementing from the plain-concat notation computes the wrong digest. The length-prefixed layout is canonical; the prose is the stale part.
+- **Revocation transport.** D-6 says "delta-streamed"; §5.2 and the status doc said "SSE." The endpoint `/api/auth/oauth2/revoked?since=` is a since-cursor JSON poll, not an event stream. Build a poller, not an SSE client.
+- **Atomic-mint seam.** §6.3 and D-2 name `customGrantTypeHandlers` as the place the ledger check joins the token-row transaction. There are no `customGrantTypeHandlers` in the zentity codebase; CIBA is the vendored patched `@better-auth/ciba` plugin. The atomic mint lands in the plugin patch or `buildAccessTokenClaims`.
+
+**Error vocabulary (§4 table) corrections:**
+
+- Add the two codes the working e2e already returns: `target_expiry_stale` (409, retryable=false) and `target_expiry_mismatch_internal` (500).
+- The wallet's recipient check is RAR-relative equality (parsed recipient equals signed `RAR.recipient`), distinct from the issuer-side allowlist concept. Use `recipient_mismatch` for the wallet binding check; reserve `recipient_not_allowed` for the issuer. Likewise the wallet's amount check is equality to `RAR.amount`; `amount_exceeded` is only for the optional local backstop cap.
+- The wallet must stop overloading `audience_mismatch` for a network mismatch and `intent_mismatch` for an amount-cap miss.
+
+**Refined decisions (current scale: one issuer, one wallet instance, testnet):**
+
+- **D-8 (idempotency backend).** v1 ships a single in-process libSQL `usage_ledger` with the unchanged atomic contract (`INSERT ... ON CONFLICT (jti) DO NOTHING RETURNING signed_payload`, write-then-sign). The backend is a `ZSPEND_LEDGER_URL` config defaulting to the local `wallet.db`; the shared Turso primary and the multi-replica chaos test (Phase 8) are deferred until a second replica exists. A startup check fails closed if `replicas > 1` and the URL is local. The security boundary is the `ON CONFLICT` claim, not the backend's distribution.
+- **D-6 (revocation).** v1 ships a synchronous sign-time check against `/oauth2/revoked?since=` with a short in-memory cache, fail-closed on staleness, gated by the 120s token lifetime. The background poller, the `revocation_staleness_seconds` gauge, and `/metrics` move to the ops slice. The 120s mint lifetime and the synchronous check ship as a pair; deferring the poller without the 120s lifetime would be strictly worse than the stub.
+- **Verifier ordering (D-1/D-6).** The revocation check runs **before** the single-use `jti` claim, so a revoked-and-replayed token returns `token_revoked` rather than a cached `signed_payload`. The JWT verification alg is pinned to the resolved JWKS key's type, never trusted from the token header. The v1 alg allowlist is `{EdDSA, ES256}`; ML-DSA-65 is deferred (unverifiable by `jsonwebtoken@9`; access tokens are EdDSA).
+- **D-3 (PCZT) stays the committed target, on a later wire slice.** The auth boundary ships first on the current `raw-zcash-v5` wire (the intent-hash binds the parsed tuple, not the bytes, so the verifiers are format-agnostic). The flip to `pczt-v1` (extractor-ready PCZT + zpay Extractor) is the next wire slice, gated on zally `construct_pczt`/`sign_pczt`. Note: the sighash finding (zentity `docs/findings/2026-06-08-pczt-updater-sighash.md`) showed expiry must be fixed before `IoFinalizer` inside the wallet, which narrows but does not remove D-3's payoff.
+- **D-4 (parse parity).** Add a second conformance corpus keyed on raw ZIP-321 URIs (`{uri → expected_tuple → expected_intent_hash}`), exercising percent-encoding variants, parameter reordering, and the empty/multi-payment rejection cases. The existing vector locks the hash over a pre-parsed tuple and does not cover the parser divergence the threat model names.
+- **KMS sealing (Phase 7) deferred.** v1 ships the `age` file seal plus the D-13 posture gate (refuse `Dev` posture unless `ZSPEND_ALLOW_DEV_SEED=1`) and posture on `/readyz`. The `zspend-keys-kms` crate is additive on the existing `SeedSealing::posture()` shape when a non-local deploy and a provider are chosen.

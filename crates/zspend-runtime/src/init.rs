@@ -98,8 +98,7 @@ pub(crate) async fn run(sealed_seed_path: PathBuf, force: bool) -> Result<(), In
         );
     }
 
-    let sealing =
-        AgeFileSealing::new(AgeFileSealingOptions::at_path(sealed_seed_path.clone()));
+    let sealing = AgeFileSealing::new(AgeFileSealingOptions::at_path(sealed_seed_path.clone()));
     let mnemonic = Mnemonic::generate();
     let seed = SeedMaterial::from_mnemonic(&mnemonic, "");
     sealing
@@ -156,7 +155,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn init_creates_sealed_seed_with_tight_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    async fn init_creates_sealed_seed_with_tight_permissions()
+    -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempdir()?;
         let path = dir.path().join("wallet.age");
 
@@ -164,7 +164,10 @@ mod tests {
 
         assert!(path.exists(), "sealed seed file was not written");
         let identity_path = identity_sidecar_path(&path);
-        assert!(identity_path.exists(), "age identity sidecar was not written");
+        assert!(
+            identity_path.exists(),
+            "age identity sidecar was not written"
+        );
 
         #[cfg(unix)]
         {

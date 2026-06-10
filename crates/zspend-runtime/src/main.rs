@@ -14,14 +14,16 @@ mod bootstrap;
 mod capture_submitter;
 mod init;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use base64::Engine as _;
@@ -29,10 +31,16 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bootstrap::{BootstrapError, BootstrapInputs, ChainSourceFactory};
 use capture_submitter::CaptureSubmitter;
 use clap::{Parser, Subcommand};
+use jsonwebtoken::jwk::JwkSet;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use zally_core::{AccountId, BlockHeight, IdempotencyKey, Network, PaymentRecipient};
 use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet, WalletError};
-use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy, SigningPolicyError};
+use zspend_core::{
+    AccessTokenClaims, DPOP_CLOCK_SKEW_SECONDS, DpopBinding, PaymentAuthorization, ProblemDetail,
+    ProblemKind, SigningPolicy, SigningPolicyError, intent_matches, verify_access_token,
+    verify_dpop_proof,
+};
 
 /// Wire format identifier returned on `/v1/payments/sign`.
 ///
@@ -107,6 +115,8 @@ enum StartupError {
     NetworkInvalid { provided: String },
     #[error("required env var {name} is missing")]
     EnvMissing { name: &'static str },
+    #[error("issuer JWKS load failed for {path:?}: {reason}")]
+    Jwks { path: PathBuf, reason: String },
     #[error("wallet bootstrap failed: {source}")]
     Bootstrap {
         #[source]
@@ -124,11 +134,28 @@ enum StartupError {
     },
 }
 
+/// Window (seconds) after which a recorded DPoP proof `jti` is evicted from the
+/// per-process anti-replay set.
+const DPOP_REPLAY_WINDOW_SECONDS: u64 = 300;
+
 #[derive(Clone)]
 struct AppState {
     wallet: Wallet,
     account_id: AccountId,
     policy: Arc<SigningPolicy>,
+    /// Issuer JWKS used to verify inbound `at+jwt` access tokens (D-1). Empty
+    /// when no `ZSPEND_JWKS_FILE` is configured, which fails every spend closed.
+    jwks: Arc<JwkSet>,
+    /// The wallet's externally-reachable `/v1/payments/sign` URL, compared
+    /// against the DPoP proof `htu` (D-5, RFC 9449).
+    public_sign_url: Arc<str>,
+    /// Clock-skew leeway (seconds) for access-token `exp` and DPoP `iat`.
+    leeway_seconds: u64,
+    /// Short-window DPoP proof `jti` anti-replay set (per-process).
+    dpop_seen: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Single-use access-token `jti` ledger (write-then-sign, D-8). Maps a
+    /// consumed `jti` to the signed payload returned on an identical replay.
+    spend_ledger: Arc<Mutex<HashMap<String, SignPaymentResponse>>>,
 }
 
 impl AppState {
@@ -190,23 +217,25 @@ async fn serve() -> Result<(), StartupError> {
         .build()
         .map_err(|source| StartupError::SigningPolicy { source })?;
 
+    let jwks = load_jwks(config.jwks_file.as_ref())?;
+    if jwks.keys.is_empty() {
+        tracing::warn!(
+            "no ZSPEND_JWKS_FILE configured: every /v1/payments/sign call fails closed until the issuer JWKS is wired",
+        );
+    }
+
     let state = AppState {
         wallet,
         account_id,
         policy: Arc::new(policy),
+        jwks: Arc::new(jwks),
+        public_sign_url: Arc::from(config.public_sign_url.as_str()),
+        leeway_seconds: config.leeway_seconds,
+        dpop_seen: Arc::new(Mutex::new(HashMap::new())),
+        spend_ledger: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    let router = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/v1/capabilities", get(get_capabilities))
-        .route(
-            "/.well-known/wallet-configuration",
-            get(get_wallet_configuration),
-        )
-        .route("/v1/payments/sign", post(sign_payment))
-        .route("/v1/wallet/address", get(get_wallet_address))
-        .with_state(state);
+    let router = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
@@ -226,6 +255,20 @@ async fn serve() -> Result<(), StartupError> {
         .await
         .map_err(|source| StartupError::Serve { source })?;
     Ok(())
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/v1/capabilities", get(get_capabilities))
+        .route(
+            "/.well-known/wallet-configuration",
+            get(get_wallet_configuration),
+        )
+        .route("/v1/payments/sign", post(sign_payment))
+        .route("/v1/wallet/address", get(get_wallet_address))
+        .with_state(state)
 }
 
 fn install_tracing() -> Result<(), StartupError> {
@@ -401,7 +444,7 @@ struct WalletAddressResponse {
 /// the runtime serializes the struct directly rather than going through that
 /// type so the `format` field can carry `"raw-zcash-v5"` until the PCZT path
 /// (`pczt-v1`) lands on both ends. See [`SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL`].
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct SignedPayloadWire {
     format: &'static str,
     bytes: String,
@@ -412,20 +455,20 @@ struct SignedPayloadWire {
     metadata: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct AmountWire {
     currency: &'static str,
     value: String,
     unit: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum ExpiresAtWire {
     BlockHeight(u32),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct SignPaymentResponse {
     signed_payload: SignedPayloadWire,
 }
@@ -445,8 +488,17 @@ struct SignPaymentResponse {
 )]
 async fn sign_payment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SignPaymentRequest>,
 ) -> Result<Json<SignPaymentResponse>, ProblemResponse> {
+    // Trust boundary (Proposal-0003 Slice 1): verify the DPoP-bound access
+    // token, then re-derive every bound field from the signed RAR before any
+    // signing work. A request that does not carry a conformant grant is
+    // rejected here, not signed.
+    let claims = verify_spend_authorization(&state, &headers)?;
+    let auth = claims.payment_authorization().map_err(problem_response)?;
+    cross_check_request(auth, &body)?;
+
     if body.payment_request.scheme != "zip321" {
         return Err(ProblemResponse::bad_request(ProblemDetail::not_retryable(
             ProblemKind::PaymentRequestInvalid,
@@ -460,7 +512,7 @@ async fn sign_payment(
     let requested_network = body.network.to_zally();
     if requested_network != state.policy.network() {
         return Err(ProblemResponse::bad_request(ProblemDetail::not_retryable(
-            ProblemKind::AudienceMismatch,
+            ProblemKind::PaymentRequestInvalid,
             "network mismatch",
             format!(
                 "request network={requested_network:?} does not match policy network={:?}",
@@ -487,10 +539,36 @@ async fn sign_payment(
         ))
     })?;
 
-    if payment.amount.as_u64() > state.policy.max_amount_zat() {
-        return Err(ProblemResponse::bad_request(ProblemDetail::not_retryable(
+    // D-4 binding: re-derive the intent_hash from the parsed recipient and
+    // amount, combined with the signed chain/payment_id/expiry, and reject a
+    // request whose tuple does not reproduce the RAR's intent_hash.
+    let recipient_caip10 = format!(
+        "zcash:{}:{}",
+        auth.chain.reference,
+        payment.recipient.encoded()
+    );
+    let intent_ok =
+        intent_matches(auth, &recipient_caip10, payment.amount.as_u64()).map_err(|err| {
+            problem_response(ProblemDetail::not_retryable(
+                ProblemKind::IntentMismatch,
+                "intent_mismatch",
+                err.to_string(),
+            ))
+        })?;
+    if !intent_ok {
+        return Err(problem_response(ProblemDetail::not_retryable(
             ProblemKind::IntentMismatch,
-            "amount exceeds policy cap",
+            "intent_mismatch",
+            "recomputed intent_hash does not match the signed authorization",
+        )));
+    }
+
+    // Local backstop cap (defense in depth; the issuer is the authoritative
+    // policy gate per D-2).
+    if payment.amount.as_u64() > state.policy.max_amount_zat() {
+        return Err(problem_response(ProblemDetail::not_retryable(
+            ProblemKind::AmountExceeded,
+            "amount exceeds wallet backstop cap",
             format!(
                 "requested {} > max {}",
                 payment.amount.as_u64(),
@@ -507,6 +585,15 @@ async fn sign_payment(
     // the wallet enforces D-8 (single-use, write-then-sign) against the
     // shared usage ledger; until then the per-call key keeps replays
     // idempotent against the wallet's storage layer.
+    // Single-use jti (D-8): an identical replay returns the cached signed
+    // payload; the wallet never signs the same access-token jti twice. v1 uses
+    // an in-process ledger (single instance); the shared-backend upgrade is a
+    // deploy-time change documented in PRD-43.
+    let cached = state.spend_ledger.lock().get(&claims.jti).cloned();
+    if let Some(cached) = cached {
+        return Ok(Json(cached));
+    }
+
     let idempotency = IdempotencyKey::try_from(body.payment_id.as_str()).map_err(|err| {
         ProblemResponse::bad_request(ProblemDetail::not_retryable(
             ProblemKind::PaymentRequestInvalid,
@@ -556,6 +643,10 @@ async fn sign_payment(
             metadata: serde_json::Value::Null,
         },
     };
+    state
+        .spend_ledger
+        .lock()
+        .insert(claims.jti.clone(), response.clone());
     Ok(Json(response))
 }
 
@@ -563,6 +654,213 @@ fn clone_recipient(recipient: &PaymentRecipient) -> PaymentRecipient {
     recipient.clone()
 }
 
+/// Verify the DPoP-bound `at+jwt` on `POST /v1/payments/sign` (Slice 1).
+///
+/// Runs the boundary in order: extract `Authorization: DPoP <at+jwt>` plus the
+/// `DPoP` proof, verify the access token against the issuer JWKS with the
+/// audience pinned to this wallet's thumbprint, verify the DPoP proof binds to
+/// the token's `cnf.jkt` and this request, then reject a replayed proof `jti`.
+fn verify_spend_authorization(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AccessTokenClaims, ProblemResponse> {
+    let (access_token, proof) = extract_dpop_bearer(headers)?;
+    let claims = verify_access_token(
+        &access_token,
+        &state.jwks,
+        state.policy.audience_thumbprint(),
+        state.leeway_seconds,
+    )
+    .map_err(problem_response)?;
+
+    let binding = DpopBinding {
+        method: "POST",
+        request_url: &state.public_sign_url,
+        access_token: &access_token,
+        bound_jkt: &claims.cnf.jkt,
+    };
+    let verified = verify_dpop_proof(&proof, &binding, unix_now(), DPOP_CLOCK_SKEW_SECONDS)
+        .map_err(problem_response)?;
+    record_dpop_jti(state, verified.jti)?;
+    Ok(claims)
+}
+
+/// Record a verified DPoP proof `jti` in the short-window anti-replay set,
+/// rejecting a `jti` already seen in the window. Scoped to its own function so
+/// the lock guard drops before the caller returns.
+fn record_dpop_jti(state: &AppState, jti: String) -> Result<(), ProblemResponse> {
+    let now = Instant::now();
+    let mut seen = state.dpop_seen.lock();
+    seen.retain(|_, recorded| {
+        now.duration_since(*recorded) < std::time::Duration::from_secs(DPOP_REPLAY_WINDOW_SECONDS)
+    });
+    if seen.contains_key(&jti) {
+        return Err(problem_response(ProblemDetail::not_retryable(
+            ProblemKind::DpopProofInvalid,
+            "dpop_proof_invalid",
+            "DPoP proof jti was already presented in the replay window",
+        )));
+    }
+    seen.insert(jti, now);
+    drop(seen);
+    Ok(())
+}
+
+/// Pull the `at+jwt` and the DPoP proof off the request headers.
+fn extract_dpop_bearer(headers: &HeaderMap) -> Result<(String, String), ProblemResponse> {
+    let access_token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("DPoP "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            problem_response(ProblemDetail::not_retryable(
+                ProblemKind::AccessTokenInvalid,
+                "access_token_invalid",
+                "missing or malformed Authorization: DPoP <at+jwt> header",
+            ))
+        })?
+        .to_owned();
+    let proof = headers
+        .get("dpop")
+        .and_then(|header| header.to_str().ok())
+        .map(str::trim)
+        .filter(|proof| !proof.is_empty())
+        .ok_or_else(|| {
+            problem_response(ProblemDetail::not_retryable(
+                ProblemKind::DpopProofInvalid,
+                "dpop_proof_invalid",
+                "missing DPoP proof header",
+            ))
+        })?
+        .to_owned();
+    Ok((access_token, proof))
+}
+
+/// Cross-check the plaintext request body against the signed RAR so the body's
+/// `network`/`payment_id`/`target_expiry_height` cannot diverge from the grant.
+fn cross_check_request(
+    auth: &PaymentAuthorization,
+    body: &SignPaymentRequest,
+) -> Result<(), ProblemResponse> {
+    if body.payment_id != auth.payment_id {
+        return Err(reject_intent(
+            "payment_id does not match the signed authorization",
+        ));
+    }
+    let expiry = auth_expiry_height(&auth.expires_at).map_err(problem_response)?;
+    if body.target_expiry_height != expiry {
+        return Err(reject_intent(
+            "target_expiry_height does not match the signed authorization expires_at",
+        ));
+    }
+    let body_reference = match body.network {
+        WireNetwork::Mainnet => "main",
+        WireNetwork::Testnet => "test",
+        WireNetwork::Regtest => "regtest",
+    };
+    if auth.chain.namespace != "zcash" || auth.chain.reference != body_reference {
+        return Err(reject_intent(
+            "network does not match the signed authorization chain",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_intent(detail: &str) -> ProblemResponse {
+    problem_response(ProblemDetail::not_retryable(
+        ProblemKind::IntentMismatch,
+        "intent_mismatch",
+        detail.to_owned(),
+    ))
+}
+
+/// Project the chain-tagged RAR expiry onto the Zcash block height the wallet
+/// commits to. Non-block-height kinds are rejected fail-closed.
+fn auth_expiry_height(expires_at: &zspend_core::ExpiresAt) -> Result<u32, ProblemDetail> {
+    match *expires_at {
+        zspend_core::ExpiresAt::BlockHeight(height) => Ok(height),
+        zspend_core::ExpiresAt::Slot(_)
+        | zspend_core::ExpiresAt::BlockNumber(_)
+        | zspend_core::ExpiresAt::TimestampSeconds(_) => Err(ProblemDetail::not_retryable(
+            ProblemKind::PaymentRequestInvalid,
+            "unsupported expiry kind",
+            "zcash authorizations must carry a block_height expires_at",
+        )),
+        _ => Err(ProblemDetail::not_retryable(
+            ProblemKind::PaymentRequestInvalid,
+            "unsupported expiry kind",
+            "unknown expires_at kind",
+        )),
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Wrap a [`ProblemDetail`] in an HTTP response with the status the §4 error
+/// table assigns to its `kind`.
+fn problem_response(body: ProblemDetail) -> ProblemResponse {
+    ProblemResponse {
+        status: status_for_kind(body.kind),
+        body,
+    }
+}
+
+#[allow(
+    clippy::match_same_arms,
+    reason = "the explicit TargetExpiryMismatchInternal arm documents its 500 mapping; the `_` arm exists only to cover the non_exhaustive hidden variant and shares the same status"
+)]
+fn status_for_kind(kind: ProblemKind) -> StatusCode {
+    match kind {
+        ProblemKind::PaymentRequestInvalid => StatusCode::BAD_REQUEST,
+        ProblemKind::DpopProofInvalid
+        | ProblemKind::AccessTokenInvalid
+        | ProblemKind::TokenRevoked => StatusCode::UNAUTHORIZED,
+        ProblemKind::IntentMismatch
+        | ProblemKind::RecipientMismatch
+        | ProblemKind::AmountExceeded
+        | ProblemKind::AudienceMismatch => StatusCode::FORBIDDEN,
+        ProblemKind::TokenAlreadyConsumed | ProblemKind::TargetExpiryStale => StatusCode::CONFLICT,
+        ProblemKind::AuthorizationExpired => StatusCode::GONE,
+        ProblemKind::InsufficientFunds | ProblemKind::RarTooManyEntries => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ProblemKind::SeedUnavailable
+        | ProblemKind::ChainUnreachable
+        | ProblemKind::RevocationCacheStale
+        | ProblemKind::NotReady => StatusCode::SERVICE_UNAVAILABLE,
+        ProblemKind::TargetExpiryMismatchInternal => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Load the issuer JWKS from `ZSPEND_JWKS_FILE`. An absent path yields an empty
+/// key set, which fails every spend closed until the operator wires the issuer.
+fn load_jwks(path: Option<&PathBuf>) -> Result<JwkSet, StartupError> {
+    let Some(path) = path else {
+        return Ok(JwkSet { keys: Vec::new() });
+    };
+    let raw = std::fs::read_to_string(path).map_err(|err| StartupError::Jwks {
+        path: path.clone(),
+        reason: err.to_string(),
+    })?;
+    serde_json::from_str(&raw).map_err(|err| StartupError::Jwks {
+        path: path.clone(),
+        reason: err.to_string(),
+    })
+}
+
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "the three caller-actionable wallet errors are matched explicitly; the remaining internal variants all map to a generic 500, and enumerating them would only trip match_same_arms"
+)]
 fn map_wallet_err(err: &zally_wallet::WalletError) -> ProblemResponse {
     match err {
         zally_wallet::WalletError::TargetExpiryStale { target, chain_tip } => ProblemResponse {
@@ -653,6 +951,9 @@ struct ResolvedConfig {
     storage_path: PathBuf,
     max_amount_zat: u64,
     audience_thumbprint: String,
+    jwks_file: Option<PathBuf>,
+    public_sign_url: String,
+    leeway_seconds: u64,
     indexer_grpc_addr: Option<String>,
     birthday_override: Option<u32>,
 }
@@ -696,6 +997,22 @@ impl ResolvedConfig {
         let audience_thumbprint = std::env::var("ZSPEND_AUDIENCE_THUMBPRINT")
             .unwrap_or_else(|_| "phase4-stub-thumbprint".to_owned());
 
+        let jwks_file = std::env::var("ZSPEND_JWKS_FILE")
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+            .map(PathBuf::from);
+        let public_base = std::env::var("ZSPEND_PUBLIC_URL")
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| format!("http://{bind_addr}"));
+        let public_sign_url = format!("{}/v1/payments/sign", public_base.trim_end_matches('/'));
+        let leeway_seconds = std::env::var("ZSPEND_LEEWAY_SECONDS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(60);
+
         let indexer_grpc_addr = std::env::var("ZSPEND_CHAIN_SOURCE_URL")
             .ok()
             .map(|raw| raw.trim().to_owned())
@@ -711,6 +1028,9 @@ impl ResolvedConfig {
             storage_path,
             max_amount_zat,
             audience_thumbprint,
+            jwks_file,
+            public_sign_url,
+            leeway_seconds,
             indexer_grpc_addr,
             birthday_override,
         })
@@ -741,14 +1061,24 @@ mod tests {
     use super::{
         AmountWire, AppState, ExpiresAtWire, ProblemResponse, READYZ_BODY,
         SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL, SignPaymentResponse, SignedPayloadWire, WireNetwork,
-        WireNetworkOut, parse_network,
+        WireNetworkOut, build_router, parse_network,
     };
     use crate::bootstrap::{BootstrapInputs, ChainSourceFactory, bootstrap};
     use crate::init;
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use http_body_util::BodyExt as _;
+    use jsonwebtoken::jwk::{Jwk, JwkSet};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tower::ServiceExt as _;
     use zally_core::Network;
     use zally_testkit::MockChainSource;
     use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy};
@@ -873,12 +1203,17 @@ mod tests {
             wallet,
             account_id,
             policy: Arc::new(policy),
+            jwks: Arc::new(jsonwebtoken::jwk::JwkSet { keys: Vec::new() }),
+            public_sign_url: Arc::from("http://127.0.0.1:8090/v1/payments/sign"),
+            leeway_seconds: 60,
+            dpop_seen: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            spend_ledger: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
     #[tokio::test]
-    async fn current_unified_address_returns_testnet_ua()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn current_unified_address_returns_testnet_ua() -> Result<(), Box<dyn std::error::Error>>
+    {
         let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
 
         let ua = state.current_unified_address().await?;
@@ -914,6 +1249,163 @@ mod tests {
         assert_eq!(wire["network"].as_str(), Some("testnet"));
         let ua_field = wire["ua"].as_str().unwrap_or_default();
         assert!(ua_field.starts_with("utest1"), "ua must be a utest1 UA");
+        Ok(())
+    }
+
+    // ----- Slice 1 trust-boundary HTTP integration tests -----
+    //
+    // These drive the real Axum handler over HTTP (tower oneshot) to prove the
+    // verifier chain is wired into `/v1/payments/sign` and rejects an
+    // unauthenticated or non-conformant request before any signing work. The
+    // per-verifier logic is covered by the zspend-core unit tests; these tests
+    // prove the integration.
+
+    const ISSUER_KID: &str = "test-issuer";
+    const WALLET_AUDIENCE: &str = "test-thumbprint";
+    const FAR_FUTURE: i64 = 4_102_444_800;
+
+    struct FixtureIssuer {
+        encoding: EncodingKey,
+        jwks: JwkSet,
+    }
+
+    fn fixture_issuer() -> Result<FixtureIssuer, Box<dyn std::error::Error>> {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())?;
+        let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())?;
+        let public_x = URL_SAFE_NO_PAD.encode(keypair.public_key().as_ref());
+        let encoding = EncodingKey::from_ed_der(pkcs8.as_ref());
+        let jwk: Jwk = serde_json::from_value(json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": public_x,
+            "kid": ISSUER_KID,
+            "alg": "EdDSA",
+            "use": "sig",
+        }))?;
+        Ok(FixtureIssuer {
+            encoding,
+            jwks: JwkSet { keys: vec![jwk] },
+        })
+    }
+
+    fn rar() -> serde_json::Value {
+        json!({
+            "type": "payment_authorization",
+            "chain": { "namespace": "zcash", "reference": "test" },
+            "recipient": "zcash:test:utest1qq",
+            "amount": { "currency": "ZEC", "value": "50000000", "unit": "base" },
+            "payment_id": "01KT9A0V431VGD5YH7R7G635HC",
+            "intent_hash": "v1:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "expires_at": { "kind": "block_height", "value": 4_047_100 }
+        })
+    }
+
+    fn mint_at_jwt(
+        issuer: &FixtureIssuer,
+        aud: &str,
+        exp: i64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(ISSUER_KID.to_owned());
+        let claims = json!({
+            "aud": aud,
+            "jti": "01ACCESSTOKENJTI0000000000",
+            "exp": exp,
+            "cnf": { "jkt": "dpop-key-thumbprint" },
+            "authorization_details": [rar()],
+        });
+        Ok(encode(&header, &claims, &issuer.encoding)?)
+    }
+
+    fn sign_body() -> String {
+        json!({
+            "payment_request": { "scheme": "zip321", "value": "zcash:utest1qq?amount=0.5" },
+            "network": "testnet",
+            "payment_id": "01KT9A0V431VGD5YH7R7G635HC",
+            "target_expiry_height": 4_047_100,
+        })
+        .to_string()
+    }
+
+    async fn state_with_issuer(
+        issuer: &FixtureIssuer,
+    ) -> Result<AppState, Box<dyn std::error::Error>> {
+        let base = build_state_for_network(Network::Testnet, 4_047_000).await?;
+        Ok(AppState {
+            jwks: Arc::new(issuer.jwks.clone()),
+            ..base
+        })
+    }
+
+    /// POST to `/v1/payments/sign` over a real oneshot request and return the
+    /// HTTP status plus the problem-detail `kind`.
+    async fn post_sign(
+        state: AppState,
+        authorization: Option<&str>,
+        dpop: Option<&str>,
+    ) -> Result<(StatusCode, ProblemKind), Box<dyn std::error::Error>> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/payments/sign")
+            .header("content-type", "application/json");
+        if let Some(header_value) = authorization {
+            builder = builder.header("authorization", header_value);
+        }
+        if let Some(header_value) = dpop {
+            builder = builder.header("dpop", header_value);
+        }
+        let request = builder.body(Body::from(sign_body()))?;
+        let response = build_router(state).oneshot(request).await?;
+        let status = response.status();
+        let bytes = response.into_body().collect().await?.to_bytes();
+        let problem: ProblemDetail = serde_json::from_slice(&bytes)?;
+        Ok((status, problem.kind))
+    }
+
+    #[tokio::test]
+    async fn sign_without_authorization_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
+        let (status, kind) = post_sign(state, None, None).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(kind, ProblemKind::AccessTokenInvalid);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_unverifiable_token_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
+        let (status, kind) = post_sign(state, Some("DPoP not-a-jwt"), Some("not-a-proof")).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(kind, ProblemKind::AccessTokenInvalid);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_wrong_audience_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = fixture_issuer()?;
+        let state = state_with_issuer(&issuer).await?;
+        let token = mint_at_jwt(&issuer, "some-other-wallet", FAR_FUTURE)?;
+        let (status, kind) =
+            post_sign(state, Some(&format!("DPoP {token}")), Some("any-proof")).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(kind, ProblemKind::AudienceMismatch);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_valid_token_but_bad_dpop_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = fixture_issuer()?;
+        let state = state_with_issuer(&issuer).await?;
+        let token = mint_at_jwt(&issuer, WALLET_AUDIENCE, FAR_FUTURE)?;
+        let (status, kind) = post_sign(
+            state,
+            Some(&format!("DPoP {token}")),
+            Some("not-a-valid-dpop-proof"),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(kind, ProblemKind::DpopProofInvalid);
         Ok(())
     }
 }

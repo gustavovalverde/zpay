@@ -279,8 +279,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_materialises_account_on_fresh_volume() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn bootstrap_materialises_account_on_fresh_volume()
+    -> Result<(), Box<dyn std::error::Error>> {
         let paths = WalletPaths::new()?;
         let network = Network::regtest();
         init::run(paths.sealed_seed.clone(), false).await?;
@@ -345,11 +345,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let network = Network::Testnet;
         let chain = MockChainSource::new(network);
-        chain.handle().fail_chain_tip_next(1, || {
-            ChainSourceError::Unavailable {
+        chain
+            .handle()
+            .fail_chain_tip_next(1, || ChainSourceError::Unavailable {
                 reason: "chain plane unreachable".to_owned(),
-            }
-        });
+            });
         let resolved = resolve_birthday(network, None, &chain).await;
         assert_eq!(
             resolved,

@@ -799,9 +799,8 @@ impl zally_chain::Submitter for AnySubmitter {
     ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
         match self {
             Self::Rejecting(_) => Err(zally_chain::SubmitterError::Unavailable {
-                reason:
-                    "submitter not configured; set ZPAY_CHAIN_SOURCE_URL to enable settle"
-                        .to_owned(),
+                reason: "submitter not configured; set ZPAY_CHAIN_SOURCE_URL to enable settle"
+                    .to_owned(),
             }),
             Self::Zinder(submitter) => submitter.submit(raw_tx).await,
         }

@@ -58,6 +58,28 @@ pub enum ProblemKind {
     /// wallet's PCZT proposal path; not actionable by the caller. Surfaced
     /// with HTTP 500.
     TargetExpiryMismatchInternal,
+    /// The access token's `jti` appears in the wallet's revocation cache; the
+    /// grant was revoked after mint (D-6). Distinct from `AccessTokenInvalid`
+    /// for telemetry. Remediation: request a new authorization.
+    TokenRevoked,
+    /// The recipient parsed from the `payment_request` does not equal the
+    /// `recipient` the issuer signed into the RAR (D-4/D-2). Distinct from
+    /// `IntentMismatch` so telemetry separates a recipient swap from a
+    /// general hash mismatch.
+    RecipientMismatch,
+    /// The amount parsed from the `payment_request` exceeds the wallet's
+    /// optional local backstop cap (defense-in-depth; the issuer is the
+    /// authoritative policy gate per D-2).
+    AmountExceeded,
+    /// The RAR `expires_at` has passed; the authorization is no longer
+    /// spendable. Surfaced with HTTP 410.
+    AuthorizationExpired,
+    /// `authorization_details` did not carry exactly one entry; v1 accepts a
+    /// single `payment_authorization` (D-14).
+    RarTooManyEntries,
+    /// The revocation cache is older than the fail-closed staleness bound; the
+    /// wallet refuses to sign until it refreshes (D-6). Retryable.
+    RevocationCacheStale,
 }
 
 /// Operator-facing remediation hint attached to a [`ProblemDetail`].
@@ -145,6 +167,18 @@ impl ProblemDetail {
         self
     }
 }
+
+impl core::fmt::Display for ProblemDetail {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "{} ({:?}): {}",
+            self.title, self.kind, self.detail
+        )
+    }
+}
+
+impl core::error::Error for ProblemDetail {}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 //! [`PaymentAuthorization`]: the Rust mirror of the zentity Zod schema at
-//! `apps/web/src/lib/agents/payment-authorization.ts`.
+//! `@zentity/sdk/protocol` (packages/sdk/src/protocol/payment-authorization.ts).
 //!
 //! Per Proposal-0003 D-1 (the RAR entry IS the spend grant), D-4 (parsed-tuple
 //! `intent_hash`), D-10 (CAIP-typed identifiers; decimal-string amounts), and
@@ -8,6 +8,14 @@
 //! [`PaymentAuthorization`] entry.
 
 use serde::{Deserialize, Serialize};
+
+/// The chain-neutral `amount`/`unit`/`expires_at` vocabulary is owned by
+/// `zally-core` (the canonical wallet-library wire types) and re-exported here
+/// so the RAR entry, the signed-payload envelope, and the `IntentHash` input
+/// speak one vocabulary instead of three hand-kept mirrors. The JSON shapes are
+/// identical to the zentity Zod schema: `amount` is `{ currency, value, unit }`
+/// with a lowercase `unit`, and `expires_at` is a `{ kind, value }` tagged union.
+pub use zally_core::{Amount, AmountUnit, ExpiresAt};
 
 /// Wire-stable RAR `type` discriminator. Renaming requires a versioned
 /// migration on every consumer (issuer, wallet, integrators).
@@ -41,34 +49,6 @@ pub struct ChainId {
     pub reference: String,
 }
 
-/// Unit interpretation of [`Amount::value`]. Mirrors the zally-core
-/// `AmountUnit` vocabulary so the wire vocabulary stays single-sourced.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AmountUnit {
-    /// Smallest indivisible chain unit. Zcash: zatoshi. Solana: lamport.
-    Base,
-    /// Human-display unit. Zcash: ZEC. Solana: SOL.
-    Display,
-}
-
-/// Chain-neutral amount per Proposal-0003 D-10.
-///
-/// `value` is a decimal string (no leading sign, no thousands separators) to
-/// defeat IEEE-754 drift across JSON parsers. Pair the `value` with `unit` to
-/// determine whether the amount is denominated in the chain's base unit or
-/// the display unit.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Amount {
-    /// Currency identifier; ISO-4217-style for fiat-shaped chains, ticker for
-    /// others. Zcash: `"ZEC"`. USD-Coin: `"USDC"`.
-    pub currency: String,
-    /// Decimal-string representation of the amount.
-    pub value: String,
-    /// Unit the value is denominated in.
-    pub unit: AmountUnit,
-}
-
 /// Versioned intent-hash wire string: `"v1:sha256:<base64url-no-pad>"`.
 ///
 /// Wrapped in a newtype so the runtime cannot accidentally compare a recipient
@@ -79,31 +59,11 @@ pub struct Amount {
 #[serde(transparent)]
 pub struct IntentHashString(pub String);
 
-/// Chain-tagged expiry per Proposal-0003 D-3.
-///
-/// `#[non_exhaustive]` so future chain expiry kinds (slot, block-number,
-/// timestamp) land as additive variants without breaking match exhaustiveness
-/// at downstream call sites.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ExpiresAt {
-    /// Zcash consensus expiry: chain block height past which the network
-    /// refuses to mine the transaction.
-    BlockHeight(u32),
-    /// Solana slot expiry.
-    Slot(u64),
-    /// EVM block-number expiry.
-    BlockNumber(u64),
-    /// Unix-timestamp expiry in seconds since the epoch.
-    TimestampSeconds(u64),
-}
-
 /// The `payment_authorization` RAR entry as it appears in
 /// `authorization_details[0]` of the OAuth `at+jwt`.
 ///
 /// Mirrors the zentity Zod schema at
-/// `apps/web/src/lib/agents/payment-authorization.ts`. The wallet recomputes
+/// `@zentity/sdk/protocol` (packages/sdk/src/protocol/payment-authorization.ts). The wallet recomputes
 /// `intent_hash` over the parsed payment-request tuple and compares against
 /// this field; mismatch returns [`super::ProblemKind::IntentMismatch`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

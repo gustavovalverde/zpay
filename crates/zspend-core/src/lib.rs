@@ -11,11 +11,19 @@
 //! boundary, and no external consumers. The runtime binary
 //! (`zspend-runtime`) is its only consumer.
 
+mod access_token;
+mod dpop;
 mod error;
+mod intent;
 mod payment_authorization;
 mod signing_policy;
 
+pub use access_token::{AccessTokenClaims, Confirmation, verify_access_token};
+pub use dpop::{
+    DPOP_CLOCK_SKEW_SECONDS, DpopBinding, VerifiedDpop, ec_jwk_thumbprint, verify_dpop_proof,
+};
 pub use error::{ProblemDetail, ProblemKind, RemediationHint};
+pub use intent::{intent_matches, recompute_intent_hash};
 pub use payment_authorization::{
     Amount, AmountUnit, ChainId, ExpiresAt, IntentHashString, PAYMENT_AUTHORIZATION_TYPE_LITERAL,
     PaymentAuthorization, PaymentAuthorizationType,

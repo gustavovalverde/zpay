@@ -6379,7 +6379,9 @@ name = "zally-core"
 version = "0.1.0"
 source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
 dependencies = [
+ "base64 0.22.1",
  "hex",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -7226,9 +7228,17 @@ dependencies = [
 name = "zspend-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "jsonwebtoken",
+ "p256",
+ "rand_core 0.6.4",
+ "ring",
  "serde",
  "serde_json",
+ "sha2 0.11.0-pre.4",
  "thiserror 2.0.18",
+ "url",
  "zally-core",
 ]
 
@@ -7241,13 +7251,17 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "hex",
+ "http-body-util",
+ "jsonwebtoken",
  "parking_lot",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0-pre.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
  "ulid",
