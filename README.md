@@ -116,6 +116,26 @@ The [aether scenario in zentity's demo relying party](https://github.com/gustavo
 demonstrates the full path including a CIBA-bound user approval and a
 six-character phishing-prevention code derived from the URI.
 
+## Agent-wallet trust boundary (zspend)
+
+`zspend-runtime` is the wallet service for autonomous agent payments. It holds
+the spending seed (sealed at rest), syncs against zinder, and exposes
+`POST /v1/payments/sign`. The facilitator's `/settle` is intent-blind behind a
+shielded viewing key, so the wallet is the sole place the spend's intent is
+checked. Before it signs, the wallet runs four checks: it verifies a DPoP-bound
+`payment_authorization` access token, pins `aud` to this wallet instance,
+re-derives the `intent_hash` and matches it against the signed grant, and
+consults a revocation cache. It then reserves the token `jti` write-then-sign,
+so a replay returns the cached payload and a conflicting reuse is refused.
+
+The wallet exposes `/v1/payments/sign`, `/v1/wallet/address`,
+`/v1/capabilities`, `/.well-known/wallet-configuration`, and a computed
+`/readyz` that reports seed, JWKS, ledger, revocation, and sealing posture. See
+[Proposal-0003](docs/proposals/0003-agent-wallet-production-architecture.md) for
+the decision record, and the
+[Aether demo](https://github.com/gustavovalverde/zentity/tree/main/apps/demo-rp/src/app/aether)
+for the end-to-end flow where an issuer mints the token and zspend signs.
+
 ## Architecture
 
 ```text
@@ -151,6 +171,11 @@ six-character phishing-prevention code derived from the URI.
                           zinder -> Zebra
 ```
 
+This diagram shows the facilitator plane. The zspend wallet runtime is a
+separate binary in the same workspace: the agent obtains a signed payload from
+zspend's `/v1/payments/sign`, then hands that payload to zpay's `/settle` for
+broadcast.
+
 zpay calls [zinder](https://github.com/gustavovalverde/zinder) over gRPC
 for broadcast, chain-tip reads, and the transaction fetch the verify path
 needs. It depends on neither zinder's HTTP surface nor the chain
@@ -175,6 +200,12 @@ zpay/
                               composition root
     zpay-e2e/               integration harness (zally as the wallet
                               counterparty)
+    zspend-core/            agent-wallet trust-boundary vocabulary: the
+                              payment_authorization RAR, at+jwt and DPoP
+                              verification, intent-hash, SigningPolicy
+    zspend-runtime/         wallet binary: sealed-seed zally wallet,
+                              /v1/payments/sign, single-use jti ledger,
+                              revocation check, posture gate
   etc/
     aether-demo.toml        placeholder payee config used by docker-compose
   scripts/

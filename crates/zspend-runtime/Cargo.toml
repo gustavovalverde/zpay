@@ -28,6 +28,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 hex.workspace = true
 jsonwebtoken = { workspace = true }
 parking_lot.workspace = true
+reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
@@ -48,6 +49,12 @@ zspend-core.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+# `use_pem` (a default feature the workspace strips with default-features=false)
+# is needed only by the test DPoP-key helper's EncodingKey::from_ec_pem; the
+# binary never parses PEM. Cargo unifies the feature into the test profile only.
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+p256 = { workspace = true, features = ["pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["std"] }
 ring = "0.17"
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

@@ -36,8 +36,12 @@ pub struct Confirmation {
 /// Verified claims of a `payment_authorization` access token.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccessTokenClaims {
-    /// Audience: the wallet instance's JWK thumbprint (D-5). The issuer mints a
-    /// single-string `aud`, never a URL.
+    /// Audience: the wallet instance's JWK thumbprint (D-5), never a URL.
+    /// Accepts both RFC 7519 §4.1.3 forms: a bare string, or an array of
+    /// strings (which standards-conformant issuers emit for a resource
+    /// indicator). Membership against this wallet's pin is still enforced by
+    /// `jsonwebtoken`'s `set_audience`; this only relaxes deserialization.
+    #[serde(deserialize_with = "deserialize_aud")]
     pub aud: String,
     /// Single-use spend identifier (D-8).
     pub jti: String,
@@ -68,6 +72,30 @@ impl AccessTokenClaims {
                 ),
             )),
         }
+    }
+}
+
+/// Deserialize `aud` from the RFC 7519 string or array-of-strings form.
+///
+/// A resource indicator at the issuer yields a one-element array, which this
+/// collapses to the single audience the wallet pins. An empty array is an
+/// issuer bug and is rejected.
+fn deserialize_aud<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrSeq {
+        One(String),
+        Many(Vec<String>),
+    }
+    match StringOrSeq::deserialize(deserializer)? {
+        StringOrSeq::One(aud) => Ok(aud),
+        StringOrSeq::Many(many) => many
+            .into_iter()
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("aud array is empty")),
     }
 }
 
@@ -263,6 +291,20 @@ mod tests {
         assert_eq!(verified.cnf.jkt, DPOP_JKT);
         let auth = verified.payment_authorization()?;
         assert_eq!(auth.recipient, RECIPIENT);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_array_audience() -> TestResult {
+        // RFC 7519 §4.1.3: a standards-conformant issuer (e.g. better-auth with
+        // a resource indicator) emits `aud` as an array. The wallet must accept
+        // that form, not only the bare string.
+        let issuer = issuer()?;
+        let mut claims = token_claims(WALLET_AUD, FAR_FUTURE, json!([rar()]));
+        claims["aud"] = json!([WALLET_AUD]);
+        let token = mint(&issuer, &claims)?;
+        let verified = verify_access_token(&token, &issuer.jwks, WALLET_AUD, LEEWAY)?;
+        assert_eq!(verified.aud, WALLET_AUD);
         Ok(())
     }
 

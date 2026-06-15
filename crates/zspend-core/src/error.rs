@@ -5,11 +5,15 @@
 //! guidance. The `kind` field is wire-stable; rename forces a versioned
 //! migration on every consumer (the agent BFF, the demo-rp page, the MCP host).
 //!
-//! The Phase 4 binary uses [`ProblemKind::NotReady`] for the verifier stubs
-//! that are not yet wired (DPoP, JWKS, RAR, revocation, usage ledger). A
-//! follow-on slice replaces those with the real `dpop_proof_invalid`,
-//! `access_token_invalid`, `audience_mismatch`, `intent_mismatch`, and
-//! `token_already_consumed` variants.
+//! The runtime returns [`ProblemKind::NotReady`] for transient conditions
+//! (startup, an in-flight single-use reservation, an unmapped wallet error)
+//! and the specific verifier kinds (`dpop_proof_invalid`,
+//! `access_token_invalid`, `audience_mismatch`, `intent_mismatch`,
+//! `recipient_mismatch`, `token_already_consumed`) once a request fails a
+//! boundary check. The revocation kinds (`token_revoked`,
+//! `revocation_cache_stale`) come from the sign-time revocation check (D-6):
+//! `token_revoked` when the access-token `jti` is in the revocation cache,
+//! `revocation_cache_stale` when the cache cannot be proven fresh.
 
 use serde::{Deserialize, Serialize};
 

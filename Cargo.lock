@@ -4744,6 +4744,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5731,6 +5737,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -6359,7 +6366,7 @@ dependencies = [
 [[package]]
 name = "zally-chain"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6377,7 +6384,7 @@ dependencies = [
 [[package]]
 name = "zally-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6392,7 +6399,7 @@ dependencies = [
 [[package]]
 name = "zally-keys"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "age",
  "async-trait",
@@ -6409,7 +6416,7 @@ dependencies = [
 [[package]]
 name = "zally-pczt"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "orchard",
  "pczt",
@@ -6429,7 +6436,7 @@ dependencies = [
 [[package]]
 name = "zally-storage"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "async-trait",
  "orchard",
@@ -6438,6 +6445,7 @@ dependencies = [
  "rusqlite",
  "sapling-crypto",
  "secrecy 0.8.0",
+ "shardtree",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6458,7 +6466,7 @@ dependencies = [
 [[package]]
 name = "zally-testkit"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6477,7 +6485,7 @@ dependencies = [
 [[package]]
 name = "zally-wallet"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=a6ed0ac#a6ed0ace4be7bfd272875d9b293a9c2041be79df"
+source = "git+https://github.com/gustavovalverde/zally?rev=e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55#e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55"
 dependencies = [
  "futures-util",
  "hex",
@@ -6975,7 +6983,7 @@ dependencies = [
 [[package]]
 name = "zinder-client"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -6996,7 +7004,7 @@ dependencies = [
 [[package]]
 name = "zinder-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "hex",
  "sha2 0.10.9",
@@ -7008,7 +7016,7 @@ dependencies = [
 [[package]]
 name = "zinder-derive"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "prost 0.14.3",
  "rust-rocksdb",
@@ -7021,7 +7029,7 @@ dependencies = [
 [[package]]
 name = "zinder-proto"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "prost 0.14.3",
  "prost-build",
@@ -7034,7 +7042,7 @@ dependencies = [
 [[package]]
 name = "zinder-source"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7064,7 +7072,7 @@ dependencies = [
 [[package]]
 name = "zinder-store"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zinder?rev=8834c3fdfebaf672d17454bd2b21a598f111997a#8834c3fdfebaf672d17454bd2b21a598f111997a"
+source = "git+https://github.com/gustavovalverde/zinder?rev=23d1f40e6a649175cc13201a8fe41cb494eb0052#23d1f40e6a649175cc13201a8fe41cb494eb0052"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7253,7 +7261,10 @@ dependencies = [
  "hex",
  "http-body-util",
  "jsonwebtoken",
+ "p256",
  "parking_lot",
+ "rand_core 0.6.4",
+ "reqwest",
  "ring",
  "serde",
  "serde_json",

@@ -74,14 +74,14 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "a6ed0ac", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "8834c3fdfebaf672d17454bd2b21a598f111997a" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "23d1f40e6a649175cc13201a8fe41cb494eb0052" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "23d1f40e6a649175cc13201a8fe41cb494eb0052" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
