@@ -3,7 +3,7 @@
 use libsql::params;
 
 use zpay_core::broadcast::BroadcastOutcome;
-use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore};
+use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore, SuccessKindRow};
 use zpay_core::store::StoreError;
 use zpay_core::types::PaymentId;
 
@@ -39,14 +39,17 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         let mined_block_height = entry
             .mined_block_height
             .map(|height| i64::try_from(height).unwrap_or(i64::MAX));
+        let reorg_count = i64::from(entry.reorg_count);
+        let expiry_height = entry.expiry_height.map(i64::from);
 
         self.connection
             .execute(
                 "INSERT INTO settlement_ledger (\
                     payment_id, broadcast_outcome_kind, transaction_id, upstream_message, \
                     settled_at_unix_seconds, confirmation_count, mined_block_height, \
-                    last_confirmation_check_at_unix_seconds\
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) \
+                    last_confirmation_check_at_unix_seconds, reorg_count, last_reorged_at, \
+                    expiry_height\
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) \
                 ON CONFLICT(payment_id) DO UPDATE SET \
                     broadcast_outcome_kind = excluded.broadcast_outcome_kind, \
                     transaction_id = excluded.transaction_id, \
@@ -54,7 +57,10 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                     settled_at_unix_seconds = excluded.settled_at_unix_seconds, \
                     confirmation_count = excluded.confirmation_count, \
                     mined_block_height = excluded.mined_block_height, \
-                    last_confirmation_check_at_unix_seconds = NULL",
+                    last_confirmation_check_at_unix_seconds = NULL, \
+                    reorg_count = excluded.reorg_count, \
+                    last_reorged_at = excluded.last_reorged_at, \
+                    expiry_height = excluded.expiry_height",
                 params![
                     payment_id.0,
                     kind,
@@ -63,6 +69,9 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                     entry.settled_at_unix_seconds,
                     confirmation_count,
                     mined_block_height,
+                    reorg_count,
+                    entry.last_reorged_at,
+                    expiry_height,
                 ],
             )
             .await
@@ -78,7 +87,8 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             .connection
             .query(
                 "SELECT broadcast_outcome_kind, transaction_id, upstream_message, \
-                    settled_at_unix_seconds, confirmation_count, mined_block_height \
+                    settled_at_unix_seconds, confirmation_count, mined_block_height, \
+                    reorg_count, last_reorged_at, expiry_height \
                 FROM settlement_ledger WHERE payment_id = ?",
                 params![payment_id.0.clone()],
             )
@@ -115,11 +125,11 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         })
     }
 
-    async fn success_kind_transactions(&self) -> Result<Vec<(PaymentId, String)>, StoreError> {
+    async fn success_kind_transactions(&self) -> Result<Vec<SuccessKindRow>, StoreError> {
         let mut rows = self
             .connection
             .query(
-                "SELECT payment_id, transaction_id \
+                "SELECT payment_id, transaction_id, mined_block_height \
                 FROM settlement_ledger \
                 WHERE broadcast_outcome_kind IN ('accepted', 'duplicate') \
                   AND transaction_id IS NOT NULL",
@@ -127,7 +137,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             )
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
-        let mut pairs = Vec::new();
+        let mut collected = Vec::new();
         while let Some(row) = rows
             .next()
             .await
@@ -139,9 +149,17 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             let transaction_id: String = row.get(1).map_err(|err| StoreError::RowMalformed {
                 reason: format!("transaction_id read failed: {err}"),
             })?;
-            pairs.push((PaymentId(payment_id), transaction_id));
+            let mined_block_height: Option<i64> =
+                row.get(2).map_err(|err| StoreError::RowMalformed {
+                    reason: format!("mined_block_height read failed: {err}"),
+                })?;
+            collected.push(SuccessKindRow {
+                payment_id: PaymentId(payment_id),
+                transaction_id,
+                mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
+            });
         }
-        Ok(pairs)
+        Ok(collected)
     }
 
     async fn record_confirmation(
@@ -181,6 +199,64 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             .await
             .map_err(|err| libsql_to_store_error(&err))?;
         Ok(affected > 0)
+    }
+
+    async fn downgrade_on_reorg(
+        &self,
+        payment_id: &PaymentId,
+        reorged_at_unix_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE settlement_ledger SET \
+                    mined_block_height = NULL, \
+                    confirmation_count = 0, \
+                    reorg_count = reorg_count + 1, \
+                    last_reorged_at = ? \
+                WHERE payment_id = ? AND mined_block_height IS NOT NULL",
+                params![reorged_at_unix_seconds, payment_id.0.clone()],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        Ok(affected > 0)
+    }
+
+    async fn downgrade_reorged_range(
+        &self,
+        reverted_start_height: u64,
+        reverted_end_height: u64,
+        reorged_at_unix_seconds: i64,
+    ) -> Result<Vec<PaymentId>, StoreError> {
+        let start = i64::try_from(reverted_start_height).unwrap_or(i64::MAX);
+        let end = i64::try_from(reverted_end_height).unwrap_or(i64::MAX);
+        let mut rows = self
+            .connection
+            .query(
+                "UPDATE settlement_ledger SET \
+                    mined_block_height = NULL, \
+                    confirmation_count = 0, \
+                    reorg_count = reorg_count + 1, \
+                    last_reorged_at = ? \
+                WHERE mined_block_height IS NOT NULL \
+                  AND mined_block_height BETWEEN ? AND ? \
+                RETURNING payment_id",
+                params![reorged_at_unix_seconds, start, end],
+            )
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?;
+        let mut downgraded = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| libsql_to_store_error(&err))?
+        {
+            let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
+                reason: format!("payment_id read failed: {err}"),
+            })?;
+            downgraded.push(PaymentId(payment_id));
+        }
+        Ok(downgraded)
     }
 }
 
@@ -234,6 +310,15 @@ fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerE
     let mined_block_height: Option<i64> = row.get(5).map_err(|err| StoreError::RowMalformed {
         reason: format!("mined_block_height read failed: {err}"),
     })?;
+    let reorg_count: i64 = row.get(6).map_err(|err| StoreError::RowMalformed {
+        reason: format!("reorg_count read failed: {err}"),
+    })?;
+    let last_reorged_at: Option<i64> = row.get(7).map_err(|err| StoreError::RowMalformed {
+        reason: format!("last_reorged_at read failed: {err}"),
+    })?;
+    let expiry_height: Option<i64> = row.get(8).map_err(|err| StoreError::RowMalformed {
+        reason: format!("expiry_height read failed: {err}"),
+    })?;
 
     let broadcast_outcome = match kind.as_str() {
         "accepted" => BroadcastOutcome::Accepted {
@@ -265,6 +350,9 @@ fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerE
         settled_at_unix_seconds,
         confirmation_count: confirmation_count.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
         mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
+        reorg_count: u32::try_from(reorg_count).unwrap_or(u32::MAX),
+        last_reorged_at,
+        expiry_height: expiry_height.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
     })
 }
 

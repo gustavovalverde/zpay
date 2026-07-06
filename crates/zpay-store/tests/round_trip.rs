@@ -221,22 +221,26 @@ async fn idempotency_clash_returns_integrity_violation() -> TestResult {
     Ok(())
 }
 
+fn accepted_ledger_entry(transaction_id: &str) -> SettlementLedgerEntry {
+    SettlementLedgerEntry {
+        broadcast_outcome: BroadcastOutcome::Accepted {
+            transaction_id: transaction_id.to_owned(),
+        },
+        settled_at_unix_seconds: 1_700_000_000,
+        confirmation_count: None,
+        mined_block_height: None,
+        reorg_count: 0,
+        last_reorged_at: None,
+        expiry_height: Some(2_000_000),
+    }
+}
+
 #[tokio::test]
 async fn settlement_ledger_round_trip() -> TestResult {
     let (_temp, _, ledger) = fresh_stores().await?;
     let payment_id = PaymentId("pid-1".to_owned());
     ledger
-        .record(
-            payment_id.clone(),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "deadbeef".to_owned(),
-                },
-                settled_at_unix_seconds: 1_700_000_000,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        )
+        .record(payment_id.clone(), accepted_ledger_entry("deadbeef"))
         .await?;
 
     let found = ledger.find(&payment_id).await?.ok_or("ledger find miss")?;
@@ -245,6 +249,9 @@ async fn settlement_ledger_round_trip() -> TestResult {
     };
     assert_eq!(transaction_id, "deadbeef");
     assert_eq!(found.confirmation_count, None);
+    assert_eq!(found.reorg_count, 0);
+    assert_eq!(found.last_reorged_at, None);
+    assert_eq!(found.expiry_height, Some(2_000_000));
 
     let updated = ledger
         .record_confirmation(&payment_id, 3, Some(123_456))
@@ -258,9 +265,79 @@ async fn settlement_ledger_round_trip() -> TestResult {
     assert_eq!(after.confirmation_count, Some(3));
     assert_eq!(after.mined_block_height, Some(123_456));
 
-    let pairs = ledger.success_kind_transactions().await?;
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].1, "deadbeef");
+    let rows = ledger.success_kind_transactions().await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].transaction_id, "deadbeef");
+    assert_eq!(rows[0].mined_block_height, Some(123_456));
+    Ok(())
+}
+
+#[tokio::test]
+async fn downgrade_on_reorg_returns_mined_row_to_broadcast() -> TestResult {
+    let (_temp, _, ledger) = fresh_stores().await?;
+    let payment_id = PaymentId("reorg-pid".to_owned());
+    ledger
+        .record(payment_id.clone(), accepted_ledger_entry("deadbeef"))
+        .await?;
+    ledger
+        .record_confirmation(&payment_id, 4, Some(500_000))
+        .await?;
+
+    assert!(
+        ledger
+            .downgrade_on_reorg(&payment_id, 1_700_000_900)
+            .await?
+    );
+
+    let after = ledger.find(&payment_id).await?.ok_or("find miss")?;
+    assert_eq!(after.mined_block_height, None);
+    assert_eq!(after.confirmation_count, Some(0));
+    assert_eq!(after.reorg_count, 1);
+    assert_eq!(after.last_reorged_at, Some(1_700_000_900));
+
+    // Idempotent: a second reorg signal on an already-unmined row is a no-op.
+    assert!(
+        !ledger
+            .downgrade_on_reorg(&payment_id, 1_700_001_000)
+            .await?
+    );
+    let again = ledger.find(&payment_id).await?.ok_or("find miss")?;
+    assert_eq!(again.reorg_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn downgrade_reorged_range_selects_rows_by_mined_height() -> TestResult {
+    let (_temp, _, ledger) = fresh_stores().await?;
+    for (id, height) in [("low", 100), ("mid", 200), ("high", 300)] {
+        ledger
+            .record(PaymentId(id.to_owned()), accepted_ledger_entry(id))
+            .await?;
+        ledger
+            .record_confirmation(&PaymentId(id.to_owned()), 1, Some(height))
+            .await?;
+    }
+
+    let downgraded = ledger
+        .downgrade_reorged_range(150, 250, 1_700_000_950)
+        .await?;
+    assert_eq!(downgraded, vec![PaymentId("mid".to_owned())]);
+
+    let mid = ledger
+        .find(&PaymentId("mid".to_owned()))
+        .await?
+        .ok_or("mid miss")?;
+    assert_eq!(mid.mined_block_height, None);
+    assert_eq!(mid.reorg_count, 1);
+
+    for id in ["low", "high"] {
+        let row = ledger
+            .find(&PaymentId(id.to_owned()))
+            .await?
+            .ok_or("miss")?;
+        assert_eq!(row.reorg_count, 0);
+        assert!(row.mined_block_height.is_some());
+    }
     Ok(())
 }
 
@@ -278,17 +355,7 @@ async fn record_confirmation_misses_on_unknown_payment_id() -> TestResult {
 async fn success_kind_transactions_skips_failure_outcomes() -> TestResult {
     let (_temp, _, ledger) = fresh_stores().await?;
     ledger
-        .record(
-            PaymentId("ok".to_owned()),
-            SettlementLedgerEntry {
-                broadcast_outcome: BroadcastOutcome::Accepted {
-                    transaction_id: "abcd".to_owned(),
-                },
-                settled_at_unix_seconds: 1,
-                confirmation_count: None,
-                mined_block_height: None,
-            },
-        )
+        .record(PaymentId("ok".to_owned()), accepted_ledger_entry("abcd"))
         .await?;
     ledger
         .record(
@@ -300,12 +367,15 @@ async fn success_kind_transactions_skips_failure_outcomes() -> TestResult {
                 settled_at_unix_seconds: 2,
                 confirmation_count: None,
                 mined_block_height: None,
+                reorg_count: 0,
+                last_reorged_at: None,
+                expiry_height: None,
             },
         )
         .await?;
 
-    let pairs = ledger.success_kind_transactions().await?;
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].0, PaymentId("ok".to_owned()));
+    let rows = ledger.success_kind_transactions().await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].payment_id, PaymentId("ok".to_owned()));
     Ok(())
 }

@@ -19,6 +19,7 @@ pub mod accepts;
 pub mod binding;
 pub mod broadcast;
 pub mod capability;
+pub mod chain_status;
 pub mod disclosure_fetcher;
 pub mod oracle;
 pub mod prepare;

@@ -56,9 +56,6 @@ url = "2.5.8"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "json", "smallvec", "std", "tracing-log"] }
 ulid = "1.2.1"
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
-zcash_address = "0.11.0"
-zcash_primitives = "0.26.4"
-zcash_protocol = "0.7.2"
 
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.
@@ -74,14 +71,14 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "e8173c7e5c93d50bdf6a0e51202474d6ff6a3d55", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "23d1f40e6a649175cc13201a8fe41cb494eb0052" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "23d1f40e6a649175cc13201a8fe41cb494eb0052" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "74abb4b8f708dfb511c5f301c3d59f2127a5e2ed" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "74abb4b8f708dfb511c5f301c3d59f2127a5e2ed" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -123,10 +120,21 @@ undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 wildcard_enum_match_arm = "deny"
 
-# Pinned to a standalone fork of `zcash_client_backend` 0.23.0 with the
-# `target_expiry_height` argument added (matches https://github.com/zcash/librustzcash/pull/2412).
-# The fork is single-crate (not the librustzcash workspace) so cargo resolves transitive
-# deps from crates.io. Drop once upstream merges and a `zcash_client_backend`
-# release ships the patch on crates.io.
+# Pinned to a fork of the librustzcash workspace tracking the unreleased
+# Ironwood/NU6.3 dependency family. Two patches ride on top of upstream main:
+# the `target_expiry_height` argument on `create_pczt_from_proposal`
+# (https://github.com/zcash/librustzcash/pull/2412) and wallet scanning/storage
+# for the Ironwood shielded pool (https://github.com/zcash/librustzcash/pull/2539).
+# Every librustzcash-internal crate is patched from the same commit so
+# intra-workspace types stay coherent. Drop once upstream releases ship both.
 [patch.crates-io]
-zcash_client_backend = { git = "https://github.com/gustavovalverde/zcash_client_backend-target-expiry.git", tag = "v0.23.1-target-expiry" }
+zcash_client_backend = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_client_sqlite = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+pczt = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_protocol = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_primitives = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_keys = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_address = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_transparent = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_proofs = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zip321 = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }

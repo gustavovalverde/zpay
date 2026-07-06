@@ -1,15 +1,17 @@
-//! `CaptureSubmitter`: a Phase 4 pragmatic shortcut.
+//! `CaptureSubmitter`: records the signed transaction bytes instead of
+//! broadcasting them.
 //!
 //! Implements [`zally_chain::Submitter`] so the wallet's `send_payment` path
 //! can be reused unchanged, but instead of forwarding the bytes to a chain
-//! plane the submitter captures them into an inner buffer and returns
-//! `SubmitOutcome::Accepted` with a synthesised `tx_id`. The runtime then
+//! plane the submitter captures them into an inner buffer. The runtime then
 //! base64-encodes the captured bytes into the `/v1/payments/sign` response so
 //! the caller (the agent BFF) can forward them to `zpay-runtime /settle`.
 //!
-//! The follow-on slice replaces this with the PCZT path once Phase 2d ships
-//! `Wallet::construct_pczt` and Phase 2g ships the extractor on
-//! `zpay-runtime`.
+//! The submit call returns [`SubmitOutcome::Queued`]: the wallet's
+//! `resolve_send_outcome` treats `Queued` as success-equivalent and surfaces
+//! its own ZIP-244 `tx_id` (computed at prepare time) rather than any id the
+//! submitter returns, so the `/v1/payments/sign` response carries the real
+//! transaction id.
 
 use std::sync::Arc;
 
@@ -46,25 +48,14 @@ impl Submitter for CaptureSubmitter {
     }
 
     async fn submit(&self, raw_tx: &[u8]) -> Result<SubmitOutcome, SubmitterError> {
-        let tx_id = synthesise_tx_id(raw_tx);
         *self.captured.lock() = Some(raw_tx.to_vec());
-        Ok(SubmitOutcome::Accepted { tx_id })
+        // `Queued` makes the wallet's `resolve_send_outcome` discard this id and
+        // return the ZIP-244 txid it computed at prepare time; the zeroed value
+        // is a placeholder that never reaches the caller.
+        Ok(SubmitOutcome::Queued {
+            tx_id: TxId::from_bytes([0_u8; 32]),
+        })
     }
-}
-
-/// SHA-256-derived [`TxId`] for the Phase 4 capture shortcut.
-///
-/// The wallet's `send_payment` path uses the value the submitter returns as
-/// the canonical transaction identifier in `SendOutcome::signed.tx_id`; the
-/// runtime forwards that same id to the agent in the `signed_payload.tx_id`
-/// field. Deterministic for byte-identical input so a replay through the
-/// wallet's idempotency layer surfaces the same id.
-fn synthesise_tx_id(raw_tx: &[u8]) -> TxId {
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(raw_tx);
-    let mut bytes = [0_u8; 32];
-    bytes.copy_from_slice(&digest);
-    TxId::from_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -74,48 +65,55 @@ mod tests {
     use zally_core::Network;
 
     #[tokio::test]
-    async fn captures_bytes_and_returns_accepted() -> Result<(), zally_chain::SubmitterError> {
+    async fn captures_bytes_and_queues_for_wallet_txid() -> Result<(), zally_chain::SubmitterError>
+    {
         let submitter = CaptureSubmitter::new(Network::Testnet);
         let outcome = submitter.submit(b"raw-tx").await?;
-        match outcome {
-            SubmitOutcome::Accepted { tx_id } => {
-                assert_eq!(submitter.network(), Network::Testnet);
-                assert_eq!(
-                    submitter.take_captured().as_deref(),
-                    Some(b"raw-tx".as_slice())
-                );
-                // tx_id is deterministic for identical bytes; we cannot pattern-match
-                // on internal contents because TxId hides its bytes.
-                let again = CaptureSubmitter::new(Network::Testnet)
-                    .submit(b"raw-tx")
-                    .await?;
-                if let SubmitOutcome::Accepted { tx_id: again_tx_id } = again {
-                    assert_eq!(tx_id, again_tx_id);
-                } else {
-                    return Err(zally_chain::SubmitterError::Unavailable {
-                        reason: "second submit was not Accepted".to_owned(),
-                    });
-                }
-            }
-            SubmitOutcome::Duplicate { .. }
-            | SubmitOutcome::Queued { .. }
-            | SubmitOutcome::Rejected { .. } => {
-                return Err(zally_chain::SubmitterError::Unavailable {
-                    reason: "expected Accepted, got non-accepted outcome".to_owned(),
-                });
-            }
-            #[allow(
-                clippy::wildcard_enum_match_arm,
-                reason = "SubmitOutcome is non_exhaustive; future variants must fail this assertion until the test is updated to handle them"
-            )]
-            _ => {
-                return Err(zally_chain::SubmitterError::Unavailable {
-                    reason: "expected Accepted, got unknown non-exhaustive variant".to_owned(),
-                });
-            }
-        }
-        // A second take after the first returns None.
+        assert!(
+            matches!(outcome, SubmitOutcome::Queued { .. }),
+            "capture submitter must queue so the wallet returns its own ZIP-244 txid, not a byte-derived id",
+        );
+        assert_eq!(submitter.network(), Network::Testnet);
+        assert_eq!(
+            submitter.take_captured().as_deref(),
+            Some(b"raw-tx".as_slice()),
+        );
         assert!(submitter.take_captured().is_none());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_tx_id_is_independent_of_the_bytes() -> Result<(), zally_chain::SubmitterError> {
+        // Regression guard: the submitter must not derive the tx id from the
+        // bytes. Two different payloads produce the same placeholder id because
+        // the wallet, not the submitter, owns the real identifier.
+        let first = capture_queued_tx_id(b"one").await?;
+        let second = capture_queued_tx_id(b"two").await?;
+        assert_eq!(
+            first, second,
+            "queued placeholder id must not depend on input bytes"
+        );
+        Ok(())
+    }
+
+    async fn capture_queued_tx_id(bytes: &[u8]) -> Result<[u8; 32], zally_chain::SubmitterError> {
+        let outcome = CaptureSubmitter::new(Network::Testnet)
+            .submit(bytes)
+            .await?;
+        match outcome {
+            SubmitOutcome::Queued { tx_id } => Ok(*tx_id.as_bytes()),
+            SubmitOutcome::Accepted { .. }
+            | SubmitOutcome::Duplicate { .. }
+            | SubmitOutcome::Rejected { .. } => Err(zally_chain::SubmitterError::Unavailable {
+                reason: "expected Queued".to_owned(),
+            }),
+            #[allow(
+                clippy::wildcard_enum_match_arm,
+                reason = "SubmitOutcome is non_exhaustive; future variants must fail this assertion until the test handles them"
+            )]
+            _ => Err(zally_chain::SubmitterError::Unavailable {
+                reason: "expected Queued, got unknown non-exhaustive variant".to_owned(),
+            }),
+        }
     }
 }

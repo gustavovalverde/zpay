@@ -222,6 +222,9 @@ where
                 settled_at_unix_seconds: current_unix_seconds(),
                 confirmation_count: None,
                 mined_block_height: None,
+                reorg_count: 0,
+                last_reorged_at: None,
+                expiry_height: Some(prepared.preparation.expiry_height),
             },
         )
         .await?;

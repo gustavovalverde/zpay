@@ -27,16 +27,20 @@ The docs are organised by lifecycle, not by topic:
 | [0003](adrs/0003-zinder-as-chain-plane.md) | Zinder as chain plane source of truth | Accepted | Chain plane |
 | [0004](adrs/0004-libsql-prepared-tx-cache.md) | libSQL for prepared-tx cache and ledger | Accepted | Persistence |
 | [0005](adrs/0005-protocol-neutral-core-with-wire-adapters.md) | Protocol-neutral core with per-wire adapters | Accepted | Facilitator surface |
+| [0006](adrs/0006-facilitator-trust-boundary.md) | Facilitator trust boundary and settle-vs-verify split | Accepted | Facilitator surface |
+| [0007](adrs/0007-local-zip311-verifier.md) | Local ZIP-311 verifier | Accepted | Verify plane |
+| [0008](adrs/0008-compliance-authority-placement.md) | Compliance authority placement | Accepted | Compliance |
+| [0009](adrs/0009-settlement-lifecycle-and-finality.md) | Settlement lifecycle and finality semantics | Accepted | Settlement lifecycle |
 
 ## Architecture index
 
 - [public-interfaces.md](architecture/public-interfaces.md): vocabulary spine
-- [operational-surfaces.md](architecture/operational-surfaces.md): readiness,
-  ops port, env-var schema, live-test gates
+- [operational-surfaces.md](architecture/operational-surfaces.md): readiness
+  probe, ops listener, metrics, env-var schema
 - [facilitator-plane.md](architecture/facilitator-plane.md): prepare, settle,
-  watch, verify lifecycle
+  confirm, verify lifecycle
 - [upstream-platform-binding.md](architecture/upstream-platform-binding.md):
-  what zpay expects from zally, zinder, zexplorer, and zentity
+  what zpay expects from zally, zinder, and zentity
 
 ## Reference index
 

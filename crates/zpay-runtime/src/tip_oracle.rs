@@ -12,7 +12,8 @@
 //! The composition root selects between them in `build_tip_oracle`.
 
 use zinder_client::{
-    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
+    EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex,
+    RemoteOpenOptions,
 };
 use zpay_core::tip::{ChainTipOracle, TipError};
 use zpay_core::types::PaymentNetwork;

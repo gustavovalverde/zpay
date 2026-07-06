@@ -5,33 +5,42 @@ set -e
 # non-root `zspend` user. Mirrors the gosu pattern used by the zpay
 # image and apps/fhe in the zentity repo.
 #
-# If the sealed seed at $ZSPEND_SEALED_SEED_PATH is missing (first boot
-# on a fresh volume), provision it via `zspend-runtime init` before the
-# serve subcommand opens it. The init step honors $ZSPEND_SEALED_SEED_PATH
-# via clap's `env` attribute so the binary writes to the same path serve
-# will read.
-run_init_if_missing() {
+# The sealed seed at $ZSPEND_SEALED_SEED_PATH is the only backup of the
+# wallet. The entrypoint never auto-provisions one unless
+# $ZSPEND_ALLOW_AUTO_PROVISION=1 is set (a throwaway dev wallet); otherwise
+# it refuses to boot so an operator provisions the seed explicitly and
+# stores the revealed mnemonic offline.
+
+ensure_seed() {
+    # $1: command prefix used to run init as the target user (e.g. "gosu zspend").
+    run_as="$1"
     if [ -z "${ZSPEND_SEALED_SEED_PATH:-}" ]; then
-        echo "start-zspend: ZSPEND_SEALED_SEED_PATH is unset, skipping init probe" >&2
+        echo "start-zspend: ZSPEND_SEALED_SEED_PATH is unset; cannot locate the sealed seed." >&2
+        exit 1
+    fi
+    if [ -e "${ZSPEND_SEALED_SEED_PATH}" ]; then
         return 0
     fi
-    if [ ! -e "${ZSPEND_SEALED_SEED_PATH}" ]; then
-        echo "start-zspend: sealed seed not found at ${ZSPEND_SEALED_SEED_PATH}, running init" >&2
-        /app/zspend-runtime init
+    if [ "${ZSPEND_ALLOW_AUTO_PROVISION:-}" = "1" ]; then
+        echo "start-zspend: no sealed seed at ${ZSPEND_SEALED_SEED_PATH}; ZSPEND_ALLOW_AUTO_PROVISION=1, provisioning a throwaway dev wallet." >&2
+        # --auto-provision seals the seed without printing the mnemonic: this is
+        # an unbacked dev wallet, and the phrase must never reach the logs.
+        $run_as /app/zspend-runtime init --auto-provision
+        return 0
     fi
+    echo "start-zspend: no sealed seed at ${ZSPEND_SEALED_SEED_PATH} and ZSPEND_ALLOW_AUTO_PROVISION is not set; refusing to auto-provision." >&2
+    echo "start-zspend: provision the wallet explicitly, then restart:" >&2
+    echo "start-zspend:   zspend-runtime init            # generate a new sealed seed and reveal its mnemonic once" >&2
+    echo "start-zspend:   zspend-runtime init --restore  # seal a seed from a mnemonic supplied on stdin" >&2
+    echo "start-zspend: or set ZSPEND_ALLOW_AUTO_PROVISION=1 to allow a throwaway dev wallet." >&2
+    exit 1
 }
 
 if [ "$(id -u)" = "0" ]; then
     chown -R zspend:zspend /var/lib/zspend 2>/dev/null || true
-    gosu zspend /bin/sh -c '
-        set -e
-        if [ -n "${ZSPEND_SEALED_SEED_PATH:-}" ] && [ ! -e "${ZSPEND_SEALED_SEED_PATH}" ]; then
-            echo "start-zspend: sealed seed not found at ${ZSPEND_SEALED_SEED_PATH}, running init" >&2
-            /app/zspend-runtime init
-        fi
-    '
+    ensure_seed "gosu zspend"
     exec gosu zspend /app/zspend-runtime serve
 else
-    run_init_if_missing
+    ensure_seed ""
     exec /app/zspend-runtime serve
 fi

@@ -2,11 +2,16 @@
 
 | Field | Value |
 | ----- | ----- |
-| Status | Proposed |
+| Status | Superseded |
 | Consumer | zpay (fallback confirmation oracle) |
 | Upstream | zexplorer |
 | Pinned at | n/a (HTTP-only dependency) |
 | Related | [PRD-42 Phase 2](https://github.com/gustavovalverde/zentity/blob/main/docs/plans/prd-42-zcash-agentic-payments-cross-stack.md), [ADR-0003](../adrs/0003-zinder-as-chain-plane.md) |
+
+Superseded: zpay reaches zinder directly for the confirmation path in every
+supported deployment, so the zexplorer fallback confirmation oracle is not
+adopted (see [ADR-0003](../adrs/0003-zinder-as-chain-plane.md)). This ask is
+retained for history only.
 
 ## Context
 
@@ -66,4 +71,5 @@ Additive. Existing zexplorer routes unchanged. The route is unauthenticated in v
 - HMAC signature verifies against `X-Zexplorer-Signature` header.
 - A Playwright E2E test asserts the full register-broadcast-confirm-callback flow against regtest.
 
-Once accepted: zpay's `zpay-core::oracle` adds the fallback path; the env var `ZPAY_NODE__FALLBACK_EXPLORER_HTTP_ADDR` becomes the routing switch between zinder-direct and zexplorer-fallback.
+This ask is superseded (see the header): zpay's confirmation oracle reads
+zinder directly and adds no zexplorer fallback path.

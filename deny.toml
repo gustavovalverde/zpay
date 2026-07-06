@@ -78,8 +78,9 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # Temporary core2 source pin required by zebra-chain 6.0.2 through equihash 0.2.2.
-    "https://github.com/bbqsrc/core2",
+    # librustzcash workspace fork carrying the Ironwood/NU6.3 dependency family
+    # and the target_expiry_height patch; consumed via [patch.crates-io].
+    "https://github.com/gustavovalverde/librustzcash.git",
     # Sibling library workspace consumed by pinned rev; bump in lockstep with
     # zpay-core when upstream changes the wallet surface.
     "https://github.com/gustavovalverde/zally",

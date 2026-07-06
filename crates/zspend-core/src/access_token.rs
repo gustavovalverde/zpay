@@ -36,8 +36,11 @@ pub struct Confirmation {
 /// Verified claims of a `payment_authorization` access token.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccessTokenClaims {
-    /// Audience: the wallet instance's JWK thumbprint (D-5), never a URL.
-    /// Accepts both RFC 7519 §4.1.3 forms: a bare string, or an array of
+    /// Audience: the wallet instance's absolute-URI identity (D-5), e.g.
+    /// `urn:zentity:wallet:<jkt>`. This is an RFC 8707 resource indicator at the
+    /// issuer, not a bare thumbprint, and not a network URL: a URN keeps the
+    /// wallet key as the identity so DNS or BFF compromise cannot re-target the
+    /// token. Accepts both RFC 7519 §4.1.3 forms: a bare string, or an array of
     /// strings (which standards-conformant issuers emit for a resource
     /// indicator). Membership against this wallet's pin is still enforced by
     /// `jsonwebtoken`'s `set_audience`; this only relaxes deserialization.
@@ -177,7 +180,7 @@ fn map_decode_error(err: &jsonwebtoken::errors::Error) -> ProblemDetail {
         ProblemDetail::not_retryable(
             ProblemKind::AudienceMismatch,
             "audience_mismatch",
-            "the access token aud does not match this wallet's thumbprint",
+            "the access token aud does not match this wallet's audience",
         )
     } else {
         access_invalid("access token failed verification", err)
@@ -215,7 +218,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn core::error::Error>>;
 
     const KID: &str = "test-issuer-key";
-    const WALLET_AUD: &str = "wallet-jkt-thumbprint";
+    const WALLET_AUD: &str = "urn:zentity:wallet:test";
     const DPOP_JKT: &str = "dpop-key-thumbprint";
     const RECIPIENT: &str = "zcash:test:utest1qq";
     const LEEWAY: u64 = 60;

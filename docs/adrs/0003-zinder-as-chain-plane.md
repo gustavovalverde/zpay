@@ -143,3 +143,27 @@ verifier in zpay would force every consumer to dedupe verification logic.
   and as a cross-project patch in PRD-42 Phase 2.
 - Building zpay's own chain state cache. zinder owns it; zpay's
   `settlement_ledger` is a derived view, not a duplicate.
+
+## Revision history
+
+### 2026-07-05: Event-driven confirmation ships; zexplorer fallback dropped
+
+The confirmation oracle is event-driven against zinder directly. A
+`ChainEvents` subscription (`crates/zpay-runtime/src/chain_events.rs`)
+tails live from the last cursor, resumes after a cursor expiry, and runs a
+full reconciliation sweep on startup and on every cursor expiry. A
+60-second poll loop backstops the subscription; both write the
+`settlement_ledger`, and the shared chain view they refresh drives the
+reorg-aware status projection (see
+[ADR-0009](0009-settlement-lifecycle-and-finality.md)). The endpoint is
+`ZPAY_CHAIN_SOURCE_URL`.
+
+zpay reaches zinder directly in every supported deployment, so the
+zexplorer fallback confirmation oracle is not a configured option. There is
+no `ZPAY_NODE__FALLBACK_EXPLORER_HTTP_ADDR` field, no
+`POST /api/v1/{network}/transactions/{txid}/watch` registration, and no
+`/x402/v2/internal/watch-callback` endpoint. A deployment without a
+reachable zinder has no confirmation path: `/settle` returns 502 and
+settlement reconciliation stays disabled until `ZPAY_CHAIN_SOURCE_URL` is
+set. The Decision's fallback clause and the zexplorer-fallback entries in
+Rationale, Consequences, and Out of Scope are superseded by this entry.

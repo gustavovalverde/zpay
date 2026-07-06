@@ -85,7 +85,7 @@ fn rejects_the_golden_token_under_a_wrong_audience() -> TestResult {
     let outcome = verify_access_token(
         &fixture.token,
         &fixture.jwks,
-        "some-other-wallet-thumbprint",
+        "urn:zentity:wallet:other",
         LEEWAY,
     );
     assert!(

@@ -1,208 +1,236 @@
 # Operational Surfaces
 
-This document is the operator's contract. It specifies the readiness state
-machine, the ops listener shape, the env-var schema, the live-test gates,
-and the diagnostics surface. Code is expected to match this doc; if they
-diverge, this doc wins and the code is the bug.
+This document is the operator's contract: the process model, the two
+listeners, the readiness probe, the metrics, the env-var schema, and the
+shutdown behavior. It tracks the shipped code; where the two diverge, the
+code is authoritative and this document is the bug.
 
 ## Process model
 
 zpay is a single Rust binary, `zpay-runtime`. There is no sidecar, no
-companion process, no init container. The binary runs an Axum HTTP server
-on the main port, an ops listener on a separate port, and a libSQL
-connection pool talking to a local or remote Turso database.
+companion process, no init container. The binary runs an Axum HTTP server on
+the main port, an ops listener on a separate port, and a libSQL connection
+to a local file or a remote Turso database. The wallet that signs agent
+payments is a separate binary (`zspend-runtime`); zpay holds no spending key
+and broadcasts only.
 
 ```text
 zpay-runtime
    |
-   +-- main listener  (HTTP, port from ZPAY_SERVER__BIND_ADDR)
-   |     /x402/v2/*
-   |     /mpp/v1/*       (feature-gated; off in v1)
-   |     /openapi.json
+   +-- main listener  (HTTP, ZPAY_SERVER__BIND_ADDR, default 127.0.0.1:8080)
+   |     /healthz
+   |     /x402/v2/accepts, /tip, /prepare, /settle, /verify
+   |     /x402/v2/payments/{payment_id}
+   |     /x402/v2/payments/{payment_id}/events   (SSE)
    |
-   +-- ops listener   (HTTP, port from ZPAY_OPS__BIND_ADDR)
+   +-- ops listener   (HTTP, ZPAY_OPS__BIND_ADDR, default 127.0.0.1:9295)
    |     /healthz
    |     /readyz
    |     /metrics
    |
-   +-- zally Wallet   (in-process; operator-owned seed)
-   +-- libSQL conn    (zpay-store)
-   +-- zinder client  (gRPC; from zinder-client::RemoteChainIndex)
+   +-- libSQL conn    (zpay-store; prepared_tx + settlement_ledger)
+   +-- zinder client  (gRPC; broadcast, ChainEvents, tip, disclosure fetch)
 ```
 
 The two listeners are deliberately separate. The main listener is public
-(exposed by Railway / Cloudflare / whatever fronts the deployment); the
-ops listener binds to a loopback or private network and is never exposed
-externally. Metrics and readiness probes are not auth-gated; they are
-private by deployment, not by code.
+(fronted by Railway, Cloudflare, or whatever terminates TLS); the ops
+listener binds to loopback or a private network and is never exposed
+externally. `/metrics` and `/readyz` are not auth-gated; they are private by
+deployment, not by code.
 
-## Readiness state machine
+## Readiness
 
-`/readyz` returns a typed `Readiness` shape:
+`GET /readyz` on the ops listener probes the chain plane and the store, then
+returns HTTP 200 with `status: ready` or HTTP 503 with `status: not_ready`.
+The body:
 
 ```json
 {
   "status": "ready",
-  "started_at_unix_seconds": 1748212812,
-  "current_capabilities": ["x402.v2.accepts", "x402.v2.prepare", ...],
   "dependencies": {
-    "zinder": { "reachable": true, "tip_height": 3217845, "derive_lag_blocks": 1 },
-    "store": { "reachable": true, "schema_version": 1 },
-    "compliance_jwks": { "reachable": true, "cached_at_unix_seconds": 1748212808 }
-  }
+    "chain": {
+      "status": "ready",
+      "live_probe": "ok",
+      "visible_tip_height": 3217845,
+      "settled_tip_height": 3217842,
+      "cache_age_seconds": 4
+    },
+    "store": { "status": "ready", "probe": "ok" }
+  },
+  "listeners": { "app": "127.0.0.1:8080", "ops": "127.0.0.1:9295" }
 }
 ```
 
-States:
+Evaluation:
 
-- `starting`: process is up; dependencies not yet probed. HTTP 503.
-- `degraded`: at least one optional dependency unreachable (e.g.,
-  compliance JWKS) but core capabilities work. HTTP 200, `status:
-  degraded` and `current_capabilities` filtered to the working set.
-- `ready`: all configured capabilities are live. HTTP 200, `status: ready`.
-- `draining`: SIGTERM received; new requests rejected, in-flight
-  requests allowed to complete up to the drain deadline. HTTP 503.
-- `stopped`: process shut down. (Not observable; the listener is gone.)
+- **store.** A liveness read against the prepared-tx store. On failure,
+  `store.status` is `not_ready`, `store.probe` carries the error string, and
+  the overall status is `not_ready`.
+- **chain.** With a chain plane configured (`ZPAY_CHAIN_SOURCE_URL` set), a
+  live tip read runs under a 2-second timeout: `live_probe` is `ok`,
+  `unreachable`, or `timeout`. The chain reads `ready` only when the live
+  probe is `ok` **and** the shared chain-status cache is fresh, meaning
+  `cache_age_seconds` is at or under 180 (three 60-second poll intervals).
+  With no chain plane configured, `chain.status` and `live_probe` are
+  `not_configured` and the chain does not gate readiness.
 
-Cause enum for `degraded`:
-
-- `Reason::IndexerUnreachable`
-- `Reason::StoreUnreachable`
-- `Reason::SchemaMigrationPending`
-- `Reason::ComplianceJwksUnreachable`
-- `Reason::ChainStale`
-- `Reason::CapabilityUnavailable { capability: String }`
+`visible_tip_height`, `settled_tip_height`, and `cache_age_seconds` come from
+the shared chain view the confirmation poll and the chain-event subscription
+refresh; they are `null` before the first chain read. A dead poll loop
+surfaces as a growing `cache_age_seconds` even while the live probe still
+succeeds, which is the signal an operator alerts on.
 
 ## Ops listener endpoints
 
 | Path | Method | Response | Purpose |
 |------|--------|----------|---------|
-| `/healthz` | GET | 200 with `{ status: "alive", started_at_unix_seconds }` | Liveness; never 503 unless the process is broken. |
-| `/readyz` | GET | 200 or 503 with `Readiness` body | Dependency readiness. |
-| `/startupz` | GET | 200 once startup completes, 503 before | Startup probe (k8s convention). |
-| `/metrics` | GET | 200 with Prometheus text format | Metrics for scraping. |
-| `/diagnostics` | GET | 200 with redacted config + capability status | Operator self-check; redacts all secrets. |
+| `/healthz` | GET | 200, `{"status":"alive"}` | Liveness; answers whenever the process runs. |
+| `/readyz` | GET | 200 or 503 with the JSON above | Dependency readiness. |
+| `/metrics` | GET | 200, Prometheus text (`text/plain; version=0.0.4; charset=utf-8`) | Metrics for scraping. |
 
-The diagnostics endpoint is the same shape as `--print-config` but
-returns it as JSON over HTTP rather than to stdout.
+`/healthz` is also mounted on the main listener so a platform health probe
+(Railway, Kubernetes, an ALB) that reaches only the public port gets a 200
+from a healthy process.
+
+## Metrics
+
+The Prometheus recorder is process-global; `/metrics` renders it. Counters
+carry bounded label sets so cardinality stays fixed.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `zpay_requests_total` | counter | `route`, `outcome` (`success`, `client_error`, `server_error`, `other`) |
+| `zpay_broadcast_outcomes_total` | counter | `kind` (`accepted`, `duplicate`, `invalid_encoding`, `rejected`, `unknown`) |
+| `zpay_confirmation_updates_total` | counter | `outcome` (`mined`, `in_mempool`, `not_found`, `conflicting_chain`, `other`) |
+| `zpay_reorg_downgrades_total` | counter | `source` (`poll`, `chain_event`) |
+| `zpay_chain_reorgs_observed_total` | counter | none |
+| `zpay_sse_subscribers` | gauge | none |
+| `zpay_chain_visible_tip_height` | gauge | none |
+| `zpay_chain_settled_tip_height` | gauge | none |
+| `zpay_chain_status_cache_age_seconds` | gauge | none |
+
+The chain gauges resample every 15 seconds from the shared chain view,
+independent of the confirmation poll, so a stalled poll loop still shows a
+climbing `zpay_chain_status_cache_age_seconds`.
+
+`zpay_chain_reorgs_observed_total` increments on every `ChainReorged`
+envelope the chain-event subscription receives, before the ledger downgrade
+attempt. `zpay_reorg_downgrades_total{source="chain_event"}` only increments
+when that downgrade actually returns rows, so a reorg that reverts a range
+with no mined payments in it is still visible on the former counter even
+though the latter stays flat.
 
 ## Configuration
 
-zpay is configured by layering:
+zpay reads configuration from `ZPAY_*` environment variables, with `__` as
+the nested-field separator. There is no TOML config layer for the runtime
+itself; the only file input is the payee registry (`ZPAY_PAYEES__CONFIG_PATH`).
 
-1. Code defaults.
-2. The TOML config file (path from `--config`).
-3. Environment variables matching `ZPAY_*` with `__` for nested fields.
-4. CLI overrides (specific flags only; not all fields are flag-addressable).
+### Required
 
-Each later layer overrides the earlier ones. Production binaries strip
-every key starting with `ZPAY_TEST_` from their env read.
+| Var | Description |
+|-----|-------------|
+| `ZPAY_VERIFY__NETWORK` | `mainnet` or `testnet`. No default; an unset or blank value fails startup with `VerifyNetworkMissing`. Pins the SLIP-44 coin type personalizing the ZIP-311 `BLAKE2b` digest the local verifier reconstructs. Regtest deployments pin to `testnet` (regtest carries no distinct SLIP-44 number). See [ADR-0007](../adrs/0007-local-zip311-verifier.md). |
 
-### Required env vars (production)
-
-| Var | Default | Description |
-|-----|---------|-------------|
-| `ZPAY_NETWORK` | none | `mainnet`, `testnet`, or `regtest`. Required. |
-| `ZPAY_VERIFY__NETWORK` | none | `mainnet` or `testnet`. Required. Pins the SLIP-44 coin type that personalizes the ZIP-311 `BLAKE2b` digest the local verifier reconstructs. No default: an unset value fails startup with `StartupError::VerifyNetworkMissing`. Regtest deployments pin to `testnet` explicitly (regtest carries no distinct SLIP-44 number). See [ADR-0007](../adrs/0007-local-zip311-verifier.md). |
-| `ZPAY_SERVER__BIND_ADDR` | `127.0.0.1:8080` | Main HTTP listener. |
-| `ZPAY_OPS__BIND_ADDR` | `127.0.0.1:9295` | Ops listener. |
-| `ZPAY_CHAIN_SOURCE_URL` | none | zinder query endpoint. Required for broadcast. |
-| `ZPAY_WALLET__AGE_IDENTITY_TEXT` | none | Operator wallet age identity (sealed seed). Required to start. |
-| `ZPAY_STORE__URL` | `file:./zpay.libsql` | libSQL connection URL. |
-| `ZPAY_STORE__AUTH_TOKEN` | none | Turso auth token (required for remote URLs). |
-| `ZPAY_COMPLIANCE__JWKS_URL` | `https://app.zentity.xyz/api/auth/oauth2/jwks` | PoH-token JWKS endpoint. |
-| `ZPAY_COMPLIANCE__ACCEPTED_ISSUERS` | `["zentity"]` | Allowlist of `iss` claims. |
-| `RUST_LOG` | `zpay=info` | tracing-subscriber filter. |
-
-### Optional env vars
+### Networking and stores
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `ZPAY_SERVER__TLS__CERT_PATH` | none | TLS certificate path. Optional behind a load balancer. |
-| `ZPAY_SERVER__TLS__KEY_PATH` | none | TLS key path. |
-| `ZPAY_SERVER__CORS__ALLOWLIST` | `[]` | Origins allowed for browser clients. |
-| `ZPAY_NODE__FALLBACK_EXPLORER_HTTP_ADDR` | none | zexplorer fallback for confirmation oracle. |
-| `ZPAY_CACHE__DEFAULT_TTL_SECONDS` | `300` | Prepared-tx cache TTL. |
-| `ZPAY_TELEMETRY__FORMAT` | `json` | `json` or `pretty`. |
+| `ZPAY_SERVER__BIND_ADDR` | `127.0.0.1:8080` | Main HTTP listener. Invalid value fails startup. |
+| `ZPAY_OPS__BIND_ADDR` | `127.0.0.1:9295` | Ops listener. Invalid value fails startup. |
+| `ZPAY_NETWORK` | `regtest` | `mainnet`, `testnet`, or `regtest`. |
+| `ZPAY_CHAIN_SOURCE_URL` | none | zinder gRPC endpoint. Unset disables broadcast (`/settle` returns 502) and settlement reconciliation. |
+| `ZPAY_EXPLORER_URL` | none | zinder explorer-plane gRPC endpoint for ZIP-311 disclosure fetch. Unset makes `/verify` report `chain_presence: oracle_unavailable`. |
+| `ZPAY_PAYEES__CONFIG_PATH` | none | TOML payee registry. Unset starts with an empty registry. A read or parse failure fails startup. |
+| `ZPAY_STORE__BACKEND` | `libsql` | `libsql` or `memory`. Any other value fails startup. |
+| `ZPAY_STORE__URL` | `file:./zpay.libsql` | libSQL connection URL. `file:<path>` for local SQLite, `libsql://<host>` for Turso. |
+| `ZPAY_STORE__AUTH_TOKEN` | none | Turso auth token (remote URLs only). |
+| `ZPAY_STATIC_TIP_FALLBACK` | `4000000` | Chain-tip fallback used only when no chain plane is configured. Invalid value fails startup. |
+| `ZPAY_FINALITY_DEPTH` | `3` | Confirmation count at which `Mined` becomes `Final`. Raise for mainnet. Invalid value fails startup. |
 
-### CLI subcommands
+### DPoP host pinning
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ZPAY_EXPECTED_HOST` | none | Host the DPoP `htu` canonicalization pins against. Unset emits a startup `WARN` and falls back to the inbound `Host` header. |
+| `ZPAY_EXPECTED_SCHEME` | `https` when a host is pinned, else `http` | Scheme the DPoP verifier expects. |
+
+### Rate limiting and CORS
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ZPAY_RATE_LIMIT__PER_JKT_PER_MINUTE` | `120` | Per-DPoP-`jkt` budget per fixed 60-second window on the authenticated routes. `0` disables this dimension. A present-but-unparseable value fails startup. |
+| `ZPAY_RATE_LIMIT__PER_IP_PER_MINUTE` | `600` | Per-client-IP budget per fixed 60-second window on the unauthenticated routes. `0` disables. Unparseable value fails startup. |
+| `ZPAY_RATE_LIMIT__TRUST_FORWARDED_HEADERS` | off | Truthy (`1`, `true`, `yes`) lets the per-IP dimension key on `X-Forwarded-For`/`X-Real-IP`. Only enable behind a reverse proxy that terminates every inbound connection and sets the header itself; a direct caller controls those headers otherwise and can bypass the limiter. |
+| `ZPAY_SERVER__CORS__ALLOWLIST` | none | Comma-separated exact origins allowed for browser clients. Empty or unset emits no CORS headers, so cross-origin browser calls stay blocked. |
+
+The limiter is an in-memory fixed-window counter keyed by `jkt` or client IP.
+The client IP is read from the peer socket by default. Only when
+`ZPAY_RATE_LIMIT__TRUST_FORWARDED_HEADERS` is enabled does it prefer
+`X-Forwarded-For` (leftmost hop) or `X-Real-IP`, falling back to the peer
+socket when neither header is present. A limited request returns HTTP 429
+with a `Retry-After` header and the standard problem envelope (see
+[error-vocabulary.md](../reference/error-vocabulary.md)).
+
+### Dev-only
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ZPAY_ALLOW_DEMO_PAYEE` | off | Truthy (`1`, `true`, `yes`) bypasses the placeholder-receiver boot gate for dev and compose stacks. Emits a `WARN` per offending payee. Never set in production. |
+| `RUST_LOG` | `zpay=info` | `tracing-subscriber` env filter. |
+
+## CLI
+
+`zpay-runtime` takes a single flag and no subcommands:
 
 ```text
-zpay-runtime --help
-zpay-runtime --config /etc/zpay/config.toml
-zpay-runtime --print-config        # redacts every secret as [REDACTED]
-zpay-runtime --describe-capabilities
-zpay-runtime --check-config        # validates without starting the listener
+zpay-runtime                 # start both listeners
+zpay-runtime --print-config  # log the resolved bind addresses and network
+                             # with secrets redacted as [REDACTED], then exit
 ```
+
+There is no `--describe-capabilities`, `--check-config`, `--config`,
+`/startupz`, or `/diagnostics`. Startup validation happens by starting: every
+required or invalid env value fails the boot with a typed `StartupError`.
 
 ## Secrets
 
-zpay-owned processes receive secrets through canonical typed config
-fields populated by `ZPAY_*` variables or the operator-provided TOML
-layer. Paired `_path` companion env vars are banned for any secret:
-
-- Operator wallet age identity: via `ZPAY_WALLET__AGE_IDENTITY_TEXT`,
-  never `*__PATH`. The operator can paste the age identity into a
-  Railway / Kubernetes secret directly.
-- Turso auth token: via `ZPAY_STORE__AUTH_TOKEN`.
-- Bearer-key allowlist hashes: stored in libSQL, derived from raw keys
-  that are entered via the operator CLI (`zpay-ops bearer add`).
-
-`--print-config`, `/diagnostics`, every log line, and every error
-message redact secrets via `secrecy::Secret<T>` and a single
-`redact_for_humans()` function. No secret ever appears in stdout, in
-the Prometheus text format, or in a structured tracing field.
-
-## Live-test gates
-
-T3 tests are double-gated:
-
-1. Compile-time: `#[ignore = LIVE_TEST_IGNORE_REASON]` on every T3 test.
-2. Runtime: `zpay_testkit::live::require_live()` reads `ZPAY_TEST_LIVE`.
-
-Mainnet T3 tests additionally require `ZPAY_TEST_ALLOW_MAINNET=1`.
-Production binaries do not link `zpay-testkit`; the gates exist as a
-defensive layer in case a test accidentally lands in a non-test binary.
+zpay-runtime holds no wallet seed and no compliance credential. The only
+secret it reads is the Turso auth token (`ZPAY_STORE__AUTH_TOKEN`).
+`--print-config` redacts it as `[REDACTED]`; it never appears in the
+Prometheus text or a tracing field.
 
 ## Tracing
 
-`tracing-subscriber` with JSON output in production. Span fields that
-must appear on every relevant span:
-
-- `network` (always)
-- `merchant_id` (when present)
-- `payment_id` (when present)
-- `txid` (when present)
-- `dpop_jkt` (when present)
-- `capability` (on capability-gated routes)
-- `agent_id` (when an `agent_assertion` is presented)
-
-PoH token JTI, raw bearer tokens, age identities, and wallet seed bytes
-are forbidden as span fields.
+`tracing-subscriber` with JSON output. The filter comes from `RUST_LOG`,
+defaulting to `zpay=info`. The main router carries a `tower_http` trace layer.
 
 ## Shutdown
 
-SIGTERM and SIGINT both trigger graceful shutdown:
+`SIGTERM` and `SIGINT` both trigger graceful shutdown: the listeners stop
+accepting new connections and in-flight requests are allowed to complete
+before the process exits. The background tasks (prepared-tx sweeper,
+confirmation poll, chain-event subscription, chain-status sampler) are
+detached and end with the process.
 
-1. Listener stops accepting new connections.
-2. In-flight requests have `ZPAY_SERVER__DRAIN_TIMEOUT_SECONDS` (default
-   30) to complete.
-3. libSQL connections flush their write buffer.
-4. The zinder subscription stream is closed; in-flight settlements
-   complete before the process exits.
+## Live validation
 
-The `cancel_on_terminating_signal(CancellationToken)` helper from
-`zpay-runtime` drives this; it mirrors zinder's shared pattern.
+`zpay-e2e` is a standalone binary (not a test gate) that drives the full
+lifecycle against a running `zpay-runtime` plus zinder: `/prepare`, compose
+the protocol memo, propose and sign through a real zally wallet, POST the
+signed bytes to `/settle`, then poll `/payments/{payment_id}` until the
+confirmation oracle observes the transaction mine. Funding is out-of-band
+through fauzec; the harness prints a u-address and exits when the balance is
+too low.
 
 ## Operational invariants
 
-- One process per deployment unit. zpay does not coordinate across
-  instances; horizontal scaling requires sticky routing on `payment_id`
-  to avoid cache misses.
-- Cache misses are not fatal: a missing `payment_id` returns
-  `PaymentNotFound`, and the agent re-prepares. Idempotency keys
-  protect against double-spend on the retry.
+- One process per deployment unit. zpay does not coordinate across instances;
+  horizontal scaling requires sticky routing on `payment_id` to avoid cache
+  misses, and the rate limiter is per-process.
+- Cache misses are not fatal: a missing `payment_id` reports `never_issued`
+  or an expired status, and the agent re-prepares. Idempotency keys protect
+  against double-spend on the retry.
 - libSQL is the only persistent state. Losing the database loses the
   prepared-tx cache (recoverable: agents re-prepare) and the settlement
-  ledger (unrecoverable: requires reconciliation against zinder).
-  Operators back up libSQL.
+  ledger (requires reconciliation against zinder). Operators back up libSQL.

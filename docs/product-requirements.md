@@ -295,6 +295,13 @@ Capability: `broadcast.oracle.confirm_v1`.
 
 ### Compliance verification (R-COMPL-*)
 
+Where compliance authority lives, and why zpay runs no Proof-of-Human gate at
+`/settle`, is decided in
+[ADR-0008](adrs/0008-compliance-authority-placement.md). For the agent-signed
+path, spend-policy authority is the identity issuer's (Proposal-0003
+D-1/D-2); merchant-side PoH validation is future scope for the external-wallet
+path only. The three requirements below resolve to that ADR.
+
 #### R-COMPL-1. PoH token verification
 
 Now: nothing exists.
@@ -447,8 +454,12 @@ changes to `zpay-core`.
 
 ### M5: Production posture
 
-Observability dashboards, runbooks, rate-limit tuning, ZIP-311 verifier
-hardening. Bearer-key rotation runbook. mainnet readiness review.
+Shipped: a Prometheus `/metrics` exposition and a dependency-aware `/readyz`
+on the ops listener; in-memory fixed-window rate limiting keyed per DPoP
+`jkt` and per client IP; an exact-origin CORS allowlist; and operator
+runbooks (Railway deploy, reorg recovery, wallet seed). Remaining: ZIP-311
+amount reconciliation, observability dashboards, and the mainnet readiness
+review.
 
 ## Testing Decisions
 
@@ -495,8 +506,9 @@ PRD inherits them and does not relitigate them here.
 1. **MPP spec maturity** at Phase 5 ship time. If the draft is still
    shifting, defer M4 and ship M1-M3 with `zpay-mpp` mounted but
    feature-disabled.
-2. **Rate-limit primitive**. Tower's governor crate vs hand-rolled Redis
-   counters vs zpay-store's libSQL counters. M5 decision.
+2. **Rate-limit primitive**. Resolved: an in-memory fixed-window counter
+   keyed per DPoP `jkt` and per client IP, with a per-process opportunistic
+   sweep. No external store; horizontal scaling limits per process.
 3. **OpenAPI tool**: utoipa (chosen) vs aide. Switch criterion: if utoipa
    forces hand-written schemas for nested generics in `zpay-core` types,
    reconsider aide.

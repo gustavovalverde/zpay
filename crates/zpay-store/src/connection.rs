@@ -111,6 +111,26 @@ impl StoreConnection {
         }
     }
 
+    /// Begin a transaction in the given [`libsql::TransactionBehavior`].
+    ///
+    /// For a read-then-conditional-write sequence that must observe its own
+    /// prior writes before committing, `query`/`execute` (one statement,
+    /// autocommit each) are not enough. This does not retry on a `stream not
+    /// found` error: a multi-statement transaction cannot safely resume
+    /// after a reconnect mid-sequence, so that error propagates to the
+    /// caller instead.
+    pub async fn transaction_with_behavior(
+        &self,
+        behavior: libsql::TransactionBehavior,
+    ) -> Result<libsql::Transaction, libsql::Error> {
+        self.inner
+            .connection
+            .read()
+            .await
+            .transaction_with_behavior(behavior)
+            .await
+    }
+
     /// Execute a transactional batch script (multiple statements in
     /// one transaction). Same retry contract as [`Self::query`].
     pub async fn execute_transactional_batch(&self, sql: &str) -> Result<(), libsql::Error> {

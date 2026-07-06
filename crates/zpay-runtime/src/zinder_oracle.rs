@@ -9,9 +9,10 @@
 //! channel-self-heal pattern are inherited from `RemoteChainIndex`.
 
 use zinder_client::{
-    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
-    TransactionId, TxStatus,
+    ChainIndex, EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex,
+    RemoteOpenOptions, TransactionId, TxStatus,
 };
+use zpay_core::chain_status::ChainStatusView;
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome, OracleError};
 
 /// Production confirmation oracle backed by zinder's `WalletQuery.TransactionById`.
@@ -100,6 +101,18 @@ impl ConfirmationOracle for ZinderConfirmationOracle {
             )]
             TxStatus::NotFound | _ => Ok(ConfirmationOutcome::NotFound),
         }
+    }
+
+    async fn chain_status(&self) -> Result<ChainStatusView, OracleError> {
+        let tip = self
+            .chain
+            .chain_value_pools_at_tip()
+            .await
+            .map_err(|err| map_indexer_error(&err))?;
+        Ok(ChainStatusView {
+            visible_tip_height: Some(u64::from(tip.chain_epoch.visible_tip_height.value())),
+            settled_tip_height: Some(u64::from(tip.chain_epoch.settled_tip_height.value())),
+        })
     }
 }
 

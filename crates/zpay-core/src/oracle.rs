@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::chain_status::ChainStatusView;
+
 /// Outcome returned by [`ConfirmationOracle::fetch_confirmations`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -63,6 +65,14 @@ pub trait ConfirmationOracle: Send + Sync {
         &self,
         transaction_id: &str,
     ) -> impl Future<Output = Result<ConfirmationOutcome, OracleError>> + Send;
+
+    /// Fetch the current chain view: the visible tip and the settled tip.
+    ///
+    /// The confirmation poll reads this once per tick to refresh the
+    /// shared [`ChainStatusView`] cache, decide which mined rows are past
+    /// the settled tip (and so immutable), and compute the settled flag on
+    /// published snapshots.
+    fn chain_status(&self) -> impl Future<Output = Result<ChainStatusView, OracleError>> + Send;
 }
 
 use std::future::Future;

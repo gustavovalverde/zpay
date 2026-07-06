@@ -62,11 +62,13 @@ User       demo-rp BFF      zentity (issuer)     zspend (wallet)     zpay       
 
 **How to apply.** `intent_hash = SHA-256("zentity.payauth.v1" || chain_namespace || chain_reference || recipient_caip10 || amount_value_be || amount_unit || payment_id || expiry_height_be)`. Both issuer and wallet parse first, hash second. The hash is versioned on the wire as `"v1:sha256:<base64url>"`. Conformance vectors ship in `zally-testkit`, and a TypeScript port lives in `apps/web/src/lib/agents/intent-hash.ts` with the same vectors as a test.
 
-### D-5: Audience binding is a JWK thumbprint, not a URL
+### D-5: Audience binding is an absolute-URI wallet identity, not a network URL
 
-**Why.** A URL-typed `aud` lets a compromised BFF or DNS path silently re-target a token at an attacker-controlled host. A wallet fleet with multiple instances under one DNS name has no per-instance identity unless the key is the identity.
+**Why.** A network-URL `aud` (an `https://host` the token is "for") lets a compromised BFF or DNS path silently re-target a token at an attacker-controlled host. A wallet fleet with multiple instances under one DNS name has no per-instance identity unless the key is the identity.
 
-**How to apply.** Each wallet instance registers its `aud` JWK thumbprint with the issuer per environment. The issuer mints `aud = <wallet_jkt>`. The wallet rejects any token whose `aud` does not equal its own thumbprint. `wallet_endpoint` in `/prepare` is routing metadata only; it carries no security weight.
+**How to apply.** Each wallet instance has an absolute-URI identity that embeds its key, `urn:zentity:wallet:<jkt>`, and registers it with the issuer per environment. The issuer mints `aud = urn:zentity:wallet:<jkt>` through an RFC 8707 resource indicator (the only seam that reaches `aud`; the issuer is an RFC 8707-conformant authorization server, so the value MUST be an absolute URI and a bare thumbprint cannot traverse it). A URN names no host, so DNS or BFF compromise cannot re-target the token: the key is still the identity. The wallet rejects any token whose `aud` does not equal its own URI. Presenter binding is a separate concern carried by `cnf{jkt}` (RFC 7800 / RFC 9449): `aud` says which wallet the token is for, `cnf` proves who may present it. `wallet_endpoint` in `/prepare` is routing metadata only; it carries no security weight.
+
+**Revision (2026-06-17).** The audience moved from a bare JWK thumbprint to a `urn:zentity:wallet:<jkt>` URN. The security property is unchanged (the key, not a network host, is the identity); the encoding changed because the issuer is now an RFC 8707-conformant AS that reaches `aud` only through a resource indicator, which must be an absolute URI. A bare thumbprint is warn-skipped at resource seed and rejected with `invalid_target` at mint, so payment tokens cannot mint at all until the audience is a URI. Env `ZSPEND_AUDIENCE_THUMBPRINT` became `ZSPEND_AUDIENCE`; discovery field `audience_thumbprint` became `audience`.
 
 ### D-6: Tokens are single-use, short-lived, and revocation is delta-streamed
 
@@ -108,7 +110,7 @@ User       demo-rp BFF      zentity (issuer)     zspend (wallet)     zpay       
 
 **Why.** An agent's first call should be discovery, not a guess that fails with `dpop_proof_invalid`. PRC-7807 with a type URL alone is terse; agents need a remediation hint to recover without doc-diving.
 
-**How to apply.** `GET /.well-known/wallet-configuration` returns `supported_formats`, `supported_schemes`, `intent_hash_algorithm`, `jwks_uri_required`, and `audience_thumbprint`. `GET /v1/capabilities` (on the wallet, with the active access token) projects the inbound RAR as `{ payment_id, chain, recipient, max_amount, expires_at, remaining_uses }`. Every 401 and 403 error body carries `remediation: { action: "refresh_dpop" | "reauth_ciba" | "request_new_authorization", docs_url, ciba_endpoint?, authorize_endpoint? }`. Every retryable error carries `Retry-After` with backoff guidance.
+**How to apply.** `GET /.well-known/wallet-configuration` returns `supported_formats`, `supported_schemes`, `intent_hash_algorithm`, `jwks_uri_required`, and `audience`. `GET /v1/capabilities` (on the wallet, with the active access token) projects the inbound RAR as `{ payment_id, chain, recipient, max_amount, expires_at, remaining_uses }`. Every 401 and 403 error body carries `remediation: { action: "refresh_dpop" | "reauth_ciba" | "request_new_authorization", docs_url, ciba_endpoint?, authorize_endpoint? }`. Every retryable error carries `Retry-After` with backoff guidance.
 
 ### D-13: Seed posture is reported, not assumed
 
@@ -146,7 +148,7 @@ User       demo-rp BFF      zentity (issuer)     zspend (wallet)     zpay       
 | `payer_flow` | `"agent" \| "external" \| "operator_custodied"` open string | `payee_policy.payer_flow` | UI affordance; open vocabulary for forward compat. |
 | `act.sub` | JWK thumbprint (Ed25519) | access token claim | Pairwise agent actor id. |
 | `cnf.jkt` | JWK thumbprint | access token claim | DPoP key binding. |
-| `aud` | JWK thumbprint of wallet instance | access token claim | Wallet identity (D-5). |
+| `aud` | `urn:zentity:wallet:<jkt>` URI of wallet instance | access token claim | Wallet identity (D-5). |
 | `jti` | UUIDv7 string | access token claim, `usage_ledger` PK | Single-use spend identifier (D-8). |
 | `Submitter` | Rust trait | zally (canonical); consumed by zpay and zspend | Role: hand bytes to the chain. |
 | `SignedPayload` | Rust struct | zally | Wire envelope around signed bytes; chain-neutral. |
@@ -173,7 +175,7 @@ PRC-7807 envelope, `type: https://errors.zentity.xyz/wallet/<code>`, top-level `
 | 403 | `intent_mismatch` | false | `intent_hash` does not match the parsed request. |
 | 403 | `recipient_not_allowed` | false | RAR allowlist miss (distinct from `intent_mismatch` for telemetry). |
 | 403 | `amount_exceeded` | false | RAR cap miss. |
-| 403 | `audience_mismatch` | false | Token `aud` does not match wallet thumbprint. |
+| 403 | `audience_mismatch` | false | Token `aud` does not match wallet audience URI. |
 | 409 | `token_already_consumed` | false | Replay of `jti` with a different `intent_hash`. |
 | 410 | `authorization_expired` | false | RAR `expires_at` passed. |
 | 422 | `insufficient_funds` | false | Wallet balance below `amount.value`. |
@@ -189,7 +191,7 @@ PRC-7807 envelope, `type: https://errors.zentity.xyz/wallet/<code>`, top-level `
 
 | Method | Path | Auth | Request | Response |
 | --- | --- | --- | --- | --- |
-| GET | `/.well-known/wallet-configuration` | none | n/a | `{ supported_formats, supported_schemes, intent_hash_algorithm, audience_thumbprint, jwks_uri }` |
+| GET | `/.well-known/wallet-configuration` | none | n/a | `{ supported_formats, supported_schemes, intent_hash_algorithm, audience, jwks_uri }` |
 | GET | `/v1/capabilities` | DPoP-bound `at+jwt` | n/a | RAR projection: `{ payment_id, chain, recipient, max_amount, expires_at, remaining_uses }` |
 | POST | `/v1/payments/sign` | DPoP-bound `at+jwt` | `{ payment_request: { scheme, value } }` | `{ signed_payload }` |
 | GET | `/v1/payments/{tx_id}` | DPoP-bound `at+jwt` | n/a | Read-through to chain backend for status. |
@@ -326,7 +328,7 @@ Two new crates live inside the existing zpay workspace, not a new repo. The faci
 - `crates/zspend-runtime`:
   - Binary. Axum routes per §5.1; tracing-subscriber JSON logs; `Retry-After` middleware.
   - Wires `SeedSealing` (`age` for dev, KMS adapter for prod), libSQL `UsageLedger` (D-8), `zally::Wallet`.
-  - `zspend-runtime init` (seal a dev seed, print wallet `aud` thumbprint to register with the issuer) and `zspend-runtime serve`.
+  - `zspend-runtime init` (seal a dev seed, print the wallet `aud` URI to register with the issuer) and `zspend-runtime serve`.
 
 Workspace-level additions: `Dockerfile.zpay` and `Dockerfile.zspend` (split from the current single `Dockerfile`); `docker-compose.yml` gains a `zspend` service alongside the existing `zpay` service. Railway deploys each as its own service against the same repo, with separate `railway.toml` profiles or per-service env overrides. Port convention mirrors fauzec (testnet base + ops offset) so testnet and mainnet wallet instances coexist on one host.
 
@@ -393,7 +395,7 @@ Phases reference decisions by D-N.
 
 ### Phase 4: zspend-runtime binary
 
-**Work.** Scaffold `crates/zspend-core` (service-internal: `PaymentAuthorization`, `AccessTokenVerifier`, `JwksVerifier`, `DpopVerifier`, `UsageLedger`, `RevocationCache`, `SigningPolicy`, PRC-7807 encoder) and `crates/zspend-runtime` (binary with axum routes) inside the zpay workspace. Add `Dockerfile.zspend` and the `zspend` service to `docker-compose.yml`. Implement `/v1/payments/sign`: DPoP verify, JWKS verify with forced refetch on `kid` miss, `aud` thumbprint check (D-5), parse + canonicalize `payment_request`, recompute `intent_hash`, compare to RAR, single-use `jti` claim via `INSERT ... ON CONFLICT` against shared `usage_ledger` (D-8), sign via `zally::Wallet::sign_pczt`. Implement `/.well-known/wallet-configuration` and `/v1/capabilities` (D-12). `age` `SeedSealing` impl with `posture() = Dev`. libSQL `UsageLedger`. Revocation poller with hard-capped interval (D-6). PRC-7807 error encoder with `remediation` and `Retry-After`.
+**Work.** Scaffold `crates/zspend-core` (service-internal: `PaymentAuthorization`, `AccessTokenVerifier`, `JwksVerifier`, `DpopVerifier`, `UsageLedger`, `RevocationCache`, `SigningPolicy`, PRC-7807 encoder) and `crates/zspend-runtime` (binary with axum routes) inside the zpay workspace. Add `Dockerfile.zspend` and the `zspend` service to `docker-compose.yml`. Implement `/v1/payments/sign`: DPoP verify, JWKS verify with forced refetch on `kid` miss, `aud` URI check (D-5), parse + canonicalize `payment_request`, recompute `intent_hash`, compare to RAR, single-use `jti` claim via `INSERT ... ON CONFLICT` against shared `usage_ledger` (D-8), sign via `zally::Wallet::sign_pczt`. Implement `/.well-known/wallet-configuration` and `/v1/capabilities` (D-12). `age` `SeedSealing` impl with `posture() = Dev`. libSQL `UsageLedger`. Revocation poller with hard-capped interval (D-6). PRC-7807 error encoder with `remediation` and `Retry-After`.
 
 **Validation gate.** End-to-end test in CI: spawn `zspend-runtime` with a sealed dev seed, mint a token against a local zentity, sign a PCZT, round-trip through zpay-runtime's `/settle`, assert broadcast against a mock zinder. Replay test: same `jti` returns the cached `signed_payload`; `jti` with different `intent_hash` returns `token_already_consumed`. Stale revocation test: wallet returns `revocation_cache_stale` after the hard cap.
 
@@ -449,7 +451,7 @@ Phases reference decisions by D-N.
 2. **Deployment target for `zspend`.** Railway (matches fauzec) versus a dedicated host with KMS attachment. The KMS adapter is sealed-only in v1; the choice of provider (AWS KMS, GCP KMS, HashiCorp Vault) shapes the adapter trait impl.
 3. **Hard cap on revocation poll interval.** Proposal is 30s. Tighter is safer; looser reduces issuer load. Confirm the value baked into `zspend-core` config validation.
 4. **`act.sub` storage and pairing.** The issuer's pairwise table already exists. Do we expose `act.sub` rotation in the dashboard, or rotate only on agent session reissue.
-5. **`zspend` audience thumbprint registration.** Manual registration via the rp-admin UI versus an out-of-band CLI. Both are workable; pick before Phase 4.
+5. **`zspend` audience URI registration.** Manual registration via the rp-admin UI versus an out-of-band CLI. Both are workable; pick before Phase 4.
 6. **Breaking-change posture for zpay's `/settle`.** No integrators today, so the break is free. Confirm there are no downstream copies before deleting `raw_tx_hex`.
 7. **`payee_policy.payer_flow` registry.** Open string with documented values (`"agent"`, `"external"`, `"operator_custodied"`) versus a closed enum. Open is forward-compatible; closed catches typos.
 8. **`age` seed format for dev.** Standard `age` identity sidecar (fauzec pattern) versus a zspend-specific extension. Reuse fauzec verbatim unless a concrete reason emerges.
@@ -485,3 +487,15 @@ A two-repo code review ahead of Slice 1 (the BFF→wallet trust boundary) found 
 - **D-3 (PCZT) stays the committed target, on a later wire slice.** The auth boundary ships first on the current `raw-zcash-v5` wire (the intent-hash binds the parsed tuple, not the bytes, so the verifiers are format-agnostic). The flip to `pczt-v1` (extractor-ready PCZT + zpay Extractor) is the next wire slice, gated on zally `construct_pczt`/`sign_pczt`. Note: the sighash finding (zentity `docs/findings/2026-06-08-pczt-updater-sighash.md`) showed expiry must be fixed before `IoFinalizer` inside the wallet, which narrows but does not remove D-3's payoff.
 - **D-4 (parse parity).** Add a second conformance corpus keyed on raw ZIP-321 URIs (`{uri → expected_tuple → expected_intent_hash}`), exercising percent-encoding variants, parameter reordering, and the empty/multi-payment rejection cases. The existing vector locks the hash over a pre-parsed tuple and does not cover the parser divergence the threat model names.
 - **KMS sealing (Phase 7) deferred.** v1 ships the `age` file seal plus the D-13 posture gate (refuse `Dev` posture unless `ZSPEND_ALLOW_DEV_SEED=1`) and posture on `/readyz`. The `zspend-keys-kms` crate is additive on the existing `SeedSealing::posture()` shape when a non-local deploy and a provider are chosen.
+
+### 2026-07-05: Wallet runtime shipped (durable ledger, posture gate, real txid, ops surface)
+
+`zspend-runtime` ships as a serving binary with the auth boundary on the
+current wire. This entry records what landed; the PCZT wire flip is the one
+committed target still ahead.
+
+- **D-8 shipped as a durable single-file libSQL ledger.** The single-use `jti` ledger is `usage_ledger`, addressed by `ZSPEND_LEDGER_URL` (default a `usage-ledger.db` file beside `ZSPEND_STORAGE_PATH`), with its migration at `crates/zspend-runtime/migrations/0001_initial.sql`. The atomic claim is `INSERT ... ON CONFLICT (jti) DO NOTHING`, write-then-sign; a still-pending reservation reclaims after two minutes, and a completed row replays its stored response on an identical `jti` retry. A remote `libsql://` URL requires `ZSPEND_LEDGER_AUTH_TOKEN`; startup fails closed with a typed error instead of opening an unauthenticated connection when the token is absent.
+- **D-13 posture gate shipped.** Startup refuses a `Dev`-posture seal unless `ZSPEND_ALLOW_DEV_SEED=1` (`StartupError::DevSeedPostureRefused`). `/readyz` reports the at-rest seal posture (`dev` / `hsm` / `kms`) and the operational posture; `/metrics` exposes `zspend_seal_posture_info{posture}`. The seed ceremony: `zspend-runtime init` reveals the generated BIP-39 mnemonic exactly once on the terminal (written straight to stdout, never through the tracing pipeline), `init --restore` seals a seed derived from a mnemonic read on stdin, and `init --auto-provision` (used by `docker/start-zspend.sh` under `ZSPEND_ALLOW_AUTO_PROVISION=1`) seals a throwaway dev seed without revealing anything.
+- **`signed_payload.tx_id` is the wallet-computed txid.** The `/v1/payments/sign` envelope carries the wallet's own ZIP-244 identifier in canonical RPC byte order (`SendOutcome::signed.tx_id.to_rpc_hex()`), the form every explorer and downstream lookup expects.
+- **`/metrics` and a real `/readyz` shipped.** The wallet listener serves a Prometheus `/metrics` exposition and a dependency-aware `/readyz` (JWKS cache loaded, revocation cache fresh or disabled, seal posture, operational posture), matching the D-6 and D-13 readiness contract.
+- **D-3 (PCZT wire flip) remains the next wire slice.** The `/v1/payments/sign` response and `/settle` body still carry `signed_payload.format = "raw-zcash-v5"` with raw consensus-encoded bytes. Because the intent hash binds the parsed tuple rather than the bytes (D-4), the verifiers are format-agnostic and the flip to `pczt-v1` (extractor-ready PCZT plus a zpay Extractor stage, gated on zally `construct_pczt`/`sign_pczt`) is a self-contained wire slice, unchanged as the committed target.

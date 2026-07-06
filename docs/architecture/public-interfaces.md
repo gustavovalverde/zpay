@@ -24,17 +24,18 @@ When the order conflicts, DX wins.
 | Term | Meaning |
 |------|---------|
 | `zpay` | The product, the workspace, the brand. |
-| `zpay-core` | Library crate: domain types, prepare, oracle, broadcast, compliance, capability. |
-| `zpay-store` | Library crate: libSQL prepared-tx cache, settlement ledger, bearer-key-hash table. |
-| `zpay-x402` | Library crate: x402 v2 wire adapter. |
-| `zpay-mpp` | Library crate: MPP wire adapter. Feature-gated; off by default. |
+| `zpay-core` | Library crate: protocol-neutral domain types, prepare, oracle, broadcast, status projection, local ZIP-311 verifier, capability registry. |
+| `zpay-store` | Library crate: libSQL prepared-tx cache and settlement ledger. |
+| `zpay-x402` | Library crate: x402 v2 wire adapter (routes, DPoP middleware, rate limiter, SSE). |
 | `zpay-runtime` | Binary: composition root, Axum HTTP server, ops listener, env-driven config. |
-| `zpay-testkit` | Library crate (test-only): live-test gates, mocks, fixtures. |
+| `zpay-e2e` | Binary: end-to-end testnet validator that drives the full lifecycle against a running `zpay-runtime` plus zinder. |
+| `zspend-core` | Library crate: service-internal wallet auth types (`payment_authorization` RAR, PRC-7807 problem details, signing policy). |
+| `zspend-runtime` | Binary: the agent-bound wallet that signs under a bounded grant. zpay stays broadcaster-only. See [Proposal-0003](../proposals/0003-agent-wallet-production-architecture.md). |
 | Facilitator | The role zpay plays in a payment: prepare, hold, broadcast, confirm. |
-| Adapter | The wire-protocol translation layer (`zpay-x402`, `zpay-mpp`). |
+| Adapter | The wire-protocol translation layer (`zpay-x402`). |
 | Operator | The human running a zpay deployment. |
 | Agent | The machine calling zpay's HTTP surface. |
-| Merchant | The party accepting a payment, identified by `merchant_id`. |
+| Payee | The party accepting a payment, identified by `payee_id`. |
 | Payer | The human whose wallet signs the unbroadcast transaction. |
 
 ### Domain types
@@ -50,36 +51,59 @@ When the order conflicts, DX wins.
 | `Memo` | Up to 512 bytes per ZIP-302; carries a network tag and a protocol-version byte. |
 | `IdempotencyKey` | Caller-supplied opaque string; zpay re-uses zally's primitive. |
 | `PaymentId` | Server-issued ULID-shaped identifier; pairs with a `dpop_jkt`. |
-| `Preparation` | The result of `core::prepare::propose`: `{ payment_id, payment_uri, memo, expiry_height }`. |
-| `SettlementOutcome` | The result of `core::broadcast::submit`: `{ txid, broadcast_outcome, watch_id }`. |
-| `ConfirmationStatus` | `{ status, confirmations, block_height }` returned from the oracle. |
-| `PohToken` | A zentity-issued SD-JWT-VC carrying derived claims. |
-| `PohClaims` | `{ verification_level, verified, sybil_resistant, merchant_sub, aud, cnf_jkt, exp }`. |
-| `MerchantId` | Operator-assigned identifier (lowercase kebab-case). |
+| `Preparation` | The result of `core::prepare::propose`: `{ payment_id, payment_uri, memo_bytes, expiry_height, amount_zat }`. |
+| `SettlementOutcome` | The result of `core::settle::submit_settlement`: `{ payment_id, broadcast_outcome, watch_id }`. |
+| `PaymentStatusSnapshot` | Lifecycle projection returned by the status route and the SSE stream: `{ payment_id, status, intent_posture, broadcast_outcome, settled_at_unix_seconds, confirmation_count, mined_block_height, reorg_count, settled }`. |
+| `PaymentStatus` | `awaiting`, `broadcast`, `mined`, `final`, `failed`, `never_issued`, `expired`. Regression-capable; see [ADR-0009](../adrs/0009-settlement-lifecycle-and-finality.md). |
+| `PayeeId` | Operator-assigned identifier for the party accepting a payment. |
 | `WatchId` | Identifier returned by the confirmation oracle for a per-txid subscription. |
 | `EvidencePackHash` | 32-byte SHA-256 over zentity's `(policy_hash, proof_set_hash)` pair. |
 
 ### Wire surface (HTTP)
 
-`/x402/v2/*` and `/mpp/v1/*` (when feature-enabled) are the agent surfaces.
-Both follow the same lifecycle:
+`/x402/v2/*` is the agent surface. The mounted routes:
 
-| Step | x402 v2 path | MPP path | Capability |
-|------|--------------|----------|------------|
-| Advertise | `GET /x402/v2/accepts?merchant=…&resource=…` | `GET /mpp/v1/accepts` | `*.accepts` |
-| Prepare | `POST /x402/v2/prepare` | `POST /mpp/v1/prepare` | `*.prepare` |
-| Settle | `POST /x402/v2/settle` | `POST /mpp/v1/settle` | `*.settle` |
-| Verify | `POST /x402/v2/verify` | `POST /mpp/v1/verify` | `*.verify` |
-| Status | `GET /x402/v2/payments/{payment_id}` | `GET /mpp/v1/payments/{payment_id}` | `*.payments` |
+| Step | Path | Method |
+|------|------|--------|
+| Advertise | `/x402/v2/accepts?payee_id=…` | GET |
+| Chain tip | `/x402/v2/tip` | GET |
+| Prepare | `/x402/v2/prepare` | POST |
+| Settle | `/x402/v2/settle` | POST |
+| Verify | `/x402/v2/verify` | POST |
+| Status | `/x402/v2/payments/{payment_id}` | GET |
+| Status stream | `/x402/v2/payments/{payment_id}/events` | GET (SSE) |
 
-Operational surface:
+The party accepting a payment is a **payee**, identified by `payee_id`; the
+wire field and the registry key are `payee_id`. No MPP surface is mounted and
+no OpenAPI document is served.
+
+`GET /x402/v2/payments/{payment_id}` and the SSE snapshot carry the
+settlement lifecycle fields, including `reorg_count` (how many times a reorg
+returned the payment from a mined status to broadcast) and `settled` (true
+once the payment is at or below the chain's settled tip and no reorg can move
+it). See [ADR-0009](../adrs/0009-settlement-lifecycle-and-finality.md).
+
+The SSE stream closes after the first snapshot for which `settled` is true or
+the status is terminal (`failed`, `never_issued`, `expired`). A `final`
+snapshot that is not yet settled keeps the stream open, so a later reorg
+downgrade still reaches the subscriber.
+
+**Rate limiting.** DPoP-authenticated routes are limited per `jkt`,
+unauthenticated routes per client IP, each on a fixed 60-second window
+(`ZPAY_RATE_LIMIT__PER_JKT_PER_MINUTE` default 120,
+`ZPAY_RATE_LIMIT__PER_IP_PER_MINUTE` default 600; `0` disables a dimension).
+A limited request returns 429 with `Retry-After` and the problem envelope.
+
+**CORS.** `ZPAY_SERVER__CORS__ALLOWLIST` is a comma-separated list of exact
+origins; empty or unset emits no CORS headers.
+
+Operational surface (ops listener):
 
 | Path | Purpose |
 |------|---------|
-| `GET /healthz` | Process liveness (200 if the process is running). |
-| `GET /readyz` | Dependency readiness (200 if zinder and libSQL reachable, else 503). |
+| `GET /healthz` | Process liveness, `{"status":"alive"}`. Also mounted on the main listener. |
+| `GET /readyz` | Dependency readiness (chain plane plus store), 200 or 503. |
 | `GET /metrics` | Prometheus text format. |
-| `GET /openapi.json` | Machine-readable OpenAPI 3.1 wire contract. |
 
 ### Wire surface (gRPC)
 
@@ -98,30 +122,18 @@ x402.v2.prepare
 x402.v2.settle
 x402.v2.verify
 x402.v2.payments
-mpp.v1.accepts
-mpp.v1.prepare
-mpp.v1.settle
-mpp.v1.verify
-mpp.v1.payments
 broadcast.transaction.v1
 broadcast.oracle.confirm_v1
 cache.prepare.idempotent
 cache.prepare.ttl
 cache.settlement.ledger
-compliance.poh.verify_v1
-compliance.poh.pairwise_v1
-compliance.evidence.bind_v1
 ```
 
-Capability strings appear in:
-
-- The `capabilities[]` array on every wire response.
-- `/healthz` body (so an operator script can grep for them).
-- The OpenAPI spec's `x-capability` extension on each operation.
-
-A capability that is "advertised but not yet enabled" returns 503 with
-`Reason::CapabilityUnavailable`. Operators turn capabilities on in
-configuration, not in code.
+These strings are a naming registry in `zpay-core::capability`, defined for
+the discipline they encode; they are not yet emitted on wire responses. zpay
+advertises no compliance capability: spend-policy authority for the
+agent-signed path lives in the identity issuer, and zpay runs no PoH gate
+(see [ADR-0008](../adrs/0008-compliance-authority-placement.md)).
 
 ## Naming rules
 
@@ -202,43 +214,37 @@ At wire boundaries, typed errors map to HTTP status codes via a single
 
 ## Config and env var conventions
 
-- Env var prefix: `ZPAY_*`. Nested fields use `__` separator.
-  Example: `ZPAY_CHAIN_SOURCE_URL`.
-- Test-only env vars: `ZPAY_TEST_*`. Production binaries strip them.
-- Live-node gate: `ZPAY_TEST_LIVE=1`. Mainnet allowance: `ZPAY_TEST_ALLOW_MAINNET=1`.
-- Sensitive leaves never set via env var alone; they come from a secret
-  manager and `--print-config` redacts them as `[REDACTED]`.
-
-Top-level config sections:
-
-| Section | Purpose |
-|---------|---------|
-| `[server]` | HTTP bind address, TLS, CORS allowlist, request limits. |
-| `[node]` | zinder gRPC endpoint, fallback zexplorer REST endpoint. |
-| `[wallet]` | Operator wallet seed sealing (age identity, network). |
-| `[store]` | libSQL connection URL, replica config, schema-migration policy. |
-| `[compliance]` | zentity JWKS URL, cache TTL, accepted issuers. |
-| `[merchants]` | Per-merchant `accepts[]` template. Loaded from TOML; hot-reload on SIGHUP. |
-| `[ops]` | Ops listener bind address, metrics namespace. |
-| `[telemetry]` | Tracing format, log filter, sampling rate. |
+- Env var prefix: `ZPAY_*`. Nested fields use `__` as the separator.
+  Example: `ZPAY_CHAIN_SOURCE_URL`, `ZPAY_RATE_LIMIT__PER_JKT_PER_MINUTE`.
+- The runtime is configured entirely by environment variables. The only file
+  input is the payee registry (`ZPAY_PAYEES__CONFIG_PATH`), a TOML file of
+  `[payees.<id>]` entries carrying each payee's `accepts[]` template; it is
+  read once at startup, not hot-reloaded.
+- The one secret the runtime reads is the Turso auth token
+  (`ZPAY_STORE__AUTH_TOKEN`); `--print-config` redacts it as `[REDACTED]`.
+- The full env-var schema lives in
+  [operational-surfaces.md](operational-surfaces.md).
 
 ## ZIP and spec compliance surface
 
-### Implemented (M0 scaffold target)
+### Implemented
 
 - ZIP-316 unified addresses (recognised; full parsing via zally).
 - ZIP-302 memos (constructed via zally's `Memo::from_bytes`).
-- ZIP-225 + ZIP-244 v5 transactions and txids (everything zpay touches
-  is v5).
+- ZIP-225 + ZIP-244 transactions and txids. The `/settle` expiry gate parses
+  v5 and v6 (NU6.3/Ironwood) through zally; see
+  [ADR-0006](../adrs/0006-facilitator-trust-boundary.md).
 - ZIP-321 payment URIs (parsed and emitted via zally).
+- ZIP-311 payment disclosures (local verifier in `zpay-core`; see
+  [ADR-0007](../adrs/0007-local-zip311-verifier.md)).
 - x402 v2 wire protocol (the entire `/x402/v2/*` surface).
 
-### Reserved by shape (Phase 4-6 targets)
+### Deferred
 
-- ZIP-311 payment disclosures (verifier inside zinder; zpay delegates).
 - ZIP-317 conventional fees (delegated to zally's proposal builder).
-- MPP wire protocol (`/mpp/v1/*` surface; feature-gated).
-- SD-JWT-VC PoH validation (EdDSA against zentity's JWKS).
+- SD-JWT VC PoH validation for the external-wallet path (future; the
+  agent-signed path's spend authority lives in the identity issuer, see
+  [ADR-0008](../adrs/0008-compliance-authority-placement.md)).
 
 ### Out of scope
 
@@ -251,12 +257,12 @@ Top-level config sections:
 
 ## Cross-references
 
-- [Operational surfaces](operational-surfaces.md): readiness state machine,
-  ops port, live-test gates.
-- [Facilitator plane](facilitator-plane.md): prepare, settle, watch, verify
+- [Operational surfaces](operational-surfaces.md): readiness probe, ops
+  listener, metrics, env-var schema.
+- [Facilitator plane](facilitator-plane.md): prepare, settle, confirm, verify
   lifecycle and typed errors at each boundary.
 - [Upstream platform binding](upstream-platform-binding.md): what zpay
-  expects from zally, zinder, zexplorer, and zentity.
+  expects from zally, zinder, and zentity.
 - [Error vocabulary](../reference/error-vocabulary.md): every typed error
   with retry posture.
 - [ADR index](../README.md): locked architectural decisions.

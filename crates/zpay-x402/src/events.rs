@@ -13,13 +13,13 @@
 //! ## Publishers
 //!
 //! - `settle_handler` after a successful broadcast outcome. The first
-//!   snapshot published is `status: "broadcast"`; the SSE stream stays
-//!   open and surfaces `"mined"` once the oracle records the first
-//!   confirmation, then closes after `"final"`.
-//! - The confirmation oracle after each `record_confirmation` returning
-//!   `Ok(true)`. The stream stays open through `"mined"` and only closes
-//!   once `confirmation_count >= ZPAY_FINALITY_DEPTH` flips the snapshot
-//!   to `"final"`.
+//!   snapshot published is `status: "broadcast"`; the stream surfaces
+//!   `"mined"` then `"final"` as confirmations accumulate and stays open
+//!   until the payment settles.
+//! - The confirmation poll and the chain-event subscription after each
+//!   ledger change. A reorg downgrade republishes a corrective
+//!   `"broadcast"` snapshot with an incremented `reorg_count`; a settled
+//!   snapshot (`settled: true`) closes the stream.
 //!
 //! ## Wire schema
 //!
@@ -47,13 +47,15 @@
 //!   itself fails. Body: `{"payment_id":"..."}`. The stream closes
 //!   immediately afterward; the bridge should retry the subscription.
 //!
-//! The stream closes after delivering the first snapshot whose status is
-//! terminal (`final`, `failed`, `never_issued`, or `expired`). `awaiting`,
-//! `broadcast`, and `mined` are explicitly non-terminal: the stream stays
-//! open while confirmations accumulate. The browser `EventSource` will
-//! auto-reconnect, but the new connection's initial snapshot will be
-//! terminal again and the stream will close immediately, which is the
-//! documented contract.
+//! The stream closes after delivering the first snapshot for which
+//! [`PaymentStatusSnapshot::stream_closed`] holds: an immutable success
+//! (`settled: true`) or a status-terminal outcome (`failed`,
+//! `never_issued`, `expired`). `awaiting`, `broadcast`, `mined`, and
+//! `final` keep the stream open: `final` is a depth milestone that a
+//! reorg can still downgrade, so the stream stays open until the block
+//! passes the settled tip. The browser `EventSource` will auto-reconnect,
+//! but the new connection's initial snapshot will be closing again and
+//! the stream will close immediately, which is the documented contract.
 //!
 //! ## Cleanup
 //!
@@ -72,7 +74,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::stream::Stream;
@@ -82,6 +84,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use zally_chain::Submitter;
+use zpay_core::chain_status::ChainStatusCache;
 use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::prepare::PreparedTxStore;
 use zpay_core::status::{
@@ -91,7 +94,7 @@ use zpay_core::store::StoreError;
 use zpay_core::types::PaymentId;
 use zpay_core::verify::PaymentDisclosureVerifier;
 
-use crate::{AppState, problem_response};
+use crate::{AppState, PeerAddr, ip_rate_limit, problem_response};
 
 /// Resync hook used by [`EventStream`] when the broadcast receiver lags
 /// past the channel buffer.
@@ -119,6 +122,7 @@ struct StoreResyncSource<P, L> {
     prepared_store: Arc<P>,
     ledger: Arc<L>,
     finality_depth: u32,
+    chain_status: Arc<ChainStatusCache>,
 }
 
 impl<P, L> ResyncSource for StoreResyncSource<P, L>
@@ -136,6 +140,7 @@ where
                 self.prepared_store.as_ref(),
                 self.ledger.as_ref(),
                 self.finality_depth,
+                self.chain_status.load(),
             )
             .await
         })
@@ -228,6 +233,19 @@ impl PaymentEventHub {
         }
     }
 
+    /// Returns `true` when a live receiver is attached for `payment_id`.
+    ///
+    /// The background chain tasks gate their per-row snapshot re-read and
+    /// publish on this so a payment nobody is watching costs no store
+    /// read: the re-read only runs when a subscriber can consume it.
+    #[must_use]
+    pub fn has_subscribers(&self, payment_id: &PaymentId) -> bool {
+        self.channels
+            .lock()
+            .get(payment_id)
+            .is_some_and(|sender| sender.receiver_count() > 0)
+    }
+
     /// Number of registered senders. Test surface only.
     #[cfg(test)]
     pub(crate) fn channel_count(&self) -> usize {
@@ -268,8 +286,14 @@ impl PaymentEventHub {
 /// The handler sets `Cache-Control: no-cache, no-transform` and
 /// `X-Accel-Buffering: no` so reverse proxies (Railway router,
 /// Cloudflare, Next.js streaming) do not buffer the response.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the rate-limit gate, probe, subscribe, resync-race reread, and SSE response build are one sequential request-handling slice; splitting it would scatter that sequence across helpers without reducing its actual complexity"
+)]
 pub(crate) async fn events_handler<C, V, P, L, T, F>(
     State(state): State<AppState<C, V, P, L, T, F>>,
+    headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
     Path(payment_id_raw): Path<String>,
 ) -> Response
 where
@@ -280,6 +304,14 @@ where
     T: zpay_core::tip::ChainTipOracle + 'static,
     F: DisclosureFetcher + 'static,
 {
+    if let Some(limited) = ip_rate_limit(
+        &state.rate_limiter,
+        &headers,
+        peer,
+        state.trust_forwarded_headers,
+    ) {
+        return limited;
+    }
     let payment_id = match payment_id_raw.parse::<PaymentId>() {
         Ok(id) => id,
         Err(reason) => {
@@ -304,6 +336,7 @@ where
         state.prepared_store.as_ref(),
         state.ledger.as_ref(),
         state.finality_depth,
+        state.chain_status.load(),
     )
     .await
     else {
@@ -339,6 +372,7 @@ where
         state.prepared_store.as_ref(),
         state.ledger.as_ref(),
         state.finality_depth,
+        state.chain_status.load(),
     )
     .await
     else {
@@ -355,6 +389,7 @@ where
         prepared_store: Arc::clone(&state.prepared_store),
         ledger: Arc::clone(&state.ledger),
         finality_depth: state.finality_depth,
+        chain_status: Arc::clone(&state.chain_status),
     });
 
     let body_stream = EventStream::new(payment_id, initial_snapshot, rx, resync);
@@ -375,6 +410,26 @@ where
     response
 }
 
+/// RAII gauge for the count of live SSE subscribers.
+///
+/// Increments `zpay_sse_subscribers` on construction and decrements it when
+/// the owning [`EventStream`] drops, so the gauge tracks open streams even
+/// when a client disconnects without a terminal snapshot.
+struct SubscriberGauge;
+
+impl SubscriberGauge {
+    fn new() -> Self {
+        metrics::gauge!("zpay_sse_subscribers").increment(1.0);
+        Self
+    }
+}
+
+impl Drop for SubscriberGauge {
+    fn drop(&mut self) {
+        metrics::gauge!("zpay_sse_subscribers").decrement(1.0);
+    }
+}
+
 /// In-flight resync future used by [`EventStream`] when the broadcast
 /// receiver lags.
 ///
@@ -385,16 +440,17 @@ type ResyncFuture = Pin<Box<dyn Future<Output = Result<PaymentStatusSnapshot, St
 
 pin_project! {
     /// SSE body stream: initial snapshot (head), then broadcast tail,
-    /// closing inclusively after the first terminal snapshot.
+    /// closing inclusively after the first closing snapshot (see
+    /// [`PaymentStatusSnapshot::stream_closed`]).
     ///
-    /// ## Terminal-inclusive cutoff
+    /// ## Closing-inclusive cutoff
     ///
-    /// The stream emits exactly one event per terminal snapshot it
+    /// The stream emits exactly one event per closing snapshot it
     /// observes (initial, broadcast tail, or lag-recovery), then closes
     /// on the next poll. That contract is what makes concurrent
-    /// publishers safe: even if `/settle` and the oracle race to publish
-    /// terminal snapshots in arbitrary order, the subscriber sees one
-    /// terminal event and the stream ends. See
+    /// publishers safe: even if `/settle` and the confirmation poll race
+    /// to publish closing snapshots in arbitrary order, the subscriber
+    /// sees one closing event and the stream ends. See
     /// [`PaymentEventHub::publish`] for the monotonicity contract.
     ///
     /// ## Lag recovery
@@ -422,6 +478,7 @@ pin_project! {
         resync_source: Arc<dyn ResyncSource>,
         resync_in_flight: Option<ResyncFuture>,
         closed: bool,
+        subscriber_gauge: SubscriberGauge,
     }
 }
 
@@ -439,6 +496,7 @@ impl EventStream {
             resync_source,
             resync_in_flight: None,
             closed: false,
+            subscriber_gauge: SubscriberGauge::new(),
         }
     }
 }
@@ -454,9 +512,9 @@ impl Stream for EventStream {
         }
 
         if let Some(initial) = this.head.take() {
-            let terminal = initial.status.is_terminal();
+            let closing = initial.stream_closed();
             let event = snapshot_to_event(&initial, this.payment_id);
-            if terminal {
+            if closing {
                 *this.closed = true;
             }
             return Poll::Ready(Some(Ok(event)));
@@ -471,9 +529,9 @@ impl Stream for EventStream {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(snapshot)) => {
                     *this.resync_in_flight = None;
-                    let terminal = snapshot.status.is_terminal();
+                    let closing = snapshot.stream_closed();
                     let event = snapshot_to_event(&snapshot, this.payment_id);
-                    if terminal {
+                    if closing {
                         *this.closed = true;
                     }
                     return Poll::Ready(Some(Ok(event)));
@@ -499,9 +557,9 @@ impl Stream for EventStream {
 
         match this.tail.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(snapshot))) => {
-                let terminal = snapshot.status.is_terminal();
+                let closing = snapshot.stream_closed();
                 let event = snapshot_to_event(&snapshot, this.payment_id);
-                if terminal {
+                if closing {
                     *this.closed = true;
                 }
                 Poll::Ready(Some(Ok(event)))
@@ -575,6 +633,7 @@ mod tests {
     use tokio_stream::wrappers::BroadcastStream;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
     use zpay_core::broadcast::BroadcastOutcome;
+    use zpay_core::chain_status::{ChainStatusCache, ChainStatusView};
     use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
     use zpay_core::prepare::{PrepareRequest, PreparedTxCache, propose};
     use zpay_core::status::{
@@ -592,6 +651,11 @@ mod tests {
     use super::{EventStream, PaymentEventHub, ResyncSource, StoreResyncSource};
     use crate::AppState;
 
+    const UNKNOWN_CHAIN: ChainStatusView = ChainStatusView {
+        visible_tip_height: None,
+        settled_tip_height: None,
+    };
+
     fn store_resync(
         cache: &Arc<PreparedTxCache>,
         ledger: &Arc<SettlementLedger>,
@@ -600,7 +664,24 @@ mod tests {
             prepared_store: Arc::clone(cache),
             ledger: Arc::clone(ledger),
             finality_depth: DEFAULT_FINALITY_DEPTH,
+            chain_status: Arc::new(ChainStatusCache::new()),
         })
+    }
+
+    fn settled_snapshot(payment_id: &PaymentId, transaction_id: &str) -> PaymentStatusSnapshot {
+        PaymentStatusSnapshot {
+            payment_id: payment_id.clone(),
+            status: PaymentStatus::Final,
+            intent_posture: IntentPosture::Unverified,
+            broadcast_outcome: Some(BroadcastOutcome::Accepted {
+                transaction_id: transaction_id.to_owned(),
+            }),
+            settled_at_unix_seconds: Some(1_730_000_000),
+            confirmation_count: Some(120),
+            mined_block_height: Some(2_000_000),
+            reorg_count: 0,
+            settled: true,
+        }
     }
 
     /// Resync source that always returns the snapshot it was constructed
@@ -734,6 +815,9 @@ mod tests {
             Arc::new(crate::dpop::InMemoryReplayStore::new()),
             crate::dpop::DpopExpectations::unbound("http"),
             DEFAULT_FINALITY_DEPTH,
+            Arc::new(ChainStatusCache::new()),
+            Arc::new(crate::RateLimiter::new(0, 0)),
+            false,
         )
     }
 
@@ -764,6 +848,8 @@ mod tests {
                 settled_at_unix_seconds: None,
                 confirmation_count: None,
                 mined_block_height: None,
+                reorg_count: 0,
+                settled: false,
             },
         );
         assert_eq!(hub.channel_count(), 0);
@@ -809,24 +895,15 @@ mod tests {
             cache.as_ref(),
             ledger.as_ref(),
             DEFAULT_FINALITY_DEPTH,
+            UNKNOWN_CHAIN,
         )
         .await?;
         assert_eq!(initial.status, PaymentStatus::Awaiting);
         let rx = hub.subscribe(&payment_id);
 
-        // Simulate the confirmation oracle publishing a terminal Final
-        // snapshot once `confirmation_count >= ZPAY_FINALITY_DEPTH`.
-        let terminal_snapshot = PaymentStatusSnapshot {
-            payment_id: payment_id.clone(),
-            status: PaymentStatus::Final,
-            intent_posture: IntentPosture::Unverified,
-            broadcast_outcome: Some(BroadcastOutcome::Accepted {
-                transaction_id: "deadbeef".to_owned(),
-            }),
-            settled_at_unix_seconds: Some(1_730_000_000),
-            confirmation_count: Some(3),
-            mined_block_height: Some(2_000_000),
-        };
+        // Simulate the confirmation poll publishing a settled snapshot
+        // once the containing block passes the settled tip.
+        let terminal_snapshot = settled_snapshot(&payment_id, "deadbeef");
         hub.publish(&payment_id, terminal_snapshot.clone());
 
         let resync = store_resync(&cache, &ledger);
@@ -842,22 +919,23 @@ mod tests {
             "first event should report awaiting status, got {payload}",
         );
 
-        // Second event: the terminal final snapshot delivered via the
-        // broadcast tail.
+        // Second event: the settled snapshot delivered via the broadcast
+        // tail. Its status is still `final`, but `settled` closes the
+        // stream.
         let second = timeout(Duration::from_secs(2), stream.next())
             .await?
             .ok_or("expected broadcast event")??;
         let payload = format!("{second:?}");
         assert!(
-            payload.contains("\\\"status\\\":\\\"final\\\""),
-            "second event should report final status, got {payload}",
+            payload.contains("\\\"settled\\\":true"),
+            "second event should be settled, got {payload}",
         );
 
-        // Third poll: the stream MUST close after delivering the
-        // terminal event inclusive. Bound with a timeout so a regression
-        // that left the stream open fails fast instead of hanging.
+        // Third poll: the stream MUST close after delivering the settled
+        // event inclusive. Bound with a timeout so a regression that left
+        // the stream open fails fast instead of hanging.
         let closed = timeout(Duration::from_secs(2), stream.next()).await?;
-        assert!(closed.is_none(), "stream must close after terminal event");
+        assert!(closed.is_none(), "stream must close after settled event");
 
         // The AppState wiring is exercised indirectly via build_state;
         // we touch it here to keep the import live and catch breakage
@@ -867,10 +945,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_initial_snapshot_emits_once_then_closes()
+    async fn settled_initial_snapshot_emits_once_then_closes()
     -> Result<(), Box<dyn std::error::Error>> {
         let ledger = SettlementLedger::new();
-        let payment_id = PaymentId("already-final".to_owned());
+        let payment_id = PaymentId("already-settled".to_owned());
         ledger
             .record(
                 payment_id.clone(),
@@ -879,16 +957,30 @@ mod tests {
                         transaction_id: "abcd".to_owned(),
                     },
                     settled_at_unix_seconds: 1_730_000_000,
-                    confirmation_count: Some(DEFAULT_FINALITY_DEPTH),
+                    confirmation_count: Some(150),
                     mined_block_height: Some(2_000_000),
+                    reorg_count: 0,
+                    last_reorged_at: None,
+                    expiry_height: Some(2_000_010),
                 },
             )
             .await?;
 
         let cache = PreparedTxCache::new();
-        let initial =
-            lookup_payment_status(&payment_id, &cache, &ledger, DEFAULT_FINALITY_DEPTH).await?;
+        let past_settled = ChainStatusView {
+            visible_tip_height: Some(2_000_150),
+            settled_tip_height: Some(2_000_050),
+        };
+        let initial = lookup_payment_status(
+            &payment_id,
+            &cache,
+            &ledger,
+            DEFAULT_FINALITY_DEPTH,
+            past_settled,
+        )
+        .await?;
         assert_eq!(initial.status, PaymentStatus::Final);
+        assert!(initial.settled);
 
         let hub = PaymentEventHub::new();
         let rx = hub.subscribe(&payment_id);
@@ -901,13 +993,109 @@ mod tests {
             .await?
             .ok_or("expected initial event")??;
         let payload = format!("{first:?}");
-        assert!(payload.contains("\\\"status\\\":\\\"final\\\""));
+        assert!(payload.contains("\\\"settled\\\":true"));
 
         let closed = timeout(Duration::from_secs(2), stream.next()).await?;
         assert!(
             closed.is_none(),
-            "terminal initial snapshot must close the stream after one event",
+            "settled initial snapshot must close the stream after one event",
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_initial_snapshot_keeps_stream_open_until_settled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payment_id = PaymentId("final-not-settled".to_owned());
+        let hub = PaymentEventHub::new();
+        let rx = hub.subscribe(&payment_id);
+
+        // A Final snapshot that is not yet settled must keep the stream
+        // open: a reorg could still downgrade it.
+        let final_unsettled = PaymentStatusSnapshot {
+            payment_id: payment_id.clone(),
+            status: PaymentStatus::Final,
+            intent_posture: IntentPosture::Unverified,
+            broadcast_outcome: Some(BroadcastOutcome::Accepted {
+                transaction_id: "abcd".to_owned(),
+            }),
+            settled_at_unix_seconds: Some(1_730_000_000),
+            confirmation_count: Some(5),
+            mined_block_height: Some(2_000_000),
+            reorg_count: 0,
+            settled: false,
+        };
+        hub.publish(&payment_id, settled_snapshot(&payment_id, "abcd"));
+
+        let cache = Arc::new(PreparedTxCache::new());
+        let ledger = Arc::new(SettlementLedger::new());
+        let resync = store_resync(&cache, &ledger);
+        let mut stream = std::pin::pin!(EventStream::new(
+            payment_id.clone(),
+            final_unsettled,
+            rx,
+            resync,
+        ));
+
+        let first = timeout(Duration::from_secs(2), stream.next())
+            .await?
+            .ok_or("expected final event")??;
+        let payload = format!("{first:?}");
+        assert!(
+            payload.contains("\\\"status\\\":\\\"final\\\"")
+                && payload.contains("\\\"settled\\\":false"),
+            "first event should be final and not settled, got {payload}",
+        );
+
+        // The stream stays open past Final and closes only on the settled
+        // snapshot buffered in the broadcast tail.
+        let second = timeout(Duration::from_secs(2), stream.next())
+            .await?
+            .ok_or("expected settled event")??;
+        let payload = format!("{second:?}");
+        assert!(
+            payload.contains("\\\"settled\\\":true"),
+            "second event should be settled, got {payload}",
+        );
+
+        let closed = timeout(Duration::from_secs(2), stream.next()).await?;
+        assert!(closed.is_none(), "stream must close after settled event");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_initial_snapshot_closes_stream() -> Result<(), Box<dyn std::error::Error>> {
+        let payment_id = PaymentId("lapsed".to_owned());
+        let hub = PaymentEventHub::new();
+        let rx = hub.subscribe(&payment_id);
+
+        let expired = PaymentStatusSnapshot {
+            payment_id: payment_id.clone(),
+            status: PaymentStatus::Expired,
+            intent_posture: IntentPosture::Unverified,
+            broadcast_outcome: Some(BroadcastOutcome::Accepted {
+                transaction_id: "abcd".to_owned(),
+            }),
+            settled_at_unix_seconds: Some(1_730_000_000),
+            confirmation_count: Some(0),
+            mined_block_height: None,
+            reorg_count: 1,
+            settled: false,
+        };
+
+        let cache = Arc::new(PreparedTxCache::new());
+        let ledger = Arc::new(SettlementLedger::new());
+        let resync = store_resync(&cache, &ledger);
+        let mut stream = std::pin::pin!(EventStream::new(payment_id.clone(), expired, rx, resync));
+
+        let first = timeout(Duration::from_secs(2), stream.next())
+            .await?
+            .ok_or("expected expired event")??;
+        let payload = format!("{first:?}");
+        assert!(payload.contains("\\\"status\\\":\\\"expired\\\""));
+
+        let closed = timeout(Duration::from_secs(2), stream.next()).await?;
+        assert!(closed.is_none(), "expired snapshot closes the stream");
         Ok(())
     }
 
@@ -959,28 +1147,19 @@ mod tests {
         // no-op because no subscriber was attached yet AND the snapshot
         // read had already returned `Awaiting`. Under the new order it
         // sits in the broadcast buffer waiting to be consumed.
-        let terminal_snapshot = PaymentStatusSnapshot {
-            payment_id: payment_id.clone(),
-            status: PaymentStatus::Final,
-            intent_posture: IntentPosture::Unverified,
-            broadcast_outcome: Some(BroadcastOutcome::Accepted {
-                transaction_id: "racewin".to_owned(),
-            }),
-            settled_at_unix_seconds: Some(1_730_000_000),
-            confirmation_count: Some(DEFAULT_FINALITY_DEPTH),
-            mined_block_height: Some(2_000_000),
-        };
+        let terminal_snapshot = settled_snapshot(&payment_id, "racewin");
         hub.publish(&payment_id, terminal_snapshot.clone());
 
         // Snapshot read happens AFTER the publish. The ledger has not
         // recorded anything (the publish is just a broadcast hint), so
-        // the snapshot still reports `Awaiting`. The terminal event lives
+        // the snapshot still reports `Awaiting`. The settled event lives
         // exclusively in the broadcast buffer at this point.
         let initial = lookup_payment_status(
             &payment_id,
             cache.as_ref(),
             ledger.as_ref(),
             DEFAULT_FINALITY_DEPTH,
+            UNKNOWN_CHAIN,
         )
         .await?;
         assert_eq!(initial.status, PaymentStatus::Awaiting);
@@ -998,21 +1177,21 @@ mod tests {
             "first event should report awaiting, got {payload}",
         );
 
-        // Second event: the buffered terminal snapshot. The new ordering
+        // Second event: the buffered settled snapshot. The new ordering
         // is what makes this reachable; under the old ordering the
         // publish would have been dropped.
         let second = timeout(Duration::from_secs(2), stream.next())
             .await?
-            .ok_or("expected buffered terminal event")??;
+            .ok_or("expected buffered settled event")??;
         let payload = format!("{second:?}");
         assert!(
-            payload.contains("\\\"status\\\":\\\"final\\\""),
-            "second event should report final, got {payload}",
+            payload.contains("\\\"settled\\\":true"),
+            "second event should be settled, got {payload}",
         );
 
-        // Stream closes after the terminal event.
+        // Stream closes after the settled event.
         let closed = timeout(Duration::from_secs(2), stream.next()).await?;
-        assert!(closed.is_none(), "stream must close after terminal event");
+        assert!(closed.is_none(), "stream must close after settled event");
         Ok(())
     }
 
@@ -1043,22 +1222,14 @@ mod tests {
             settled_at_unix_seconds: None,
             confirmation_count: None,
             mined_block_height: None,
+            reorg_count: 0,
+            settled: false,
         };
-        let terminal = PaymentStatusSnapshot {
-            payment_id: payment_id.clone(),
-            status: PaymentStatus::Final,
-            intent_posture: IntentPosture::Unverified,
-            broadcast_outcome: Some(BroadcastOutcome::Accepted {
-                transaction_id: "lostinlag".to_owned(),
-            }),
-            settled_at_unix_seconds: Some(1_730_000_000),
-            confirmation_count: Some(DEFAULT_FINALITY_DEPTH),
-            mined_block_height: Some(2_000_000),
-        };
+        let terminal = settled_snapshot(&payment_id, "lostinlag");
 
-        // Three non-terminal publishes plus one terminal publish into a
+        // Three non-terminal publishes plus one settled publish into a
         // capacity-1 channel, all without consuming. The receiver sees
-        // `Lagged` on its first poll and the terminal snapshot is past
+        // `Lagged` on its first poll and the settled snapshot is past
         // the buffer horizon.
         let _ = tx.send(non_terminal.clone());
         let _ = tx.send(non_terminal.clone());
@@ -1084,6 +1255,7 @@ mod tests {
             resync_source: resync,
             resync_in_flight: None,
             closed: false,
+            subscriber_gauge: super::SubscriberGauge::new(),
         });
 
         // First emission: the lag event.

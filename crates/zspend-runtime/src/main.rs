@@ -42,12 +42,14 @@ use bootstrap::{BootstrapError, BootstrapInputs, ChainSourceFactory};
 use capture_submitter::CaptureSubmitter;
 use clap::{Parser, Subcommand};
 use jsonwebtoken::jwk::JwkSet;
-use ledger::{InProcessLedger, LedgerStore, Reservation};
+use ledger::{Reservation, UsageLedger};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
 use revocation::{RevocationOutcome, RevocationStore};
 use serde::{Deserialize, Serialize};
 use zally_core::{AccountId, BlockHeight, IdempotencyKey, Network, PaymentRecipient};
-use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet, WalletError};
+use zally_keys::{AgeFileSealing, AgeFileSealingOptions, SealingPosture, SeedSealing as _};
+use zally_wallet::{PaymentRequest, SendOutcome, SendPaymentPlan, Wallet, WalletError};
 use zspend_core::{
     AccessTokenClaims, DPOP_CLOCK_SKEW_SECONDS, DpopBinding, PaymentAuthorization, ProblemDetail,
     ProblemKind, SigningPolicy, SigningPolicyError, intent_matches, recompute_intent_hash,
@@ -84,11 +86,24 @@ struct Cli {
 enum Command {
     /// Start the wallet runtime HTTP listener (default).
     Serve,
-    /// Generate a fresh wallet seed and seal it at `$ZSPEND_SEALED_SEED_PATH`.
+    /// Provision the wallet seed sealed at `$ZSPEND_SEALED_SEED_PATH`.
+    ///
+    /// Generates a fresh BIP-39 mnemonic and reveals it once, or with
+    /// `--restore` seals a seed derived from a mnemonic read on stdin.
     Init {
         /// Overwrite an existing sealed seed instead of refusing.
         #[arg(long)]
         force: bool,
+        /// Seal a seed derived from a BIP-39 mnemonic read on stdin instead of
+        /// generating a fresh one.
+        #[arg(long)]
+        restore: bool,
+        /// Suppress the one-time mnemonic reveal for the docker auto-provision
+        /// path. The seed is sealed but never printed; a log line records that
+        /// an unbacked throwaway dev seed was provisioned. Never pass this when
+        /// provisioning a wallet an operator must back up.
+        #[arg(long)]
+        auto_provision: bool,
         /// Override `$ZSPEND_SEALED_SEED_PATH` for this invocation.
         #[arg(long, env = "ZSPEND_SEALED_SEED_PATH")]
         sealed_seed_path: PathBuf,
@@ -119,6 +134,8 @@ enum StartupError {
         #[source]
         source: tracing_subscriber::util::TryInitError,
     },
+    #[error("metrics recorder install failed: {reason}")]
+    Metrics { reason: String },
     #[error("ZSPEND_NETWORK has unknown value {provided:?}; expected mainnet, testnet, or regtest")]
     NetworkInvalid { provided: String },
     #[error("required env var {name} is missing")]
@@ -145,9 +162,14 @@ enum StartupError {
     )]
     ProductionPostureUnmet { missing: &'static str },
     #[error(
-        "ZSPEND_LEDGER_URL is set ({provided:?}) but the shared ledger backend is not yet supported; unset ZSPEND_LEDGER_URL to run the single-instance in-process ledger"
+        "seed is sealed with a dev-posture implementation (age file); refusing to serve. Front the seed with a KMS/HSM sealing, or set ZSPEND_ALLOW_DEV_SEED=1 to accept a dev-posture seed (D-13)"
     )]
-    SharedLedgerUnsupported { provided: String },
+    DevSeedPostureRefused,
+    #[error("single-use ledger open failed: {source}")]
+    Ledger {
+        #[source]
+        source: ledger::LedgerError,
+    },
 }
 
 /// Window (seconds) after which a recorded DPoP proof `jti` is evicted from the
@@ -176,17 +198,23 @@ struct AppState {
     /// Operational posture reported on `/readyz` (e.g. `"dev"`,
     /// `"production"`), pinned at startup from config.
     posture: &'static str,
+    /// At-rest seal posture of the sealing implementation (D-13). Reported on
+    /// `/readyz`; a `Dev` posture requires `ZSPEND_ALLOW_DEV_SEED` to serve.
+    seal_posture: SealingPosture,
     /// Short-window DPoP proof `jti` anti-replay set (per-process).
     dpop_proof_jti_seen: Arc<Mutex<HashMap<String, Instant>>>,
-    /// Single-use access-token `jti` ledger (reserve-before-sign, D-8). A
-    /// reserved `jti` is committed with its signed payload after signing so an
-    /// identical replay returns the cached payload instead of re-signing.
-    spend_idempotency_cache: Arc<InProcessLedger>,
+    /// Single-use access-token `jti` ledger (reserve-before-sign, D-8),
+    /// libSQL-backed so the guarantee survives a restart. A reserved `jti` is
+    /// committed with its signed payload after signing so an identical replay
+    /// returns the cached payload instead of re-signing.
+    spend_idempotency_cache: UsageLedger,
     /// Delta-synced access-token revocation cache (D-6). Consulted on
     /// `claims.jti` before the single-use reserve so a revoked-then-replayed
     /// token is rejected ahead of the cached payload. Disabled (always admits)
     /// when no `ZSPEND_ISSUER_URL` is configured.
     revocation: RevocationStore,
+    /// Prometheus render handle served on `/metrics`.
+    metrics: PrometheusHandle,
 }
 
 impl AppState {
@@ -220,8 +248,10 @@ async fn main() -> Result<(), StartupError> {
         Command::Serve => serve().await,
         Command::Init {
             force,
+            restore,
+            auto_provision,
             sealed_seed_path,
-        } => init::run(sealed_seed_path, force)
+        } => init::run(sealed_seed_path, force, restore, auto_provision)
             .await
             .map_err(|source| StartupError::Init { source }),
     }
@@ -230,7 +260,23 @@ async fn main() -> Result<(), StartupError> {
 async fn serve() -> Result<(), StartupError> {
     let config = ResolvedConfig::from_env()?;
 
+    let metrics = install_metrics_recorder()?;
     let revocation = build_revocation_store(&config);
+    let seal_posture = age_seal_posture(&config.sealed_seed_path);
+    metrics::gauge!("zspend_seal_posture_info", "posture" => seal_posture_str(seal_posture))
+        .set(1.0);
+
+    // The libsql-backed ledger must open before the wallet's rusqlite store: both
+    // link one SQLite, and libsql sets the global threading mode via sqlite3_config,
+    // which returns SQLITE_MISUSE once any connection has initialized the library.
+    let spend_idempotency_cache =
+        UsageLedger::open(&config.ledger_url, config.ledger_auth_token.as_deref())
+            .await
+            .map_err(|source| StartupError::Ledger { source })?;
+    tracing::info!(
+        ledger_url = %config.ledger_url,
+        "single-use jti ledger ready",
+    );
 
     let (wallet, account_id) = bootstrap::bootstrap(BootstrapInputs {
         network: config.network,
@@ -246,7 +292,7 @@ async fn serve() -> Result<(), StartupError> {
     let policy = SigningPolicy::builder()
         .network(config.network)
         .max_amount_zat(config.max_amount_zat)
-        .audience_thumbprint(config.audience_thumbprint)
+        .audience(config.audience)
         .build()
         .map_err(|source| StartupError::SigningPolicy { source })?;
 
@@ -257,22 +303,18 @@ async fn serve() -> Result<(), StartupError> {
         );
     }
 
-    // D-13: a mainnet (production) deploy must carry the issuer wiring that makes
+    // D-13: refuse to serve a dev-posture seed without an explicit override, and
+    // refuse a mainnet (production) deploy that lacks the issuer wiring that makes
     // the trust boundary real. Without a JWKS every spend fails closed (no harm),
     // but without an issuer URL revocation is silently disabled, so a grant the
-    // issuer pulls after mint would still sign. Refuse to start rather than serve
-    // mainnet with revocation off.
+    // issuer pulls after mint would still sign.
     enforce_production_posture(
         config.posture,
         config.issuer_url.is_some(),
         jwks.keys.is_empty(),
+        seal_posture,
+        config.allow_dev_seed,
     )?;
-
-    // The shared (multi-instance) ledger backend behind ZSPEND_LEDGER_URL has not
-    // landed. Booting with it set would silently run per-instance single-use
-    // enforcement, a security downgrade for a fleet that expects fleet-wide
-    // single-use. Fail closed until the backend ships.
-    reject_shared_ledger(config.ledger_url.as_deref())?;
 
     let state = AppState {
         wallet,
@@ -282,9 +324,11 @@ async fn serve() -> Result<(), StartupError> {
         public_sign_url: Arc::from(config.public_sign_url.as_str()),
         leeway_seconds: config.leeway_seconds,
         posture: config.posture,
+        seal_posture,
         dpop_proof_jti_seen: Arc::new(Mutex::new(HashMap::new())),
-        spend_idempotency_cache: Arc::new(InProcessLedger::new()),
+        spend_idempotency_cache,
         revocation,
+        metrics,
     };
 
     let router = build_router(state);
@@ -313,6 +357,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/capabilities", get(get_capabilities))
         .route(
             "/.well-known/wallet-configuration",
@@ -321,6 +366,26 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/payments/sign", post(sign_payment))
         .route("/v1/wallet/address", get(get_wallet_address))
         .with_state(state)
+}
+
+/// Install the Prometheus recorder as the process-global metrics sink and
+/// return the render handle the `/metrics` route serves.
+fn install_metrics_recorder() -> Result<PrometheusHandle, StartupError> {
+    PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|source| StartupError::Metrics {
+            reason: source.to_string(),
+        })
+}
+
+/// `GET /metrics`: the Prometheus exposition. No auth: an operator must keep
+/// this listener off the public internet or front it with network policy.
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.render(),
+    )
 }
 
 fn install_tracing() -> Result<(), StartupError> {
@@ -407,12 +472,35 @@ fn readyz_state(state: &AppState) -> (StatusCode, serde_json::Value) {
         StatusCode::SERVICE_UNAVAILABLE
     };
     let body = serde_json::json!({
-        "sealed_seed": "available",
+        "sealed_seed": seal_posture_str(state.seal_posture),
         "posture": state.posture,
         "jwks_cache": jwks_cache,
         "revocation_cache": revocation_cache,
     });
     (status, body)
+}
+
+/// Read the at-rest seal posture of the sealing implementation the runtime
+/// uses (age-file sealing), via [`zally_keys::SeedSealing::posture`].
+fn age_seal_posture(sealed_seed_path: &std::path::Path) -> SealingPosture {
+    AgeFileSealing::new(AgeFileSealingOptions::at_path(
+        sealed_seed_path.to_path_buf(),
+    ))
+    .posture()
+}
+
+/// Map a [`SealingPosture`] to its wire string for `/readyz`.
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "SealingPosture is non_exhaustive; an unrecognised future posture reports `unknown` rather than failing the probe"
+)]
+fn seal_posture_str(posture: SealingPosture) -> &'static str {
+    match posture {
+        SealingPosture::Dev => "dev",
+        SealingPosture::Hsm => "hsm",
+        SealingPosture::Kms => "kms",
+        _ => "unknown",
+    }
 }
 
 /// Returns the RAR projection of the active access token (D-12).
@@ -451,7 +539,7 @@ async fn get_wallet_configuration(State(state): State<AppState>) -> impl IntoRes
         "supported_formats": [SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL],
         "supported_schemes": ["zip321"],
         "intent_hash_algorithm": "v1:sha256",
-        "audience_thumbprint": state.policy.audience_thumbprint(),
+        "audience": state.policy.audience(),
     }))
 }
 
@@ -539,33 +627,55 @@ struct WalletAddressResponse {
 /// `RawZcashV5` value to construct, and switching to the canonical type means
 /// flipping both ends to the `"pczt-v1"` format at once. See
 /// [`SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SignedPayloadWire {
-    format: &'static str,
+    format: String,
     bytes: String,
     tx_id: String,
     fee: AmountWire,
     expires_at: ExpiresAtWire,
-    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    #[serde(skip_serializing_if = "serde_json::Value::is_null", default)]
     metadata: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct AmountWire {
-    currency: &'static str,
+    currency: String,
     value: String,
-    unit: &'static str,
+    unit: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum ExpiresAtWire {
     BlockHeight(u32),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SignPaymentResponse {
     signed_payload: SignedPayloadWire,
+}
+
+/// Renders the wallet's [`SendOutcome`] and the captured transaction bytes into
+/// the `/v1/payments/sign` wire envelope.
+///
+/// `tx_id` carries the wallet-computed ZIP-244 identifier in canonical RPC byte
+/// order, the form every block explorer and downstream lookup expects.
+fn signed_payload_response(outcome: &SendOutcome, captured: &[u8]) -> SignPaymentResponse {
+    SignPaymentResponse {
+        signed_payload: SignedPayloadWire {
+            format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL.to_owned(),
+            bytes: BASE64_STANDARD.encode(captured),
+            tx_id: outcome.signed.tx_id.to_rpc_hex(),
+            fee: AmountWire {
+                currency: "ZEC".to_owned(),
+                value: outcome.signed.fee_zat.as_u64().to_string(),
+                unit: "base".to_owned(),
+            },
+            expires_at: ExpiresAtWire::BlockHeight(outcome.signed.tx_expiry_height.as_u32()),
+            metadata: serde_json::Value::Null,
+        },
+    }
 }
 
 /// Handler for `POST /v1/payments/sign`.
@@ -577,20 +687,84 @@ struct SignPaymentResponse {
 /// the [`CaptureSubmitter`] (which records the raw bytes without broadcasting),
 /// then commit the signed payload to the ledger so an identical replay returns
 /// the cached envelope.
-#[allow(
-    clippy::too_many_lines,
-    reason = "single linear request handler: verify -> recompute -> reserve -> sign -> capture -> commit; splitting would scatter the flow across helpers"
-)]
 async fn sign_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SignPaymentRequest>,
 ) -> Result<Json<SignPaymentResponse>, ProblemResponse> {
+    let signed = sign_payment_inner(&state, &headers, body).await;
+    let outcome = match &signed {
+        Ok(_) => "signed",
+        Err(problem) => problem_kind_metric_label(problem.body.kind),
+    };
+    metrics::counter!("zspend_sign_requests_total", "outcome" => outcome).increment(1);
+    signed
+}
+
+/// Bounded `outcome` label for the sign-request counter: `signed` on success,
+/// else the refusal's [`ProblemKind`] rendered as its wire slug.
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "ProblemKind is #[non_exhaustive]; a future kind reports `other` until it has an explicit label"
+)]
+fn problem_kind_metric_label(kind: ProblemKind) -> &'static str {
+    match kind {
+        ProblemKind::PaymentRequestInvalid => "payment_request_invalid",
+        ProblemKind::IntentMismatch => "intent_mismatch",
+        ProblemKind::AudienceMismatch => "audience_mismatch",
+        ProblemKind::TokenAlreadyConsumed => "token_already_consumed",
+        ProblemKind::InsufficientFunds => "insufficient_funds",
+        ProblemKind::SeedUnavailable => "seed_unavailable",
+        ProblemKind::ChainUnreachable => "chain_unreachable",
+        ProblemKind::NotReady => "not_ready",
+        ProblemKind::DpopProofInvalid => "dpop_proof_invalid",
+        ProblemKind::AccessTokenInvalid => "access_token_invalid",
+        ProblemKind::TargetExpiryStale => "target_expiry_stale",
+        ProblemKind::TargetExpiryMismatchInternal => "target_expiry_mismatch_internal",
+        ProblemKind::TokenRevoked => "token_revoked",
+        ProblemKind::RecipientMismatch => "recipient_mismatch",
+        ProblemKind::AmountExceeded => "amount_exceeded",
+        ProblemKind::AuthorizationExpired => "authorization_expired",
+        ProblemKind::RarTooManyEntries => "rar_too_many_entries",
+        ProblemKind::RevocationCacheStale => "revocation_cache_stale",
+        _ => "other",
+    }
+}
+
+/// Bounded `result` label for the revocation-check counter.
+fn revocation_result_label(outcome: RevocationOutcome) -> &'static str {
+    match outcome {
+        RevocationOutcome::Live => "live",
+        RevocationOutcome::Revoked => "revoked",
+        RevocationOutcome::CacheStale => "cache_stale",
+    }
+}
+
+/// Bounded `outcome` label for the single-use reserve counter.
+fn reservation_label(reservation: &Result<Reservation, ledger::LedgerError>) -> &'static str {
+    match reservation {
+        Ok(Reservation::Fresh) => "fresh",
+        Ok(Reservation::Completed(_)) => "completed",
+        Ok(Reservation::IntentConflict) => "intent_conflict",
+        Ok(Reservation::Pending) => "pending",
+        Err(_) => "error",
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear request handler: verify -> recompute -> reserve -> sign -> capture -> commit; splitting would scatter the flow across helpers"
+)]
+async fn sign_payment_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: SignPaymentRequest,
+) -> Result<Json<SignPaymentResponse>, ProblemResponse> {
     // Trust boundary (Proposal-0003 Slice 1): verify the DPoP-bound access
     // token, then re-derive every bound field from the signed RAR before any
     // signing work. A request that does not carry a conformant grant is
     // rejected here, not signed.
-    let claims = verify_spend_authorization(&state, &headers)?;
+    let claims = verify_spend_authorization(state, headers)?;
     let auth = claims.payment_authorization().map_err(problem_response)?;
     cross_check_request(auth, &body)?;
 
@@ -683,7 +857,13 @@ async fn sign_payment(
     // rejected ahead of any cached payload an identical replay would otherwise
     // return (PRD-43 D-D ordering). A disabled store (no ZSPEND_ISSUER_URL)
     // always admits; a stale-and-unrefreshable cache fails closed (retryable).
-    match state.revocation.check(&claims.jti).await {
+    let revocation_outcome = state.revocation.check(&claims.jti).await;
+    metrics::counter!(
+        "zspend_revocation_checks_total",
+        "result" => revocation_result_label(revocation_outcome),
+    )
+    .increment(1);
+    match revocation_outcome {
         RevocationOutcome::Live => {}
         RevocationOutcome::Revoked => {
             return Err(problem_response(ProblemDetail::not_retryable(
@@ -705,34 +885,41 @@ async fn sign_payment(
     // intent BEFORE signing, so a crash between reserve and commit cannot let a
     // retry sign blind. An identical replay returns the cached payload; a reuse
     // against a different intent is refused; an in-flight reservation is
-    // retryable. v1 reserves in-process (single instance); the shared-backend
-    // upgrade behind ZSPEND_LEDGER_URL is a deploy-time change (PRD-43).
-    match state
+    // retryable. The reservation is durable (libSQL) so the guarantee holds
+    // across a restart, and across replicas when they share one ledger URL.
+    let reservation = state
         .spend_idempotency_cache
         .reserve(&claims.jti, &auth.intent_hash.0)
-    {
-        Reservation::Fresh => {}
-        Reservation::Completed(cached) => return Ok(Json(cached)),
-        Reservation::IntentConflict => {
+        .await;
+    metrics::counter!(
+        "zspend_ledger_claims_total",
+        "outcome" => reservation_label(&reservation),
+    )
+    .increment(1);
+    match reservation {
+        Ok(Reservation::Fresh) => {}
+        Ok(Reservation::Completed(cached)) => return Ok(Json(cached)),
+        Ok(Reservation::IntentConflict) => {
             return Err(problem_response(ProblemDetail::not_retryable(
                 ProblemKind::TokenAlreadyConsumed,
                 "token_already_consumed",
                 "this access-token jti was already used to sign a different intent",
             )));
         }
-        Reservation::Pending => {
+        Ok(Reservation::Pending) => {
             return Err(problem_response(ProblemDetail::retryable(
                 ProblemKind::NotReady,
                 "not_ready",
                 "this access-token jti is being signed by an in-flight request; retry shortly",
             )));
         }
+        Err(err) => return Err(ledger_unavailable(&err)),
     }
 
     let idempotency = match IdempotencyKey::try_from(body.payment_id.as_str()) {
         Ok(key) => key,
         Err(err) => {
-            state.spend_idempotency_cache.release(&claims.jti);
+            release_reservation(state, &claims.jti).await;
             return Err(ProblemResponse::bad_request(ProblemDetail::not_retryable(
                 ProblemKind::PaymentRequestInvalid,
                 "invalid payment_id for idempotency",
@@ -755,15 +942,18 @@ async fn sign_payment(
     let send_outcome = match state.wallet.send_payment(plan).await {
         Ok(outcome) => outcome,
         Err(err) => {
+            if matches!(err, WalletError::ChainSource(_)) {
+                metrics::counter!("zspend_wallet_chain_source_errors_total").increment(1);
+            }
             // Signing failed: drop the reservation so a legitimate retry with
             // the same jti can sign rather than waiting out the pending TTL.
-            state.spend_idempotency_cache.release(&claims.jti);
+            release_reservation(state, &claims.jti).await;
             return Err(map_wallet_err(&err));
         }
     };
 
     let Some(captured) = capture.take_captured() else {
-        state.spend_idempotency_cache.release(&claims.jti);
+        release_reservation(state, &claims.jti).await;
         return Err(ProblemResponse::server_error(ProblemDetail::not_retryable(
             ProblemKind::NotReady,
             "submitter captured no bytes",
@@ -771,25 +961,17 @@ async fn sign_payment(
         )));
     };
 
-    let expiry_value = send_outcome.signed.tx_expiry_height.as_u32();
-
-    let response = SignPaymentResponse {
-        signed_payload: SignedPayloadWire {
-            format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL,
-            bytes: BASE64_STANDARD.encode(&captured),
-            tx_id: hex::encode(send_outcome.signed.tx_id.as_bytes()),
-            fee: AmountWire {
-                currency: "ZEC",
-                value: send_outcome.signed.fee_zat.as_u64().to_string(),
-                unit: "base",
-            },
-            expires_at: ExpiresAtWire::BlockHeight(expiry_value),
-            metadata: serde_json::Value::Null,
-        },
-    };
-    state
+    let response = signed_payload_response(&send_outcome, &captured);
+    if let Err(err) = state
         .spend_idempotency_cache
-        .commit(&claims.jti, &auth.intent_hash.0, response.clone());
+        .commit(&claims.jti, &auth.intent_hash.0, &response)
+        .await
+    {
+        // The signature succeeded; a failed commit only loses this runtime's
+        // replay memory. The wallet's own payment_id idempotency still returns
+        // the same txid on a re-sign, so a lost commit cannot double-spend.
+        tracing::error!(error = %err, "single-use ledger commit failed after signing");
+    }
     Ok(Json(response))
 }
 
@@ -824,12 +1006,33 @@ fn clone_recipient(recipient: &PaymentRecipient) -> PaymentRecipient {
     recipient.clone()
 }
 
+/// Release a still-pending single-use reservation after a signing failure,
+/// logging (rather than propagating) a ledger error since the reservation
+/// clears on its own after the pending TTL.
+async fn release_reservation(state: &AppState, jti: &str) {
+    if let Err(err) = state.spend_idempotency_cache.release(jti).await {
+        tracing::warn!(error = %err, "failed to release single-use reservation after signing error");
+    }
+}
+
+/// Map a single-use ledger backend failure to a retryable 503 so the caller
+/// retries once the store recovers rather than treating a transient outage as
+/// a signing rejection.
+fn ledger_unavailable(err: &ledger::LedgerError) -> ProblemResponse {
+    problem_response(ProblemDetail::retryable(
+        ProblemKind::NotReady,
+        "not_ready",
+        format!("single-use ledger is unavailable: {err}"),
+    ))
+}
+
 /// Verify the DPoP-bound `at+jwt` on `POST /v1/payments/sign` (Slice 1).
 ///
 /// Runs the boundary in order: extract `Authorization: DPoP <at+jwt>` plus the
 /// `DPoP` proof, verify the access token against the issuer JWKS with the
-/// audience pinned to this wallet's thumbprint, verify the DPoP proof binds to
-/// the token's `cnf.jkt` and this request, then reject a replayed proof `jti`.
+/// audience pinned to this wallet's identity URI, verify the DPoP proof binds
+/// to the token's `cnf.jkt` and this request, then reject a replayed proof
+/// `jti`.
 fn verify_spend_authorization(
     state: &AppState,
     headers: &HeaderMap,
@@ -838,7 +1041,7 @@ fn verify_spend_authorization(
     let claims = verify_access_token(
         &access_token,
         &state.jwks,
-        state.policy.audience_thumbprint(),
+        state.policy.audience(),
         state.leeway_seconds,
     )
     .map_err(problem_response)?;
@@ -1168,15 +1371,22 @@ struct ResolvedConfig {
     sealed_seed_path: PathBuf,
     storage_path: PathBuf,
     max_amount_zat: u64,
-    audience_thumbprint: String,
+    audience: String,
     jwks_file: Option<PathBuf>,
     public_sign_url: String,
     leeway_seconds: u64,
     posture: &'static str,
-    /// Shared single-use `jti` ledger endpoint (`ZSPEND_LEDGER_URL`). Unset
-    /// selects the in-process ledger (single instance); set selects the shared
-    /// backend so several wallet replicas enforce single-use across the fleet.
-    ledger_url: Option<String>,
+    /// Single-use `jti` ledger backend (`ZSPEND_LEDGER_URL`): a `libsql://` URL
+    /// or a filesystem path. Defaults to a `usage-ledger.db` file next to
+    /// `ZSPEND_STORAGE_PATH` so single-use enforcement is durable out of the box.
+    ledger_url: String,
+    /// Auth token for a remote (`libsql://`) ledger backend
+    /// (`ZSPEND_LEDGER_AUTH_TOKEN`). Ignored for a file-backed ledger.
+    /// Required for a `libsql://` URL; startup fails closed without it
+    /// rather than attempting an unauthenticated connection.
+    ledger_auth_token: Option<String>,
+    /// Whether a dev-posture seal may serve (`ZSPEND_ALLOW_DEV_SEED=1`, D-13).
+    allow_dev_seed: bool,
     /// Issuer base URL for the revocation delta endpoint (`ZSPEND_ISSUER_URL`).
     /// Unset disables revocation enforcement (local dev / first happy-path E2E).
     issuer_url: Option<String>,
@@ -1226,13 +1436,15 @@ impl ResolvedConfig {
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .unwrap_or(1_000_000_000);
-        // The audience thumbprint pins every access token to THIS wallet (D-5).
-        // It is required and fails closed: a missing pin would let any token
-        // minted for any wallet verify here, so there is no safe default.
-        let audience_thumbprint =
-            optional_env("ZSPEND_AUDIENCE_THUMBPRINT").ok_or(StartupError::EnvMissing {
-                name: "ZSPEND_AUDIENCE_THUMBPRINT",
-            })?;
+        // The audience pins every access token to THIS wallet instance (D-5):
+        // an absolute-URI identity (e.g. `urn:zentity:wallet:<jkt>`) that the
+        // issuer mints into `aud` via an RFC 8707 resource indicator. Required
+        // and fails closed: a missing pin would let any token minted for any
+        // wallet verify here, so there is no safe default. The URI shape is
+        // validated when the SigningPolicy is built.
+        let audience = optional_env("ZSPEND_AUDIENCE").ok_or(StartupError::EnvMissing {
+            name: "ZSPEND_AUDIENCE",
+        })?;
 
         let jwks_file = optional_env("ZSPEND_JWKS_FILE").map(PathBuf::from);
         let public_base =
@@ -1244,7 +1456,10 @@ impl ResolvedConfig {
             .unwrap_or(60);
 
         let posture = posture_for_network(network);
-        let ledger_url = optional_env("ZSPEND_LEDGER_URL");
+        let ledger_url =
+            optional_env("ZSPEND_LEDGER_URL").unwrap_or_else(|| default_ledger_url(&storage_path));
+        let ledger_auth_token = optional_env("ZSPEND_LEDGER_AUTH_TOKEN");
+        let allow_dev_seed = env_flag("ZSPEND_ALLOW_DEV_SEED");
 
         let issuer_url = optional_env("ZSPEND_ISSUER_URL");
         let revocation_token = optional_env("ZSPEND_REVOCATION_TOKEN");
@@ -1266,12 +1481,14 @@ impl ResolvedConfig {
             sealed_seed_path,
             storage_path,
             max_amount_zat,
-            audience_thumbprint,
+            audience,
             jwks_file,
             public_sign_url,
             leeway_seconds,
             posture,
             ledger_url,
+            ledger_auth_token,
+            allow_dev_seed,
             issuer_url,
             revocation_token,
             revocation_max_staleness,
@@ -1290,33 +1507,25 @@ const fn posture_for_network(network: Network) -> &'static str {
     }
 }
 
-/// Fail-closed startup gate for the shared single-use ledger.
+/// Fail-closed startup gate for the seal and production postures (D-13).
 ///
-/// A configured `ZSPEND_LEDGER_URL` asks for fleet-wide single-use enforcement,
-/// but the shared backend is not yet wired (see `ledger.rs`). Booting anyway
-/// would silently fall back to the per-instance in-process ledger: several
-/// replicas could each sign the same access-token `jti` once. Refuse to start
-/// until the backend ships rather than serve that downgrade.
-fn reject_shared_ledger(ledger_url: Option<&str>) -> Result<(), StartupError> {
-    ledger_url.map_or(Ok(()), |url| {
-        Err(StartupError::SharedLedgerUnsupported {
-            provided: url.to_owned(),
-        })
-    })
-}
-
-/// Fail-closed startup gate for the production posture (D-13).
-///
-/// A `"production"` posture (mainnet) must boot with the issuer wiring that
-/// makes the trust boundary real: a configured issuer URL (so revocation is
-/// enforced, not silently disabled) and a non-empty JWKS (so access tokens can
-/// verify at all). Dev and testnet postures stay permissive so the happy-path
-/// E2E runs without the issuer wired.
+/// A dev-posture seal (age-file sealing) is refused unless `allow_dev_seed` is
+/// set, so a production deploy consciously acknowledges it is not fronting the
+/// seed with a KMS/HSM. A `"production"` posture (mainnet) must additionally
+/// boot with the issuer wiring that makes the trust boundary real: a configured
+/// issuer URL (so revocation is enforced, not silently disabled) and a non-empty
+/// JWKS (so access tokens can verify at all). Dev and testnet postures stay
+/// permissive so the happy-path E2E runs without the issuer wired.
 fn enforce_production_posture(
     posture: &str,
     issuer_present: bool,
     jwks_empty: bool,
+    seal_posture: SealingPosture,
+    allow_dev_seed: bool,
 ) -> Result<(), StartupError> {
+    if matches!(seal_posture, SealingPosture::Dev) && !allow_dev_seed {
+        return Err(StartupError::DevSeedPostureRefused);
+    }
     if posture != "production" {
         return Ok(());
     }
@@ -1340,6 +1549,21 @@ fn optional_env(name: &str) -> Option<String> {
         .ok()
         .map(|raw| raw.trim().to_owned())
         .filter(|raw| !raw.is_empty())
+}
+
+/// Whether `name` is set to the literal `1`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|raw| raw.trim() == "1")
+}
+
+/// Default single-use ledger URL: a `usage-ledger.db` file next to the wallet
+/// storage database so the ledger persists on the same volume.
+fn default_ledger_url(storage_path: &std::path::Path) -> String {
+    let ledger_path = storage_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("usage-ledger.db");
+    format!("file:{}", ledger_path.display())
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, StartupError> {
@@ -1370,7 +1594,7 @@ mod tests {
     };
     use crate::bootstrap::{BootstrapInputs, ChainSourceFactory, bootstrap};
     use crate::init;
-    use crate::ledger::{InProcessLedger, LedgerStore as _};
+    use crate::ledger::UsageLedger;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
@@ -1391,6 +1615,7 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt as _;
     use zally_core::Network;
+    use zally_keys::SealingPosture;
     use zally_testkit::MockChainSource;
     use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy};
 
@@ -1408,28 +1633,40 @@ mod tests {
     }
 
     #[test]
-    fn shared_ledger_url_is_rejected_until_backend_lands() {
-        assert!(super::reject_shared_ledger(None).is_ok());
+    fn dev_seed_posture_requires_allow_override() {
+        // A dev-posture seal is refused without the override, on any network.
         assert!(matches!(
-            super::reject_shared_ledger(Some("libsql://ledger.internal")),
-            Err(super::StartupError::SharedLedgerUnsupported { .. })
+            super::enforce_production_posture("dev", true, false, SealingPosture::Dev, false),
+            Err(super::StartupError::DevSeedPostureRefused)
         ));
+        // The override admits a dev-posture seal.
+        assert!(
+            super::enforce_production_posture("dev", true, false, SealingPosture::Dev, true)
+                .is_ok()
+        );
+        // A non-dev posture never needs the override.
+        assert!(
+            super::enforce_production_posture("dev", true, false, SealingPosture::Kms, false)
+                .is_ok()
+        );
     }
 
     #[test]
     fn production_posture_requires_issuer_and_jwks() {
-        // Dev posture is permissive even with nothing wired.
-        assert!(super::enforce_production_posture("dev", false, true).is_ok());
+        // Non-dev seal so the dev-seed gate does not mask the issuer/JWKS checks.
+        let seal = SealingPosture::Kms;
+        // Dev network posture is permissive even with nothing wired.
+        assert!(super::enforce_production_posture("dev", false, true, seal, false).is_ok());
         // Production with both wired starts.
-        assert!(super::enforce_production_posture("production", true, false).is_ok());
+        assert!(super::enforce_production_posture("production", true, false, seal, false).is_ok());
         // Production missing the issuer URL is refused.
         assert!(matches!(
-            super::enforce_production_posture("production", false, false),
+            super::enforce_production_posture("production", false, false, seal, false),
             Err(super::StartupError::ProductionPostureUnmet { .. })
         ));
         // Production missing the JWKS is refused.
         assert!(matches!(
-            super::enforce_production_posture("production", true, true),
+            super::enforce_production_posture("production", true, true, seal, false),
             Err(super::StartupError::ProductionPostureUnmet { .. })
         ));
     }
@@ -1470,13 +1707,13 @@ mod tests {
     fn signed_payload_serialises_with_expected_fields() -> Result<(), serde_json::Error> {
         let envelope = SignPaymentResponse {
             signed_payload: SignedPayloadWire {
-                format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL,
+                format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL.to_owned(),
                 bytes: "AAAA".to_owned(),
                 tx_id: "deadbeef".to_owned(),
                 fee: AmountWire {
-                    currency: "ZEC",
+                    currency: "ZEC".to_owned(),
                     value: "0".to_owned(),
-                    unit: "base",
+                    unit: "base".to_owned(),
                 },
                 expires_at: ExpiresAtWire::BlockHeight(4_047_100),
                 metadata: serde_json::Value::Null,
@@ -1499,6 +1736,55 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn wire_tx_id_is_the_send_outcome_txid_in_rpc_byte_order() {
+        use zally_core::{BlockHeight, TxId, Zatoshis};
+        use zally_wallet::{BroadcastOutcome, SendOutcome, SignedPczt};
+
+        // The two forms are byte-reversed views of one real testnet txid: the
+        // wallet holds internal consensus bytes; every text boundary renders
+        // the RPC-order hex that zcash-cli and block explorers display.
+        const INTERNAL_BYTES: [u8; 32] = [
+            0x36, 0x94, 0x55, 0xb7, 0x8a, 0xfc, 0xa3, 0xdc, 0xb5, 0x2b, 0xec, 0xfd, 0x38, 0x72,
+            0xba, 0xf5, 0xd0, 0x51, 0xb3, 0x2e, 0x81, 0x65, 0xbc, 0x2c, 0x79, 0x61, 0x06, 0x9e,
+            0xe6, 0x0c, 0xca, 0xc3,
+        ];
+        const RPC_HEX: &str = "c3ca0ce69e0661792cbc65812eb351d0f5ba7238fdec2bb5dca3fc8ab7559436";
+        // What `hex::encode` over the raw internal bytes would emit: the
+        // byte-reversed value that must never reach the wire.
+        const INTERNAL_ORDER_HEX: &str =
+            "369455b78afca3dcb52becfd3872baf5d051b32e8165bc2c7961069ee60ccac3";
+
+        let tx_id = TxId::from_bytes(INTERNAL_BYTES);
+        let outcome = SendOutcome {
+            signed: SignedPczt {
+                tx_id,
+                fee_zat: Zatoshis::zero(),
+                tx_expiry_height: BlockHeight::from(TARGET_EXPIRY),
+            },
+            broadcast: BroadcastOutcome {
+                tx_id,
+                broadcast_at_height: BlockHeight::from(0),
+            },
+        };
+
+        let wire = super::signed_payload_response(&outcome, b"raw-signed-bytes");
+
+        assert_eq!(
+            wire.signed_payload.tx_id,
+            outcome.signed.tx_id.to_rpc_hex(),
+            "wire tx_id must be the send outcome's own txid",
+        );
+        assert_eq!(
+            wire.signed_payload.tx_id, RPC_HEX,
+            "wire tx_id must render in canonical RPC byte order",
+        );
+        assert_ne!(
+            wire.signed_payload.tx_id, INTERNAL_ORDER_HEX,
+            "internal consensus-order bytes must not reach the wire",
+        );
+    }
+
     #[tokio::test]
     async fn readyz_reports_empty_jwks_and_503() -> Result<(), Box<dyn std::error::Error>> {
         // Default build_state_for_network leaves the JWKS empty.
@@ -1506,7 +1792,7 @@ mod tests {
         let (status, body) = readyz_state(&state);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["jwks_cache"], "empty");
-        assert_eq!(body["sealed_seed"], "available");
+        assert_eq!(body["sealed_seed"], "dev");
         assert_eq!(body["posture"], "dev");
         assert_eq!(body["revocation_cache"], "disabled");
         Ok(())
@@ -1520,6 +1806,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["jwks_cache"], "loaded");
         assert_eq!(body["revocation_cache"], "disabled");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metrics_route_renders_exposition() -> Result<(), Box<dyn std::error::Error>> {
+        let state = build_state_for_network(Network::Testnet, 4_047_000).await?;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/metrics")
+            .body(Body::empty())?;
+        let response = build_router(state).oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "metrics content-type must be text/plain, got {content_type}",
+        );
         Ok(())
     }
 
@@ -1560,7 +1867,7 @@ mod tests {
         let dir = tempdir()?;
         let sealed_seed = dir.path().join("wallet.age");
         let storage = dir.path().join("wallet.db");
-        init::run(sealed_seed.clone(), false).await?;
+        init::run(sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
         let (wallet, account_id) = bootstrap(BootstrapInputs {
@@ -1576,11 +1883,14 @@ mod tests {
         let policy = SigningPolicy::builder()
             .network(network)
             .max_amount_zat(1_000_000_000)
-            .audience_thumbprint("test-thumbprint")
+            .audience("urn:zentity:wallet:test")
             .build()?;
 
+        let ledger_url = format!("file:{}", dir.path().join("usage-ledger.db").display());
+        let spend_idempotency_cache = UsageLedger::open(&ledger_url, None).await?;
+
         // Hold `dir` for the wallet's lifetime by leaking it: the temp dir
-        // lives as long as the test process so the sqlite handle stays valid.
+        // lives as long as the test process so the sqlite handles stay valid.
         std::mem::forget(dir);
 
         Ok(AppState {
@@ -1591,11 +1901,15 @@ mod tests {
             public_sign_url: Arc::from("http://127.0.0.1:8090/v1/payments/sign"),
             leeway_seconds: 60,
             posture: "dev",
+            seal_posture: SealingPosture::Dev,
             dpop_proof_jti_seen: Arc::new(
                 parking_lot::Mutex::new(std::collections::HashMap::new()),
             ),
-            spend_idempotency_cache: Arc::new(InProcessLedger::new()),
+            spend_idempotency_cache,
             revocation: RevocationStore::disabled(),
+            metrics: metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build_recorder()
+                .handle(),
         })
     }
 
@@ -1649,7 +1963,7 @@ mod tests {
     // prove the integration.
 
     const ISSUER_KID: &str = "test-issuer";
-    const WALLET_AUDIENCE: &str = "test-thumbprint";
+    const WALLET_AUDIENCE: &str = "urn:zentity:wallet:test";
     const FAR_FUTURE: i64 = 4_102_444_800;
 
     struct FixtureIssuer {
@@ -2027,13 +2341,13 @@ mod tests {
         // would have. The replay must return it verbatim without re-signing.
         let cached = SignPaymentResponse {
             signed_payload: SignedPayloadWire {
-                format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL,
+                format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL.to_owned(),
                 bytes: "Y2FjaGVk".to_owned(),
                 tx_id: "cafef00d".to_owned(),
                 fee: AmountWire {
-                    currency: "ZEC",
+                    currency: "ZEC".to_owned(),
                     value: "1000".to_owned(),
-                    unit: "base",
+                    unit: "base".to_owned(),
                 },
                 expires_at: ExpiresAtWire::BlockHeight(TARGET_EXPIRY),
                 metadata: serde_json::Value::Null,
@@ -2041,10 +2355,12 @@ mod tests {
         };
         state
             .spend_idempotency_cache
-            .reserve(ACCESS_TOKEN_JTI, &intent_hash);
+            .reserve(ACCESS_TOKEN_JTI, &intent_hash)
+            .await?;
         state
             .spend_idempotency_cache
-            .commit(ACCESS_TOKEN_JTI, &intent_hash, cached);
+            .commit(ACCESS_TOKEN_JTI, &intent_hash, &cached)
+            .await?;
 
         let request = Request::builder()
             .method("POST")
@@ -2094,7 +2410,8 @@ mod tests {
         // reservation regardless of the wallet outcome.
         state
             .spend_idempotency_cache
-            .reserve(ACCESS_TOKEN_JTI, "v1:sha256:a-different-intent-hash");
+            .reserve(ACCESS_TOKEN_JTI, "v1:sha256:a-different-intent-hash")
+            .await?;
 
         let token = mint_token_with_intent(&issuer, &key.jkt, &recipient_caip10, &intent_hash)?;
         let proof = mint_dpop(&key, &token)?;

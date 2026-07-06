@@ -283,7 +283,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let paths = WalletPaths::new()?;
         let network = Network::regtest();
-        init::run(paths.sealed_seed.clone(), false).await?;
+        init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
         let (_wallet, first_account_id) = bootstrap(inputs(
@@ -315,7 +315,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let paths = WalletPaths::new()?;
         let network = Network::regtest();
-        init::run(paths.sealed_seed.clone(), false).await?;
+        init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
         let (_w1, first) = bootstrap(inputs(

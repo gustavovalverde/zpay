@@ -3,9 +3,10 @@
 //! Per Proposal-0003 D-13: the runtime reports its posture; it does not assume
 //! it. The [`SigningPolicy`] is the in-memory record of what the binary was
 //! configured to allow, and every request-time check ([`Self::network`],
-//! [`Self::max_amount_zat`], optional recipient allowlist, audience JWK
-//! thumbprint) is answered against this struct rather than re-reading env vars.
+//! [`Self::max_amount_zat`], optional recipient allowlist, audience URI) is
+//! answered against this struct rather than re-reading env vars.
 
+use url::Url;
 use zally_core::Network;
 
 /// Operator-pinned invariants the wallet enforces on every spend.
@@ -14,7 +15,7 @@ pub struct SigningPolicy {
     network: Network,
     max_amount_zat: u64,
     recipient_allowlist: Option<Vec<String>>,
-    audience_thumbprint: String,
+    audience: String,
 }
 
 impl SigningPolicy {
@@ -44,11 +45,12 @@ impl SigningPolicy {
         self.recipient_allowlist.as_deref()
     }
 
-    /// JWK thumbprint the access-token verifier uses to check `aud`. Pinned
+    /// Absolute-URI wallet identity the access-token verifier pins `aud`
+    /// against (e.g. `urn:zentity:wallet:<jkt>`). Validated as an absolute URI
     /// at startup; never read from request headers.
     #[must_use]
-    pub fn audience_thumbprint(&self) -> &str {
-        &self.audience_thumbprint
+    pub fn audience(&self) -> &str {
+        &self.audience
     }
 }
 
@@ -59,7 +61,7 @@ pub struct SigningPolicyBuilder {
     network: Option<Network>,
     max_amount_zat: Option<u64>,
     recipient_allowlist: Option<Vec<String>>,
-    audience_thumbprint: Option<String>,
+    audience: Option<String>,
 }
 
 impl SigningPolicyBuilder {
@@ -86,10 +88,11 @@ impl SigningPolicyBuilder {
         self
     }
 
-    /// Sets the JWK thumbprint the access-token verifier pins `aud` against.
+    /// Sets the absolute-URI wallet identity the access-token verifier pins
+    /// `aud` against (e.g. `urn:zentity:wallet:<jkt>`).
     #[must_use]
-    pub fn audience_thumbprint(mut self, thumbprint: impl Into<String>) -> Self {
-        self.audience_thumbprint = Some(thumbprint.into());
+    pub fn audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = Some(audience.into());
         self
     }
 
@@ -106,16 +109,20 @@ impl SigningPolicyBuilder {
             .ok_or(SigningPolicyError::MissingField {
                 field: "max_amount_zat",
             })?;
-        let audience_thumbprint =
-            self.audience_thumbprint
-                .ok_or(SigningPolicyError::MissingField {
-                    field: "audience_thumbprint",
-                })?;
+        let audience = self
+            .audience
+            .ok_or(SigningPolicyError::MissingField { field: "audience" })?;
+        // The issuer mints `aud` through an RFC 8707 resource indicator, which
+        // is an absolute URI; pin the same shape here so a bare-string misconfig
+        // fails fast at boot rather than silently mismatching every token.
+        if Url::parse(&audience).is_err() {
+            return Err(SigningPolicyError::InvalidAudience { audience });
+        }
         Ok(SigningPolicy {
             network,
             max_amount_zat,
             recipient_allowlist: self.recipient_allowlist,
-            audience_thumbprint,
+            audience,
         })
     }
 }
@@ -129,6 +136,14 @@ pub enum SigningPolicyError {
         /// Name of the missing field.
         field: &'static str,
     },
+    /// The audience is not an absolute URI (RFC 8707 §2). The issuer reaches
+    /// `aud` only through a resource indicator, which must be a URI, so a
+    /// bare-string pin could never match a real token.
+    #[error("signing policy audience must be an absolute URI (RFC 8707 §2): {audience}")]
+    InvalidAudience {
+        /// The rejected audience.
+        audience: String,
+    },
 }
 
 #[cfg(test)]
@@ -141,11 +156,11 @@ mod tests {
         let policy = SigningPolicy::builder()
             .network(Network::Testnet)
             .max_amount_zat(100_000_000)
-            .audience_thumbprint("jkt-fixture")
+            .audience("urn:zentity:wallet:fixture")
             .build()?;
         assert_eq!(policy.network(), Network::Testnet);
         assert_eq!(policy.max_amount_zat(), 100_000_000);
-        assert_eq!(policy.audience_thumbprint(), "jkt-fixture");
+        assert_eq!(policy.audience(), "urn:zentity:wallet:fixture");
         assert!(policy.recipient_allowlist().is_none());
         Ok(())
     }
@@ -154,7 +169,7 @@ mod tests {
     fn rejects_missing_network() {
         let outcome = SigningPolicy::builder()
             .max_amount_zat(1)
-            .audience_thumbprint("jkt")
+            .audience("urn:zentity:wallet:test")
             .build();
         assert!(matches!(
             outcome,
@@ -170,7 +185,20 @@ mod tests {
             .build();
         assert!(matches!(
             outcome,
-            Err(SigningPolicyError::MissingField { field }) if field == "audience_thumbprint",
+            Err(SigningPolicyError::MissingField { field }) if field == "audience",
+        ));
+    }
+
+    #[test]
+    fn rejects_non_uri_audience() {
+        let outcome = SigningPolicy::builder()
+            .network(Network::Mainnet)
+            .max_amount_zat(1)
+            .audience("not-a-uri")
+            .build();
+        assert!(matches!(
+            outcome,
+            Err(SigningPolicyError::InvalidAudience { audience }) if audience == "not-a-uri",
         ));
     }
 
@@ -179,7 +207,7 @@ mod tests {
         let policy = SigningPolicy::builder()
             .network(Network::Mainnet)
             .max_amount_zat(1)
-            .audience_thumbprint("jkt")
+            .audience("urn:zentity:wallet:test")
             .recipient_allowlist(Some(vec!["zcash:main:u1abc".to_owned()]))
             .build()?;
         assert_eq!(policy.recipient_allowlist().map(<[_]>::len), Some(1));

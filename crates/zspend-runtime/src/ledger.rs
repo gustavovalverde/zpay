@@ -7,7 +7,7 @@
 //! A crash between reserve and commit leaves a `Pending` reservation that a
 //! later identical retry treats as retryable rather than re-signing blind.
 //!
-//! [`reserve`](LedgerStore::reserve) returns one of four outcomes:
+//! [`UsageLedger::reserve`] returns one of four outcomes:
 //!
 //! - [`Reservation::Fresh`]: the `jti` was unseen; the caller proceeds to sign.
 //! - [`Reservation::Completed`]: an identical replay (same `jti`, same intent
@@ -20,18 +20,33 @@
 //!   hash but not yet committed (a prior attempt is in flight or crashed
 //!   mid-sign); the caller returns a retryable 503.
 //!
-//! The default [`InProcessLedger`] satisfies the contract for a single
-//! instance via an in-memory map. A shared backend (gated behind
-//! `ZSPEND_LEDGER_URL`) would let several wallet replicas enforce single-use
-//! across the fleet; until that lands the runtime runs single-instance.
+//! The store is libSQL-backed so the single-use guarantee survives a process
+//! restart and, against a shared libSQL URL, holds across several wallet
+//! replicas. The atomic claim is `INSERT ... ON CONFLICT (jti) DO NOTHING`
+//! followed by a read, inside one `IMMEDIATE` transaction, so two concurrent
+//! reserves of the same fresh `jti` cannot both win.
+//!
+//! The connection is opened through [`zpay_store::StoreConnection`] rather
+//! than a direct `libsql::Builder` call: this process also links
+//! `zally-storage`'s bundled `rusqlite`, and only one of the two embedded
+//! `SQLite` builds may configure the C library's global threading mode.
+//! `StoreConnection` is the connection path already exercised in
+//! `zpay-runtime` under that same constraint.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
+use libsql::{TransactionBehavior, params};
+use tokio::sync::Mutex;
+use zpay_store::StoreConnection;
 
 use crate::SignPaymentResponse;
+
+/// Schema version produced by applying every file under `migrations/`.
+const SCHEMA_VERSION: u32 = 1;
+
+/// libSQL statements that stand up the ledger schema, applied idempotently.
+const INITIAL_SCHEMA_SQL: &str = include_str!("../migrations/0001_initial.sql");
 
 /// How long a `Pending` reservation may sit uncommitted before reclaim.
 ///
@@ -44,7 +59,7 @@ pub(crate) const PENDING_RESERVATION_TTL: Duration = Duration::from_mins(2);
 #[derive(Debug)]
 pub(crate) enum Reservation {
     /// The `jti` was unseen and is now reserved against `intent_hash`. The
-    /// caller proceeds to sign and then [`commit`](LedgerStore::commit)s.
+    /// caller proceeds to sign and then [`UsageLedger::commit`]s.
     Fresh,
     /// An identical replay: the same `jti` already committed the same intent.
     /// The caller returns the cached payload without re-signing.
@@ -56,143 +71,312 @@ pub(crate) enum Reservation {
     Pending,
 }
 
-/// Single-use `jti` store: reserve before signing, commit after.
-pub(crate) trait LedgerStore: Send + Sync {
-    /// Reserve `jti` against `intent_hash` before signing.
-    fn reserve(&self, jti: &str, intent_hash: &str) -> Reservation;
-
-    /// Commit the signed `response` for a `jti` reserved against `intent_hash`,
-    /// making a later identical replay return [`Reservation::Completed`]. The
-    /// caller passes the same `intent_hash` it reserved with, so the committed
-    /// record carries the verified intent rather than re-reading a prior entry.
-    fn commit(&self, jti: &str, intent_hash: &str, response: SignPaymentResponse);
-
-    /// Release a reservation (e.g. when signing failed) so a retry with the
-    /// same `jti` and intent sees [`Reservation::Fresh`] rather than waiting
-    /// out the pending TTL.
-    fn release(&self, jti: &str);
+/// Errors returned by the single-use ledger.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LedgerError {
+    #[error("ledger backend open failed for {url:?}: {reason}")]
+    Open { url: String, reason: String },
+    #[error(
+        "ledger backend at {url:?} is a remote libsql:// URL but no auth token was provided; set ZSPEND_LEDGER_AUTH_TOKEN"
+    )]
+    MissingAuthToken { url: String },
+    #[error("ledger schema version {found} is newer than this binary supports")]
+    SchemaTooNew { found: u32 },
+    #[error("ledger statement failed: {reason}")]
+    Statement { reason: String },
+    #[error("ledger row malformed: {reason}")]
+    RowMalformed { reason: String },
 }
 
-/// One `jti`'s state in the in-process ledger.
-enum Entry {
-    /// Reserved at `since`, not yet committed.
-    Pending { intent_hash: String, since: Instant },
-    /// Committed: the signed payload an identical replay returns.
-    Committed {
-        intent_hash: String,
-        response: Box<SignPaymentResponse>,
-    },
-}
-
-/// In-memory [`LedgerStore`] for a single wallet instance.
+/// libSQL-backed single-use `jti` store: reserve before signing, commit after.
+///
+/// Cloning is cheap; clones share the same connection and serialization lock.
 #[derive(Clone)]
-pub(crate) struct InProcessLedger {
-    entries: Arc<Mutex<HashMap<String, Entry>>>,
+pub(crate) struct UsageLedger {
+    connection: StoreConnection,
+    /// Serializes every ledger operation against the shared connection.
+    /// `reserve_at` holds an open multi-statement `BEGIN IMMEDIATE ..
+    /// COMMIT` span; a `commit` or `release` issued on the same connection
+    /// while that span is open would either collide with it or get folded
+    /// into it, so every operation (not just the transaction) takes this
+    /// lock for its whole body.
+    lock: Arc<Mutex<()>>,
 }
 
-impl InProcessLedger {
-    /// Construct an empty in-process ledger.
-    pub(crate) fn new() -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+impl UsageLedger {
+    /// Opens the ledger at `url` and applies the schema migrations.
+    ///
+    /// `url` accepts `file:<path>` or `libsql://<host>`, matching
+    /// [`StoreConnection`]'s contract. `auth_token` is required for a
+    /// `libsql://` URL, checked before any connection attempt, and ignored
+    /// for a file path.
+    pub(crate) async fn open(url: &str, auth_token: Option<&str>) -> Result<Self, LedgerError> {
+        if url.starts_with("libsql://") && auth_token.is_none() {
+            return Err(LedgerError::MissingAuthToken {
+                url: url.to_owned(),
+            });
         }
+        let connection = StoreConnection::open(url, auth_token)
+            .await
+            .map_err(|err| LedgerError::Open {
+                url: url.to_owned(),
+                reason: err.to_string(),
+            })?;
+        run_migrations(&connection).await?;
+        Ok(Self {
+            connection,
+            lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    /// Reserves `jti` against `intent_hash` before signing.
+    pub(crate) async fn reserve(
+        &self,
+        jti: &str,
+        intent_hash: &str,
+    ) -> Result<Reservation, LedgerError> {
+        self.reserve_at(jti, intent_hash, now_ms()).await
+    }
+
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard must span the whole IMMEDIATE transaction to serialize BEGIN across tasks sharing one libSQL connection"
+    )]
+    async fn reserve_at(
+        &self,
+        jti: &str,
+        intent_hash: &str,
+        now_ms: i64,
+    ) -> Result<Reservation, LedgerError> {
+        let guard = self.lock.lock().await;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(statement)?;
+
+        let inserted = transaction
+            .execute(
+                "INSERT INTO usage_ledger (jti, intent_hash, state, response_json, reserved_at_ms) \
+                 VALUES (?1, ?2, 'pending', NULL, ?3) \
+                 ON CONFLICT(jti) DO NOTHING",
+                params![jti, intent_hash, now_ms],
+            )
+            .await
+            .map_err(statement)?;
+        if inserted == 1 {
+            transaction.commit().await.map_err(statement)?;
+            drop(guard);
+            return Ok(Reservation::Fresh);
+        }
+
+        let row =
+            read_entry(&transaction, jti)
+                .await?
+                .ok_or_else(|| LedgerError::RowMalformed {
+                    reason: format!("jti {jti} conflicted on insert but no row was found"),
+                })?;
+        let outcome = classify_existing(&transaction, jti, intent_hash, now_ms, row).await?;
+        transaction.commit().await.map_err(statement)?;
+        drop(guard);
+        Ok(outcome)
+    }
+
+    /// Commits the signed `response` for a `jti` reserved against `intent_hash`,
+    /// making a later identical replay return [`Reservation::Completed`].
+    pub(crate) async fn commit(
+        &self,
+        jti: &str,
+        intent_hash: &str,
+        response: &SignPaymentResponse,
+    ) -> Result<(), LedgerError> {
+        let json = serde_json::to_string(response).map_err(|err| LedgerError::Statement {
+            reason: format!("signed payload did not serialize: {err}"),
+        })?;
+        let guard = self.lock.lock().await;
+        self.connection
+            .execute(
+                "INSERT INTO usage_ledger (jti, intent_hash, state, response_json, reserved_at_ms) \
+                 VALUES (?1, ?2, 'completed', ?3, ?4) \
+                 ON CONFLICT(jti) DO UPDATE SET \
+                    state = 'completed', \
+                    intent_hash = excluded.intent_hash, \
+                    response_json = excluded.response_json",
+                params![jti, intent_hash, json, now_ms()],
+            )
+            .await
+            .map_err(statement)?;
+        drop(guard);
+        Ok(())
+    }
+
+    /// Releases a still-pending reservation (e.g. when signing failed) so a
+    /// retry with the same `jti` sees [`Reservation::Fresh`]. A committed row is
+    /// the single-use record and is left untouched.
+    pub(crate) async fn release(&self, jti: &str) -> Result<(), LedgerError> {
+        let guard = self.lock.lock().await;
+        self.connection
+            .execute(
+                "DELETE FROM usage_ledger WHERE jti = ?1 AND state = 'pending'",
+                params![jti],
+            )
+            .await
+            .map_err(statement)?;
+        drop(guard);
+        Ok(())
     }
 }
 
-impl LedgerStore for InProcessLedger {
-    fn reserve(&self, jti: &str, intent_hash: &str) -> Reservation {
-        let mut entries = self.entries.lock();
-        match entries.get(jti) {
-            Some(Entry::Committed {
-                intent_hash: committed_intent,
-                response,
-            }) => {
-                if committed_intent == intent_hash {
-                    Reservation::Completed((**response).clone())
-                } else {
-                    Reservation::IntentConflict
-                }
-            }
-            Some(Entry::Pending {
-                intent_hash: pending_intent,
-                since,
-            }) => {
-                if pending_intent != intent_hash {
-                    Reservation::IntentConflict
-                } else if since.elapsed() >= PENDING_RESERVATION_TTL {
-                    // The prior attempt abandoned the reservation; reclaim it.
-                    entries.insert(
-                        jti.to_owned(),
-                        Entry::Pending {
-                            intent_hash: intent_hash.to_owned(),
-                            since: Instant::now(),
-                        },
-                    );
-                    Reservation::Fresh
-                } else {
-                    Reservation::Pending
-                }
-            }
-            None => {
-                entries.insert(
-                    jti.to_owned(),
-                    Entry::Pending {
-                        intent_hash: intent_hash.to_owned(),
-                        since: Instant::now(),
-                    },
-                );
-                Reservation::Fresh
-            }
-        }
-    }
+/// One `usage_ledger` row read back during a reserve.
+struct LedgerRow {
+    intent_hash: String,
+    state: String,
+    response_json: Option<String>,
+    reserved_at_ms: i64,
+}
 
-    fn commit(&self, jti: &str, intent_hash: &str, response: SignPaymentResponse) {
-        let mut entries = self.entries.lock();
-        entries.insert(
-            jti.to_owned(),
-            Entry::Committed {
-                intent_hash: intent_hash.to_owned(),
-                response: Box::new(response),
-            },
-        );
-    }
-
-    fn release(&self, jti: &str) {
-        // Only drop a still-pending reservation: a committed entry is the
-        // single-use record and must survive a late release call.
-        let mut entries = self.entries.lock();
-        if matches!(entries.get(jti), Some(Entry::Pending { .. })) {
-            entries.remove(jti);
+/// Classify an existing `jti` row against the reserving `intent_hash`, reclaiming
+/// an expired pending reservation in place.
+async fn classify_existing(
+    transaction: &libsql::Transaction,
+    jti: &str,
+    intent_hash: &str,
+    now_ms: i64,
+    row: LedgerRow,
+) -> Result<Reservation, LedgerError> {
+    if row.state == "completed" {
+        if row.intent_hash != intent_hash {
+            return Ok(Reservation::IntentConflict);
         }
+        let json = row.response_json.ok_or_else(|| LedgerError::RowMalformed {
+            reason: format!("completed jti {jti} has no stored payload"),
+        })?;
+        let response = serde_json::from_str(&json).map_err(|err| LedgerError::RowMalformed {
+            reason: format!("stored payload for jti {jti} did not parse: {err}"),
+        })?;
+        return Ok(Reservation::Completed(response));
+    }
+    if row.intent_hash != intent_hash {
+        return Ok(Reservation::IntentConflict);
+    }
+    let ttl_ms = i64::try_from(PENDING_RESERVATION_TTL.as_millis()).unwrap_or(i64::MAX);
+    if now_ms.saturating_sub(row.reserved_at_ms) >= ttl_ms {
+        transaction
+            .execute(
+                "UPDATE usage_ledger SET reserved_at_ms = ?1 WHERE jti = ?2",
+                params![now_ms, jti],
+            )
+            .await
+            .map_err(statement)?;
+        return Ok(Reservation::Fresh);
+    }
+    Ok(Reservation::Pending)
+}
+
+async fn read_entry(
+    transaction: &libsql::Transaction,
+    jti: &str,
+) -> Result<Option<LedgerRow>, LedgerError> {
+    let mut rows = transaction
+        .query(
+            "SELECT intent_hash, state, response_json, reserved_at_ms \
+             FROM usage_ledger WHERE jti = ?1",
+            params![jti],
+        )
+        .await
+        .map_err(statement)?;
+    let Some(row) = rows.next().await.map_err(statement)? else {
+        return Ok(None);
+    };
+    Ok(Some(LedgerRow {
+        intent_hash: row.get(0).map_err(row_malformed)?,
+        state: row.get(1).map_err(row_malformed)?,
+        response_json: row.get(2).map_err(row_malformed)?,
+        reserved_at_ms: row.get(3).map_err(row_malformed)?,
+    }))
+}
+
+async fn run_migrations(connection: &StoreConnection) -> Result<(), LedgerError> {
+    connection
+        .execute_transactional_batch(INITIAL_SCHEMA_SQL)
+        .await
+        .map_err(statement)?;
+    let applied = max_applied_version(connection).await?;
+    if applied > SCHEMA_VERSION {
+        return Err(LedgerError::SchemaTooNew { found: applied });
+    }
+    Ok(())
+}
+
+async fn max_applied_version(connection: &StoreConnection) -> Result<u32, LedgerError> {
+    let mut rows = connection
+        .query(
+            "SELECT COALESCE(MAX(version), 0) FROM zspend_schema_migrations",
+            params![],
+        )
+        .await
+        .map_err(statement)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(statement)?
+        .ok_or_else(|| LedgerError::RowMalformed {
+            reason: "migration table missing after batch apply".to_owned(),
+        })?;
+    let raw: i64 = row.get(0).map_err(row_malformed)?;
+    u32::try_from(raw).map_err(|_| LedgerError::RowMalformed {
+        reason: "migration version overflowed u32".to_owned(),
+    })
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as a map_err adapter, which passes the error by value"
+)]
+fn statement(err: libsql::Error) -> LedgerError {
+    LedgerError::Statement {
+        reason: err.to_string(),
     }
 }
 
-// TODO(ZSPEND_LEDGER_URL): add a libsql-backed `LedgerStore` so several wallet
-// replicas enforce single-use `jti` across the fleet. The trait is the seam:
-// `reserve` becomes an atomic upsert (INSERT ... ON CONFLICT returning the
-// stored intent_hash + committed payload) and `commit`/`release` become row
-// updates. Select it in `serve()` when `ResolvedConfig::ledger_url` is set;
-// the in-process default stands in for single-instance deploys until then.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as a map_err adapter, which passes the error by value"
+)]
+fn row_malformed(err: libsql::Error) -> LedgerError {
+    LedgerError::RowMalformed {
+        reason: err.to_string(),
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{InProcessLedger, LedgerStore, Reservation};
+    use super::{LedgerError, PENDING_RESERVATION_TTL, Reservation, UsageLedger};
     use crate::{AmountWire, ExpiresAtWire, SignPaymentResponse, SignedPayloadWire};
+    use tempfile::TempDir;
 
     const JTI: &str = "01ACCESSTOKENJTI0000000000";
     const INTENT: &str = "v1:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const OTHER_INTENT: &str = "v1:sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
-    fn fixture_response() -> SignPaymentResponse {
+    fn fixture_response(tx_id: &str) -> SignPaymentResponse {
         SignPaymentResponse {
             signed_payload: SignedPayloadWire {
-                format: "raw-zcash-v5",
+                format: "raw-zcash-v5".to_owned(),
                 bytes: "AAAA".to_owned(),
-                tx_id: "deadbeef".to_owned(),
+                tx_id: tx_id.to_owned(),
                 fee: AmountWire {
-                    currency: "ZEC",
+                    currency: "ZEC".to_owned(),
                     value: "0".to_owned(),
-                    unit: "base",
+                    unit: "base".to_owned(),
                 },
                 expires_at: ExpiresAtWire::BlockHeight(4_047_100),
                 metadata: serde_json::Value::Null,
@@ -200,74 +384,222 @@ mod tests {
         }
     }
 
-    #[test]
-    fn first_reserve_is_fresh() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
+    async fn ledger_in(dir: &TempDir) -> Result<UsageLedger, Box<dyn std::error::Error>> {
+        let url = format!("file:{}", dir.path().join("usage-ledger.db").display());
+        Ok(UsageLedger::open(&url, None).await?)
     }
 
-    #[test]
-    fn reserve_before_commit_is_pending_for_same_intent() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Pending));
-    }
-
-    #[test]
-    fn reserve_with_different_intent_conflicts_before_commit() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
+    #[tokio::test]
+    async fn first_reserve_is_fresh() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
         assert!(matches!(
-            ledger.reserve(JTI, OTHER_INTENT),
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reserve_before_commit_is_pending_for_same_intent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
+        ));
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Pending
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reserve_with_different_intent_conflicts_before_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
+        ));
+        assert!(matches!(
+            ledger.reserve(JTI, OTHER_INTENT).await?,
             Reservation::IntentConflict
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identical_replay_after_commit_returns_cached_payload() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
-        ledger.commit(JTI, INTENT, fixture_response());
-        let cached_tx_id = match ledger.reserve(JTI, INTENT) {
+    #[tokio::test]
+    async fn identical_replay_after_commit_returns_cached_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
+        ));
+        ledger
+            .commit(JTI, INTENT, &fixture_response("deadbeef"))
+            .await?;
+        let cached = match ledger.reserve(JTI, INTENT).await? {
+            Reservation::Completed(cached) => cached.signed_payload.tx_id,
+            Reservation::Fresh | Reservation::IntentConflict | Reservation::Pending => {
+                String::new()
+            }
+        };
+        assert_eq!(cached, "deadbeef", "replay must return the cached payload");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn different_intent_after_commit_conflicts() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        ledger.reserve(JTI, INTENT).await?;
+        ledger
+            .commit(JTI, INTENT, &fixture_response("deadbeef"))
+            .await?;
+        assert!(matches!(
+            ledger.reserve(JTI, OTHER_INTENT).await?,
+            Reservation::IntentConflict
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_lets_a_retry_reserve_fresh() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        ledger.reserve(JTI, INTENT).await?;
+        ledger.release(JTI).await?;
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_does_not_drop_a_committed_entry() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        ledger.reserve(JTI, INTENT).await?;
+        ledger
+            .commit(JTI, INTENT, &fixture_response("deadbeef"))
+            .await?;
+        ledger.release(JTI).await?;
+        assert!(matches!(
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Completed(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_row_survives_reopen() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let url = format!("file:{}", dir.path().join("usage-ledger.db").display());
+        {
+            let ledger = UsageLedger::open(&url, None).await?;
+            ledger.reserve(JTI, INTENT).await?;
+            ledger
+                .commit(JTI, INTENT, &fixture_response("cafef00d"))
+                .await?;
+        }
+        let reopened = UsageLedger::open(&url, None).await?;
+        let cached = match reopened.reserve(JTI, INTENT).await? {
             Reservation::Completed(cached) => cached.signed_payload.tx_id,
             Reservation::Fresh | Reservation::IntentConflict | Reservation::Pending => {
                 String::new()
             }
         };
         assert_eq!(
-            cached_tx_id, "deadbeef",
-            "an identical replay must return the cached signed payload",
+            cached, "cafef00d",
+            "a committed reservation must survive a process restart",
         );
+        Ok(())
     }
 
-    #[test]
-    fn different_intent_after_commit_conflicts() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
-        ledger.commit(JTI, INTENT, fixture_response());
+    #[tokio::test]
+    async fn pending_reservation_is_reclaimable_after_ttl() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        let ttl_ms = i64::try_from(PENDING_RESERVATION_TTL.as_millis())?;
+        // Reserve at a base instant, then reserve again one TTL later so the
+        // pending row is past its reclaim window.
         assert!(matches!(
-            ledger.reserve(JTI, OTHER_INTENT),
-            Reservation::IntentConflict
+            ledger.reserve_at(JTI, INTENT, 1_000_000).await?,
+            Reservation::Fresh
+        ));
+        assert!(matches!(
+            ledger.reserve_at(JTI, INTENT, 1_000_000 + ttl_ms).await?,
+            Reservation::Fresh
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_reservation_is_held_before_ttl() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
+        let ttl_ms = i64::try_from(PENDING_RESERVATION_TTL.as_millis())?;
+        assert!(matches!(
+            ledger.reserve_at(JTI, INTENT, 1_000_000).await?,
+            Reservation::Fresh
+        ));
+        assert!(matches!(
+            ledger
+                .reserve_at(JTI, INTENT, 1_000_000 + ttl_ms - 1)
+                .await?,
+            Reservation::Pending
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_url_without_auth_token_fails_closed() {
+        let outcome = UsageLedger::open("libsql://example.turso.io", None).await;
+        assert!(matches!(
+            outcome,
+            Err(LedgerError::MissingAuthToken { url }) if url == "libsql://example.turso.io"
         ));
     }
 
-    #[test]
-    fn release_lets_a_retry_reserve_fresh() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
-        ledger.release(JTI);
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
+    #[tokio::test]
+    async fn local_path_ignores_a_supplied_auth_token() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let url = format!("file:{}", dir.path().join("usage-ledger.db").display());
+        UsageLedger::open(&url, Some("unused-token")).await?;
+        Ok(())
     }
 
-    #[test]
-    fn release_does_not_drop_a_committed_entry() {
-        let ledger = InProcessLedger::new();
-        assert!(matches!(ledger.reserve(JTI, INTENT), Reservation::Fresh));
-        ledger.commit(JTI, INTENT, fixture_response());
-        ledger.release(JTI);
+    /// Regression test for a startup panic under a real multi-thread runtime.
+    ///
+    /// `#[tokio::test]`'s default single-threaded flavor cannot reproduce a
+    /// `sqlite3_config` misuse that only surfaces under `rt-multi-thread`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reserve_commit_replay_survives_multi_thread_runtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let ledger = ledger_in(&dir).await?;
         assert!(matches!(
-            ledger.reserve(JTI, INTENT),
-            Reservation::Completed(_)
+            ledger.reserve(JTI, INTENT).await?,
+            Reservation::Fresh
         ));
+        ledger
+            .commit(JTI, INTENT, &fixture_response("deadbeef"))
+            .await?;
+        let cached = match ledger.reserve(JTI, INTENT).await? {
+            Reservation::Completed(cached) => cached.signed_payload.tx_id,
+            Reservation::Fresh | Reservation::IntentConflict | Reservation::Pending => {
+                String::new()
+            }
+        };
+        assert_eq!(cached, "deadbeef", "replay must return the cached payload");
+        Ok(())
     }
 }

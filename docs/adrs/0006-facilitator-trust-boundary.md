@@ -207,6 +207,24 @@ Revisit only if a concrete consumer asks for the collapse.
   is asymmetric across receiver kinds; the cleanest position is
   "settle is intent-blind for every receiver kind."
 
+## Revision history
+
+### 2026-07-05: The expiry gate is transaction-version-agnostic across v5 and v6
+
+The `/settle` well-formedness gate parses the signed transaction bytes
+through zally (`parse_signed_expiry_height` in
+`crates/zpay-core/src/settle.rs` delegates to
+`zally_storage::parse_v5_expiry_height`), which calls
+`zcash_primitives::transaction::Transaction::read`. That reader dispatches
+on the version header it reads from the wire: a v5 transaction and a v6
+(NU6.3/Ironwood) transaction both carry the consensus branch id and the
+`expiry_height` in a shared header fragment, so the gate recovers the expiry
+height for either version without a version argument steering the parse.
+The Decision table's "Zcash v5 transaction" wording covers both: the gate
+is transaction-version-agnostic across v5 and v6, and the expiry-height
+equality check is the same for either. Recipient, amount, and memo remain
+unchecked at settle, as the Decision holds.
+
 [zip244]: https://zips.z.cash/zip-0244
 [zip302]: https://zips.z.cash/zip-0302
 [zip311]: https://zips.z.cash/zip-0311

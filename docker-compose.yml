@@ -86,6 +86,15 @@ services:
       ZSPEND_NETWORK: ${ZSPEND_NETWORK:-testnet}
       ZSPEND_SEALED_SEED_PATH: /var/lib/zspend/wallet.age
       ZSPEND_STORAGE_PATH: /var/lib/zspend/wallet.db
+      # Dev-only: let the entrypoint auto-provision a throwaway sealed seed
+      # when the volume is empty. Production MUST leave this unset and run
+      # `zspend-runtime init` (or `init --restore`) so the mnemonic is backed
+      # up offline; the entrypoint refuses to boot otherwise.
+      ZSPEND_ALLOW_AUTO_PROVISION: "1"
+      # Dev-only: the age-file sealing is a dev-posture seed. Production MUST
+      # front the seed with a KMS/HSM sealing; the runtime refuses to serve a
+      # dev-posture seed unless this override is set.
+      ZSPEND_ALLOW_DEV_SEED: "1"
       # Point home_dir() at a writable path whose `.zcash-params`
       # subdirectory is the host params bind-mount below. zcash_proofs
       # locates sapling-spend.params and sapling-output.params via
@@ -101,7 +110,7 @@ services:
       ZSPEND_CHAIN_SOURCE_URL: ${ZSPEND_CHAIN_SOURCE_URL:-http://zinder-query:9101}
       # Optional overrides; see crates/zspend-runtime/src/main.rs.
       # ZSPEND_MAX_AMOUNT_ZAT: "100000000"
-      # ZSPEND_AUDIENCE_THUMBPRINT: "phase4-stub-thumbprint"
+      # ZSPEND_AUDIENCE: "urn:zentity:wallet:phase4-stub"
       # Pinned to a height well below zinder's safe_tip so the
       # first-boot tree_state_at(birthday - 1) lookup hits an
       # already-indexed checkpoint. zinder's safe_tip lags the actual

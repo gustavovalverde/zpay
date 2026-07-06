@@ -293,3 +293,33 @@ invariants:
 The script is the regression gate for the persistence slice. Run it
 before any change to `zpay-store`, the migrations, or the
 `PreparedTxStore` / `SettlementLedgerStore` traits.
+
+### 2026-07-05: Schema version 2 (reorg-aware ledger); no bearer table; separate zspend ledger
+
+Migration `0002_reorg_aware_settlement.sql` takes the schema to version 2.
+It adds three columns to `settlement_ledger`: `reorg_count INTEGER NOT NULL
+DEFAULT 0`, `last_reorged_at INTEGER` (nullable), and `expiry_height
+INTEGER` (nullable), plus a partial index on `mined_block_height` where it
+is non-null. `reorg_count` and `last_reorged_at` record a payment's
+regression when a reorg drops its block; `expiry_height` carries the
+prepared expiry onto the ledger so an unmined row can lapse to `Expired`
+after the success path removes its prepared row. These columns back the
+settlement lifecycle in
+[ADR-0009](0009-settlement-lifecycle-and-finality.md).
+
+There is no `bearer_key_hash` table. Schema version 1 creates exactly
+`zpay_schema_migrations`, `prepared_tx`, and `settlement_ledger`; the
+scaffold's bearer-key allowlist never shipped, and zpay exposes no
+bearer-key surface. The Context and Decision references to a
+`bearer_key_hash` table are superseded by this entry.
+
+The wallet runtime (`zspend-runtime`) owns a separate single-file libSQL
+database for its single-use `jti` ledger, not part of the `zpay-store`
+schema. It is `usage_ledger`, addressed by `ZSPEND_LEDGER_URL` (default a
+`usage-ledger.db` file beside `ZSPEND_STORAGE_PATH`), with its own
+migration at `crates/zspend-runtime/migrations/0001_initial.sql`. zpay's
+store and the wallet's ledger share neither a schema nor a connection.
+
+A `libsql://` remote URL requires `ZSPEND_LEDGER_AUTH_TOKEN`; startup fails
+closed with a typed error rather than opening an unauthenticated connection
+when the token is missing. A file-backed URL ignores the token.

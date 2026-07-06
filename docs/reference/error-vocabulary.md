@@ -5,103 +5,128 @@ Each entry carries: the variant name, the layer that produces it, the
 retry posture, the HTTP status code (when produced at a wire boundary),
 and a one-line operator hint.
 
-This document is the source of truth. Code generates from it (when the
-`utoipa` schema needs an enum), tests assert against it, and PRs that
-add a new error variant must update this table in the same change.
+The Rust enums are the source of truth; this table mirrors them. Each
+wire-boundary variant maps to a `kind` code and an HTTP status in the
+x402 adapter. A PR that adds or renames a variant updates both the enum
+and this table in the same change.
 
 ## Retry posture vocabulary
 
 - **`retryable`**: the same request, retried, may succeed without the
-  caller doing anything. Network blips, chain-stale conditions, JWKS
-  cache miss with re-fetch in progress.
+  caller doing anything. Chain-plane blips, chain-tip oracle
+  unavailable, store connection exhaustion, DPoP clock skew inside a
+  resignable window.
 - **`not_retryable`**: the caller's inputs are wrong. Retrying with the
   same inputs produces the same error. The caller must change the
   request before retrying.
 - **`requires_operator`**: the zpay operator must act before the next
-  retry can succeed. Database unavailable, JWKS endpoint down,
-  capability disabled, schema migration pending.
+  retry can succeed. Schema migration pending, chain-tip oracle
+  reporting a zero tip, a stored row that fails to deserialize.
+
+## Wire envelope
+
+At the x402 boundary a typed error renders as an
+`application/problem+json` document with four fields: `title`, `kind`,
+`detail`, and `retryable`. The `kind` is the machine-readable code a
+consumer branches on.
+
+### Rate limit (429)
+
+The DPoP-`jkt` and client-IP rate limiters return this when a key exceeds
+its fixed-window budget (see
+[operational-surfaces.md](../architecture/operational-surfaces.md)).
+
+| Field | Value |
+|-------|-------|
+| HTTP | 429 Too Many Requests |
+| `kind` | `rate_limited` |
+| `title` | `Too Many Requests` |
+| `detail` | `per-key request rate limit exceeded; retry after the window resets` |
+| `retryable` | `true` |
+| Header | `Retry-After: <seconds until the window rolls over>` |
 
 ## Errors by layer
 
-### `zpay-core::error::PrepareError`
+### `zpay_core::prepare::PrepareError`
 
-| Variant | Retry | HTTP | Operator hint |
-|---------|-------|------|---------------|
-| `MerchantUnknown { merchant_id }` | not_retryable | 404 | Caller used an unregistered merchant. Operator: confirm TOML config has the merchant. |
-| `RecipientAddressInvalid { reason }` | not_retryable | 422 | Caller's recipient does not parse or is wrong network. |
-| `MemoOversize { actual_bytes, max_bytes }` | not_retryable | 422 | Caller requested a memo over 512 bytes. |
-| `AgentAssertionInvalid { reason }` | not_retryable | 401 | Agent-Assertion JWT failed verification. |
-| `DpopProofInvalid { reason }` | not_retryable | 401 | DPoP proof header malformed or mismatched. |
-| `StoreInsertFailed { source }` | requires_operator | 503 | libSQL connection failed; check `/readyz` dependencies. |
-| `ChainStale { derive_lag_blocks }` | retryable | 503 | Upstream zinder is lagging; retry after derive_lag_blocks < 16. |
+Produced by `propose`; rendered at `POST /x402/v2/prepare`.
 
-### `zpay-core::error::SettleError`
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `PayeeUnknown { payee_id }` | not_retryable | 404 | `payee_unknown` | Caller named a payee the registry does not hold; register it or use an existing id. |
+| `SchemeNetworkUnsupported { payee_id, scheme, network }` | not_retryable | 422 | `scheme_network_unsupported` | Registered payee has no `accepts[]` entry for the requested scheme on that network. |
+| `ExpiryHeightInvalid` | requires_operator | 502 | `tip_oracle_zero_tip` | Chain-tip oracle returned zero; point the runtime at a healthy chain plane. |
+| `TipOracle(TipError)` | inherits | 502 | `tip_oracle_unavailable` | Chain-tip oracle unreachable; check the `/readyz` chain dependency. |
+| `Storage(StoreError)` | inherits | 503 | `prepared_store_unavailable` | Prepared-tx store unreachable; check the `/readyz` store dependency. |
 
-| Variant | Retry | HTTP | Operator hint |
-|---------|-------|------|---------------|
-| `PreparationNotFound { payment_id }` | not_retryable | 404 | Caller's payment_id does not exist or expired. |
-| `PreparationExpired { payment_id, expires_at_unix_seconds }` | not_retryable | 410 | Prepared transaction expired; agent must re-prepare. |
-| `TransactionMalformed { reason }` | not_retryable | 422 | raw_tx_hex did not parse as a valid v5 transaction. |
-| `TransactionRecipientMismatch` | not_retryable | 422 | Signed tx's recipient does not match the prepared recipient. |
-| `TransactionAmountMismatch { expected_zat, actual_zat }` | not_retryable | 422 | Signed tx's amount does not match the prepared amount. |
-| `TransactionMemoMismatch` | not_retryable | 422 | Signed tx's memo does not match the prepared memo bytes. |
-| `TransactionExpiryHeightStale { current_height, expiry_height }` | not_retryable | 422 | Signed tx's expiry_height has passed since prepare. |
-| `PohTokenInvalid { reason }` | not_retryable | 401 | PoH token failed signature or claim verification. |
-| `PohVerificationLevelTooLow { required, actual }` | not_retryable | 403 | Payer's verification level is below the merchant's minimum. |
-| `BroadcastRejected { zinder_reason }` | depends | 502 | zinder rejected the broadcast; reason describes the next step. |
-| `BroadcastDuplicate { existing_txid }` | not_retryable | 200 | Already broadcast; this is an idempotent success. |
-| `IndexerUnavailable { source }` | requires_operator | 503 | zinder unreachable; check `/readyz`. |
-| `StoreUnavailable { source }` | requires_operator | 503 | libSQL unreachable; check `/readyz`. |
-| `JwksUnavailable { source }` | requires_operator | 503 | zentity JWKS endpoint unreachable; check `/readyz`. |
+### `zpay_core::settle::SettleError`
 
-### `zpay-core::error::OracleError`
+Produced by `submit_settlement`; rendered at `POST /x402/v2/settle`.
 
-| Variant | Retry | HTTP | Operator hint |
-|---------|-------|------|---------------|
-| `PaymentNotFound { payment_id }` | not_retryable | 404 | Caller's payment_id never reached settle. |
-| `LedgerNotFound { txid }` | not_retryable | 404 | Caller's txid not associated with any zpay payment. |
-| `LedgerStale { last_check_age_seconds }` | retryable | 200 | Ledger has not been refreshed by the subscription; oracle is degraded. |
-| `WatchEndpointUnavailable { source }` | requires_operator | 503 | Fallback zexplorer watch endpoint unreachable. |
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `PreparationNotFound { payment_id }` | not_retryable | 404 | `preparation_not_found` | `payment_id` does not exist or the preparation already settled. |
+| `RawTxHexInvalid` | not_retryable | 422 | `raw_tx_hex_invalid` | `raw_tx_hex` is empty or not hex; the wallet must resubmit valid hex. |
+| `ChainUnavailable { reason }` | retryable | 502 | `chain_unavailable` | Chain plane could not accept the broadcast; retry once it recovers. |
+| `TransactionMalformed { reason }` | not_retryable | 422 | `transaction_malformed` | `raw_tx_hex` is hex-shaped but not a Zcash transaction; the wallet must rebuild it. |
+| `ExpiryHeightMismatch { prepared_expiry_height, signed_expiry_height }` | not_retryable | 422 | `expiry_height_mismatch` | Signed tx targets a different prepared row; rebuild against this `payment_id`. |
+| `ObsoleteMemoVersion { observed }` | not_retryable | 409 | `obsolete_memo_version` | Cached memo version predates this build; re-prepare against this runtime. |
+| `DpopMismatch` | not_retryable | 403 | `dpop_mismatch` | Settle presented a different DPoP key than prepare; a foreign agent tried to settle. |
+| `Storage(StoreError)` | inherits | 503 | `settle_store_unavailable` | Settle store unreachable; check the `/readyz` store dependency. |
 
-### `zpay-core::error::VerifyError`
+### `zpay_core::verify::VerifyError`
 
-| Variant | Retry | HTTP | Operator hint |
-|---------|-------|------|---------------|
-| `DisclosureInvalid { reason }` | not_retryable | 422 | ZIP-311 disclosure payload did not parse. |
-| `DisclosureSignatureMismatch` | not_retryable | 401 | Disclosure signature did not verify. |
-| `DisclosureTransactionNotFound { txid }` | not_retryable | 404 | Disclosed txid not on chain. |
-| `DisclosureAmountMismatch { expected_zat, actual_zat }` | not_retryable | 422 | Disclosed amount does not match expected. |
-| `DisclosureRecipientMismatch` | not_retryable | 422 | Disclosed recipient does not match expected. |
-| `VerifierCapabilityDisabled` | requires_operator | 503 | zinder's ZIP-311 verifier capability is off; enable upstream. |
+Produced by `verify`; rendered at `POST /x402/v2/verify`. In-band
+verdicts (malformed, invalid signature, inconclusive) flow through the
+`VerifyResponse` body; only transport-class failures reach this enum.
 
-### `zpay-core::error::ComplianceError`
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `PayloadInvalid { reason }` | not_retryable | 422 | `disclosure_payload_invalid` | `disclosure_payload_hex` is not valid hex; the caller must resubmit. |
 
-| Variant | Retry | HTTP | Operator hint |
-|---------|-------|------|---------------|
-| `JwksFetchFailed { source }` | retryable | 503 | Transient JWKS fetch failure; cache-miss + network blip. |
-| `JwksKeyNotFound { kid }` | not_retryable | 401 | PoH token's `kid` is not in the JWKS document. |
-| `SignatureInvalid` | not_retryable | 401 | PoH token signature does not verify. |
-| `AudienceMismatch { expected, actual }` | not_retryable | 401 | PoH `aud` claim does not match merchant origin. |
-| `DpopBindingMismatch { expected_jkt, actual_jkt }` | not_retryable | 401 | PoH `cnf.jkt` does not match prepare-time JKT. |
-| `Expired { exp_unix_seconds, now_unix_seconds }` | not_retryable | 401 | PoH `exp` claim has passed. |
-| `IssuerNotTrusted { iss }` | not_retryable | 401 | PoH `iss` is not in `ZPAY_COMPLIANCE__ACCEPTED_ISSUERS`. |
+### `zpay_core::tip::TipError`
 
-### `zpay-store::error::StoreError`
+Produced by the chain-tip oracle; rendered at `GET /x402/v2/tip` and
+wrapped by `PrepareError::TipOracle`.
 
-Internal; never crosses a wire boundary directly. Always wrapped by a
-higher-layer error.
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `Unavailable { reason }` | retryable | 502 | `tip_oracle_unavailable` | Chain-tip oracle unreachable; check the `/readyz` chain dependency. |
+| `NetworkUnsupported { network }` | not_retryable | 422 | `network_unsupported` | Oracle does not serve the requested network; check the runtime's configured network. |
+
+### `zpay_x402::dpop::DpopError`
+
+Produced while verifying the DPoP proof on authenticated routes; every
+variant renders as 401.
+
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `Missing` | not_retryable | 401 | `dpop_missing` | No `DPoP` header on a route that requires one. |
+| `InvalidProof { reason }` | not_retryable | 401 | `dpop_invalid_proof` | Proof failed structural or signature checks. |
+| `ClockSkew { drift_seconds }` | retryable | 401 | `dpop_clock_skew` | Proof timestamp drift exceeds tolerance; the caller resigns with a corrected clock. |
+| `Replay` | not_retryable | 401 | `dpop_replay` | Proof was already used; the caller mints a fresh proof. |
+
+### `zpay_core::oracle::OracleError`
+
+Internal to the confirmation path. The `ConfirmationOracle` surfaces it
+to the background subscription task; it never crosses a wire boundary.
 
 | Variant | Retry | Notes |
 |---------|-------|-------|
-| `ConnectionFailed { source }` | retryable | libSQL pool exhausted or remote unreachable. |
-| `MigrationPending { current_version, required_version }` | requires_operator | Operator must run `zpay-ops migrate`. |
-| `IntegrityViolation { constraint }` | not_retryable | Application bug; surfaces via 500. |
+| `Unavailable { reason }` | retryable | Chain plane unreachable; the subscription retries. |
+| `ResponseMalformed { reason }` | requires_operator | Chain plane responded but the payload was uninterpretable. |
 
-### `zpay-x402::error::WireError` and `zpay-mpp::error::WireError`
+### `zpay_core::store::StoreError`
 
-Per-adapter wire errors that map onto each protocol's error vocabulary.
-The mapping is one-to-one with the `*ProblemType` URI in the RFC 9457
-Problem Details document.
+Internal; never crosses a wire boundary directly. `PrepareError::Storage`
+and `SettleError::Storage` wrap it and choose the outward HTTP status.
+
+| Variant | Retry | Notes |
+|---------|-------|-------|
+| `Unavailable { reason }` | retryable | libSQL pool exhausted or remote unreachable. |
+| `MigrationPending { current_version, required_version }` | requires_operator | Operator must run the migration runner before queries succeed. |
+| `IntegrityViolation { constraint }` | not_retryable | Foreign-key, uniqueness, or check-constraint violation. |
+| `RowMalformed { reason }` | requires_operator | Stored row did not deserialize; schema drift or corruption. |
 
 ## Adding a new error variant
 

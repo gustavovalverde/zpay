@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use zally_chain::{RejectionReason, SubmitOutcome, Submitter, SubmitterError};
 use zally_core::{Network, TxId};
 use zinder_client::{
-    ChainIndex, IndexerError, Network as ZinderNetwork, RawTransactionBytes, RemoteChainIndex,
-    RemoteOpenOptions, TransactionBroadcastResult,
+    EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RawTransactionBytes,
+    RemoteChainIndex, RemoteOpenOptions, TransactionBroadcastResult,
 };
 
 /// Production submitter backed by zinder's `WalletQuery.BroadcastTransaction`.

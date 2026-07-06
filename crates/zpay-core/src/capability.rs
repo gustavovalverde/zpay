@@ -43,10 +43,3 @@ pub const CACHE_PREPARE_IDEMPOTENT: &str = "cache.prepare.idempotent";
 pub const CACHE_PREPARE_TTL: &str = "cache.prepare.ttl";
 /// Append-only settlement ledger.
 pub const CACHE_SETTLEMENT_LEDGER: &str = "cache.settlement.ledger";
-
-/// PoH SD-JWT-VC verification against zentity JWKS.
-pub const COMPLIANCE_POH_VERIFY_V1: &str = "compliance.poh.verify_v1";
-/// Per-merchant pairwise subject derivation.
-pub const COMPLIANCE_POH_PAIRWISE_V1: &str = "compliance.poh.pairwise_v1";
-/// Evidence-pack binding through the ZIP-302 memo.
-pub const COMPLIANCE_EVIDENCE_BIND_V1: &str = "compliance.evidence.bind_v1";
