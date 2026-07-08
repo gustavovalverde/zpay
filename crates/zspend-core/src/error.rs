@@ -5,8 +5,8 @@
 //! guidance. The `kind` field is wire-stable; rename forces a versioned
 //! migration on every consumer (the agent BFF, the demo-rp page, the MCP host).
 //!
-//! The runtime returns [`ProblemKind::NotReady`] for transient conditions
-//! (startup, an in-flight single-use reservation, an unmapped wallet error)
+//! The runtime returns [`ProblemKind::NotReady`] for transient service
+//! preconditions, [`ProblemKind::WalletUnavailable`] for stale wallet sync,
 //! and the specific verifier kinds (`dpop_proof_invalid`,
 //! `access_token_invalid`, `audience_mismatch`, `intent_mismatch`,
 //! `recipient_mismatch`, `token_already_consumed`) once a request fails a
@@ -48,6 +48,9 @@ pub enum ProblemKind {
     /// The runtime is starting up or a precondition is not yet satisfied;
     /// retry once readiness clears.
     NotReady,
+    /// The wallet sync driver is stale, catching up, recovering, or parked;
+    /// retry once `/readyz.wallet_sync.freshness` reports `fresh`.
+    WalletUnavailable,
     /// The DPoP proof on the inbound request failed verification.
     DpopProofInvalid,
     /// The access token failed JWKS or claim verification.

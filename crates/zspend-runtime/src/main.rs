@@ -47,9 +47,13 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
 use revocation::{RevocationOutcome, RevocationStore};
 use serde::{Deserialize, Serialize};
+use zally_chain::ChainSource;
 use zally_core::{AccountId, BlockHeight, IdempotencyKey, Network, PaymentRecipient};
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions, SealingPosture, SeedSealing as _};
-use zally_wallet::{PaymentRequest, SendOutcome, SendPaymentPlan, Wallet, WalletError};
+use zally_wallet::{
+    PaymentRequest, SendOutcome, SendPaymentPlan, SyncDriver, SyncDriverOptions, SyncDriverPhase,
+    SyncHandle, SyncSnapshot, SyncStatus, Wallet, WalletError,
+};
 use zspend_core::{
     AccessTokenClaims, DPOP_CLOCK_SKEW_SECONDS, DpopBinding, PaymentAuthorization, ProblemDetail,
     ProblemKind, SigningPolicy, SigningPolicyError, intent_matches, recompute_intent_hash,
@@ -147,6 +151,11 @@ enum StartupError {
         #[source]
         source: BootstrapError,
     },
+    #[error("wallet sync driver failed to start: {source}")]
+    SyncDriver {
+        #[source]
+        source: WalletError,
+    },
     #[error("signing policy build failed: {source}")]
     SigningPolicy {
         #[source]
@@ -182,6 +191,24 @@ const DPOP_REPLAY_WINDOW_SECONDS: u64 = 300;
 /// the `Retry-After` hint on a `revocation_cache_stale` response.
 const DEFAULT_REVOCATION_MAX_STALENESS_SECONDS: u64 = 30;
 
+/// Default wallet sync polling cadence when no chain event arrives.
+const DEFAULT_WALLET_SYNC_POLL_INTERVAL_MS: u64 = 5_000;
+
+/// Default maximum number of wallet sync iterations per driver wakeup.
+const DEFAULT_WALLET_SYNC_MAX_ITERATIONS_PER_WAKE_COUNT: u32 = 1_000;
+
+/// Default timeout for one wallet sync iteration.
+const DEFAULT_WALLET_SYNC_TIMEOUT_SECONDS: u64 = 120;
+
+/// Default maximum lag tolerated before the wallet refuses signing.
+const DEFAULT_WALLET_SYNC_MAX_LAG_BLOCKS: u32 = 3;
+
+/// Default maximum age for the most recent sync snapshot.
+const DEFAULT_WALLET_SYNC_STALE_AFTER_SECONDS: u64 = 30;
+
+/// Retry hint for a wallet that is catching up, recovering, or parked.
+const DEFAULT_WALLET_SYNC_RETRY_SECONDS: u64 = 5;
+
 #[derive(Clone)]
 struct AppState {
     wallet: Wallet,
@@ -213,8 +240,141 @@ struct AppState {
     /// token is rejected ahead of the cached payload. Disabled (always admits)
     /// when no `ZSPEND_ISSUER_URL` is configured.
     revocation: RevocationStore,
+    /// Latest long-lived zally sync driver snapshot.
+    wallet_sync: WalletSyncState,
+    /// Maximum wallet lag accepted by `/readyz` and `/v1/payments/sign`.
+    wallet_sync_max_lag_blocks: u32,
+    /// Maximum accepted age for the latest sync snapshot.
+    wallet_sync_stale_after_seconds: u64,
     /// Prometheus render handle served on `/metrics`.
     metrics: PrometheusHandle,
+}
+
+#[derive(Clone)]
+struct WalletSyncState {
+    snapshot: Arc<Mutex<WalletSyncSnapshot>>,
+}
+
+impl WalletSyncState {
+    fn new(snapshot: WalletSyncSnapshot) -> Self {
+        Self {
+            snapshot: Arc::new(Mutex::new(snapshot)),
+        }
+    }
+
+    fn snapshot(&self) -> WalletSyncSnapshot {
+        self.snapshot.lock().clone()
+    }
+
+    fn publish(&self, snapshot: WalletSyncSnapshot) {
+        *self.snapshot.lock() = snapshot;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WalletSyncSnapshot {
+    network: Network,
+    phase: WalletSyncPhase,
+    sync_status: WalletSyncScanStatus,
+    scanned_height: Option<BlockHeight>,
+    safe_chain_tip_height: Option<BlockHeight>,
+    lag_blocks: Option<u32>,
+    last_fault: Option<WalletSyncFault>,
+    published_at_ms: u64,
+}
+
+impl From<SyncSnapshot> for WalletSyncSnapshot {
+    fn from(snapshot: SyncSnapshot) -> Self {
+        Self {
+            network: snapshot.network,
+            phase: WalletSyncPhase::from(&snapshot.phase),
+            sync_status: WalletSyncScanStatus::from(&snapshot.sync_status),
+            scanned_height: snapshot.scanned_height,
+            safe_chain_tip_height: snapshot.safe_chain_tip_height,
+            lag_blocks: snapshot.lag_blocks,
+            last_fault: snapshot.last_fault.map(WalletSyncFault::from),
+            published_at_ms: snapshot.published_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalletSyncPhase {
+    Starting,
+    Syncing,
+    Waiting,
+    Recovering,
+    Parked,
+    Closing,
+    Closed,
+    Unknown,
+}
+
+impl From<&SyncDriverPhase> for WalletSyncPhase {
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "SyncDriverPhase is non_exhaustive; future phases fail readiness as unknown"
+    )]
+    fn from(phase: &SyncDriverPhase) -> Self {
+        match phase {
+            SyncDriverPhase::Starting => Self::Starting,
+            SyncDriverPhase::Syncing => Self::Syncing,
+            SyncDriverPhase::Waiting => Self::Waiting,
+            SyncDriverPhase::Recovering { .. } => Self::Recovering,
+            SyncDriverPhase::Parked { .. } => Self::Parked,
+            SyncDriverPhase::Closing => Self::Closing,
+            SyncDriverPhase::Closed => Self::Closed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalletSyncScanStatus {
+    NotStarted,
+    WaitingForTip,
+    Starting,
+    CatchingUp,
+    AtTip,
+    TipRegressed,
+    Unknown,
+}
+
+impl From<&SyncStatus> for WalletSyncScanStatus {
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "SyncStatus is non_exhaustive; future states report unknown"
+    )]
+    fn from(status: &SyncStatus) -> Self {
+        match status {
+            SyncStatus::NotStarted => Self::NotStarted,
+            SyncStatus::WaitingForTip { .. } => Self::WaitingForTip,
+            SyncStatus::Starting { .. } => Self::Starting,
+            SyncStatus::CatchingUp { .. } => Self::CatchingUp,
+            SyncStatus::AtTip { .. } => Self::AtTip,
+            SyncStatus::TipRegressed { .. } => Self::TipRegressed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WalletSyncFault {
+    reason: String,
+    repair: String,
+    occurred_at_ms: u64,
+    consecutive_faults: u32,
+}
+
+impl From<zally_wallet::SyncFault> for WalletSyncFault {
+    fn from(fault: zally_wallet::SyncFault) -> Self {
+        Self {
+            reason: fault.reason,
+            repair: fault.repair.label().to_owned(),
+            occurred_at_ms: fault.occurred_at_ms,
+            consecutive_faults: fault.consecutive_faults,
+        }
+    }
 }
 
 impl AppState {
@@ -259,43 +419,26 @@ async fn main() -> Result<(), StartupError> {
 
 async fn serve() -> Result<(), StartupError> {
     let config = ResolvedConfig::from_env()?;
-
     let metrics = install_metrics_recorder()?;
     let revocation = build_revocation_store(&config);
     let seal_posture = age_seal_posture(&config.sealed_seed_path);
     metrics::gauge!("zspend_seal_posture_info", "posture" => seal_posture_str(seal_posture))
         .set(1.0);
 
-    // The libsql-backed ledger must open before the wallet's rusqlite store: both
-    // link one SQLite, and libsql sets the global threading mode via sqlite3_config,
-    // which returns SQLITE_MISUSE once any connection has initialized the library.
-    let spend_idempotency_cache =
-        UsageLedger::open(&config.ledger_url, config.ledger_auth_token.as_deref())
-            .await
-            .map_err(|source| StartupError::Ledger { source })?;
-    tracing::info!(
-        ledger_url = %config.ledger_url,
-        "single-use jti ledger ready",
-    );
-
-    let (wallet, account_id) = bootstrap::bootstrap(BootstrapInputs {
+    let spend_idempotency_cache = open_spend_idempotency_cache(&config).await?;
+    let (wallet, account_id, chain) = bootstrap::bootstrap(BootstrapInputs {
         network: config.network,
-        sealed_seed_path: config.sealed_seed_path,
-        storage_path: config.storage_path,
-        indexer_grpc_addr: config.indexer_grpc_addr,
+        sealed_seed_path: config.sealed_seed_path.clone(),
+        storage_path: config.storage_path.clone(),
+        indexer_grpc_addr: config.indexer_grpc_addr.clone(),
         birthday_override: config.birthday_override,
         chain_source_factory: ChainSourceFactory::Live,
     })
     .await
     .map_err(|source| StartupError::Bootstrap { source })?;
 
-    let policy = SigningPolicy::builder()
-        .network(config.network)
-        .max_amount_zat(config.max_amount_zat)
-        .audience(config.audience)
-        .build()
-        .map_err(|source| StartupError::SigningPolicy { source })?;
-
+    let wallet_sync = start_wallet_sync(&wallet, chain, &config)?;
+    let policy = build_signing_policy(&config)?;
     let jwks = load_jwks(config.jwks_file.as_ref())?;
     if jwks.keys.is_empty() {
         tracing::warn!(
@@ -316,33 +459,103 @@ async fn serve() -> Result<(), StartupError> {
         config.allow_dev_seed,
     )?;
 
-    let state = AppState {
-        wallet,
-        account_id,
-        policy: Arc::new(policy),
-        jwks: Arc::new(jwks),
+    let router = build_router(build_app_state(
+        &config,
+        RuntimeParts {
+            wallet,
+            account_id,
+            policy,
+            jwks,
+            spend_idempotency_cache,
+            revocation,
+            wallet_sync,
+            metrics,
+            seal_posture,
+        },
+    ));
+
+    serve_router(config.bind_addr, router).await
+}
+
+async fn open_spend_idempotency_cache(
+    config: &ResolvedConfig,
+) -> Result<UsageLedger, StartupError> {
+    let cache = UsageLedger::open(&config.ledger_url, config.ledger_auth_token.as_deref())
+        .await
+        .map_err(|source| StartupError::Ledger { source })?;
+    tracing::info!(
+        ledger_url = %config.ledger_url,
+        "single-use jti ledger ready",
+    );
+    Ok(cache)
+}
+
+fn start_wallet_sync(
+    wallet: &Wallet,
+    chain: Arc<dyn ChainSource>,
+    config: &ResolvedConfig,
+) -> Result<WalletSyncState, StartupError> {
+    let sync_options = SyncDriverOptions::default()
+        .with_poll_interval_ms(config.wallet_sync_poll_interval_ms)
+        .with_max_sync_iterations_per_wake_count(config.wallet_sync_max_iterations_per_wake_count)
+        .with_sync_timeout_seconds(config.wallet_sync_timeout_seconds);
+    let sync_handle = SyncDriver::new(wallet.clone(), chain, sync_options)
+        .map_err(|source| StartupError::SyncDriver { source })?
+        .sync_continuously();
+    Ok(observe_wallet_sync(sync_handle))
+}
+
+fn build_signing_policy(config: &ResolvedConfig) -> Result<SigningPolicy, StartupError> {
+    SigningPolicy::builder()
+        .network(config.network)
+        .max_amount_zat(config.max_amount_zat)
+        .audience(config.audience.clone())
+        .build()
+        .map_err(|source| StartupError::SigningPolicy { source })
+}
+
+struct RuntimeParts {
+    wallet: Wallet,
+    account_id: AccountId,
+    policy: SigningPolicy,
+    jwks: JwkSet,
+    spend_idempotency_cache: UsageLedger,
+    revocation: RevocationStore,
+    wallet_sync: WalletSyncState,
+    metrics: PrometheusHandle,
+    seal_posture: SealingPosture,
+}
+
+fn build_app_state(config: &ResolvedConfig, parts: RuntimeParts) -> AppState {
+    AppState {
+        wallet: parts.wallet,
+        account_id: parts.account_id,
+        policy: Arc::new(parts.policy),
+        jwks: Arc::new(parts.jwks),
         public_sign_url: Arc::from(config.public_sign_url.as_str()),
         leeway_seconds: config.leeway_seconds,
         posture: config.posture,
-        seal_posture,
+        seal_posture: parts.seal_posture,
         dpop_proof_jti_seen: Arc::new(Mutex::new(HashMap::new())),
-        spend_idempotency_cache,
-        revocation,
-        metrics,
-    };
+        spend_idempotency_cache: parts.spend_idempotency_cache,
+        revocation: parts.revocation,
+        wallet_sync: parts.wallet_sync,
+        wallet_sync_max_lag_blocks: config.wallet_sync_max_lag_blocks,
+        wallet_sync_stale_after_seconds: config.wallet_sync_stale_after_seconds,
+        metrics: parts.metrics,
+    }
+}
 
-    let router = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind(config.bind_addr)
+async fn serve_router(bind_addr: SocketAddr, router: Router) -> Result<(), StartupError> {
+    let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(|source| StartupError::Bind {
-            addr: config.bind_addr,
+            addr: bind_addr,
             source,
         })?;
 
     tracing::info!(
-        bind = %config.bind_addr,
-        network = ?config.network,
+        bind = %bind_addr,
         "zspend-runtime ready",
     );
 
@@ -366,6 +579,19 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/payments/sign", post(sign_payment))
         .route("/v1/wallet/address", get(get_wallet_address))
         .with_state(state)
+}
+
+fn observe_wallet_sync(sync_handle: SyncHandle) -> WalletSyncState {
+    let wallet_sync = WalletSyncState::new(sync_handle.status_snapshot().into());
+    let wallet_sync_writer = wallet_sync.clone();
+    let mut snapshots = sync_handle.observe_status();
+    tokio::spawn(async move {
+        let _sync_handle = sync_handle;
+        while let Some(snapshot) = snapshots.next().await {
+            wallet_sync_writer.publish(snapshot.into());
+        }
+    });
+    wallet_sync
 }
 
 /// Install the Prometheus recorder as the process-global metrics sink and
@@ -465,19 +691,136 @@ fn readyz_state(state: &AppState) -> (StatusCode, serde_json::Value) {
         "disabled" => state.posture != "production",
         _ => true,
     };
-    let ready = jwks_cache == "loaded" && revocation_ready;
+    let (wallet_sync, wallet_sync_ready) = wallet_sync_readiness(state);
+    let ready = jwks_cache == "loaded" && revocation_ready && wallet_sync_ready;
     let status = if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     let body = serde_json::json!({
+        "network": network_label(state.policy.network()),
         "sealed_seed": seal_posture_str(state.seal_posture),
         "posture": state.posture,
         "jwks_cache": jwks_cache,
         "revocation_cache": revocation_cache,
+        "wallet_sync": wallet_sync,
     });
     (status, body)
+}
+
+fn wallet_sync_readiness(state: &AppState) -> (serde_json::Value, bool) {
+    let snapshot = state.wallet_sync.snapshot();
+    let snapshot_age_seconds = unix_now_ms()
+        .saturating_sub(snapshot.published_at_ms)
+        .saturating_div(1_000);
+    let is_fresh = is_wallet_sync_fresh(
+        &snapshot,
+        state.policy.network(),
+        state.wallet_sync_max_lag_blocks,
+        state.wallet_sync_stale_after_seconds,
+        snapshot_age_seconds,
+    );
+    record_wallet_sync_metrics(&snapshot, snapshot_age_seconds, is_fresh);
+
+    let body = serde_json::json!({
+        "network": network_label(snapshot.network),
+        "phase": sync_phase_label(snapshot.phase),
+        "sync_status": sync_status_label(snapshot.sync_status),
+        "scanned_height": snapshot.scanned_height.map(zally_core::BlockHeight::as_u32),
+        "safe_chain_tip_height": snapshot.safe_chain_tip_height.map(zally_core::BlockHeight::as_u32),
+        "lag_blocks": snapshot.lag_blocks,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "freshness": if is_fresh { "fresh" } else { "stale" },
+        "is_fresh": is_fresh,
+        "last_fault": snapshot.last_fault.as_ref().map(last_fault_body),
+    });
+    (body, is_fresh)
+}
+
+fn is_wallet_sync_fresh(
+    snapshot: &WalletSyncSnapshot,
+    expected_network: Network,
+    max_lag_blocks: u32,
+    stale_after_seconds: u64,
+    snapshot_age_seconds: u64,
+) -> bool {
+    if snapshot.network != expected_network || snapshot_age_seconds > stale_after_seconds {
+        return false;
+    }
+    if !matches!(
+        snapshot.phase,
+        WalletSyncPhase::Syncing | WalletSyncPhase::Waiting
+    ) {
+        return false;
+    }
+    let Some(lag_blocks) = snapshot.lag_blocks else {
+        return false;
+    };
+    snapshot.scanned_height.is_some()
+        && snapshot.safe_chain_tip_height.is_some()
+        && lag_blocks <= max_lag_blocks
+}
+
+fn record_wallet_sync_metrics(
+    snapshot: &WalletSyncSnapshot,
+    snapshot_age_seconds: u64,
+    is_fresh: bool,
+) {
+    let snapshot_age = std::time::Duration::from_secs(snapshot_age_seconds).as_secs_f64();
+    metrics::gauge!("zspend_wallet_sync_snapshot_age_seconds").set(snapshot_age);
+    metrics::gauge!("zspend_wallet_sync_fresh").set(if is_fresh { 1.0 } else { 0.0 });
+    if let Some(lag_blocks) = snapshot.lag_blocks {
+        metrics::gauge!("zspend_wallet_sync_lag_blocks").set(f64::from(lag_blocks));
+    }
+    if let Some(height) = snapshot.scanned_height {
+        metrics::gauge!("zspend_wallet_sync_scanned_height").set(f64::from(height.as_u32()));
+    }
+    if let Some(height) = snapshot.safe_chain_tip_height {
+        metrics::gauge!("zspend_wallet_sync_safe_chain_tip_height").set(f64::from(height.as_u32()));
+    }
+}
+
+fn last_fault_body(fault: &WalletSyncFault) -> serde_json::Value {
+    serde_json::json!({
+        "reason": fault.reason.as_str(),
+        "repair": fault.repair.as_str(),
+        "occurred_at_ms": fault.occurred_at_ms,
+        "consecutive_faults": fault.consecutive_faults,
+    })
+}
+
+fn sync_phase_label(phase: WalletSyncPhase) -> &'static str {
+    match phase {
+        WalletSyncPhase::Starting => "starting",
+        WalletSyncPhase::Syncing => "syncing",
+        WalletSyncPhase::Waiting => "waiting",
+        WalletSyncPhase::Recovering => "recovering",
+        WalletSyncPhase::Parked => "parked",
+        WalletSyncPhase::Closing => "closing",
+        WalletSyncPhase::Closed => "closed",
+        WalletSyncPhase::Unknown => "unknown",
+    }
+}
+
+fn sync_status_label(status: WalletSyncScanStatus) -> &'static str {
+    match status {
+        WalletSyncScanStatus::NotStarted => "not_started",
+        WalletSyncScanStatus::WaitingForTip => "waiting_for_tip",
+        WalletSyncScanStatus::Starting => "starting",
+        WalletSyncScanStatus::CatchingUp => "catching_up",
+        WalletSyncScanStatus::AtTip => "at_tip",
+        WalletSyncScanStatus::TipRegressed => "tip_regressed",
+        WalletSyncScanStatus::Unknown => "unknown",
+    }
+}
+
+fn network_label(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "mainnet",
+        Network::Regtest(_) => "regtest",
+        Network::Testnet | _ => "testnet",
+    }
 }
 
 /// Read the at-rest seal posture of the sealing implementation the runtime
@@ -717,6 +1060,7 @@ fn problem_kind_metric_label(kind: ProblemKind) -> &'static str {
         ProblemKind::SeedUnavailable => "seed_unavailable",
         ProblemKind::ChainUnreachable => "chain_unreachable",
         ProblemKind::NotReady => "not_ready",
+        ProblemKind::WalletUnavailable => "wallet_unavailable",
         ProblemKind::DpopProofInvalid => "dpop_proof_invalid",
         ProblemKind::AccessTokenInvalid => "access_token_invalid",
         ProblemKind::TargetExpiryStale => "target_expiry_stale",
@@ -881,6 +1225,8 @@ async fn sign_payment_inner(
         }
     }
 
+    require_wallet_sync_fresh(state)?;
+
     // Single-use jti (D-8): reserve the access-token jti against the verified
     // intent BEFORE signing, so a crash between reserve and commit cannot let a
     // retry sign blind. An identical replay returns the cached payload; a reuse
@@ -973,6 +1319,33 @@ async fn sign_payment_inner(
         tracing::error!(error = %err, "single-use ledger commit failed after signing");
     }
     Ok(Json(response))
+}
+
+fn require_wallet_sync_fresh(state: &AppState) -> Result<(), ProblemResponse> {
+    let snapshot = state.wallet_sync.snapshot();
+    let snapshot_age_seconds = unix_now_ms()
+        .saturating_sub(snapshot.published_at_ms)
+        .saturating_div(1_000);
+    let is_fresh = is_wallet_sync_fresh(
+        &snapshot,
+        state.policy.network(),
+        state.wallet_sync_max_lag_blocks,
+        state.wallet_sync_stale_after_seconds,
+        snapshot_age_seconds,
+    );
+    record_wallet_sync_metrics(&snapshot, snapshot_age_seconds, is_fresh);
+    if is_fresh {
+        return Ok(());
+    }
+    Err(problem_response(ProblemDetail::retryable(
+        ProblemKind::WalletUnavailable,
+        "wallet_unavailable",
+        format!(
+            "wallet sync phase={} lag_blocks={:?} snapshot_age_seconds={snapshot_age_seconds}; retry after sync freshness recovers",
+            sync_phase_label(snapshot.phase),
+            snapshot.lag_blocks,
+        ),
+    )))
 }
 
 /// Classify a failed full-tuple intent recompute as a recipient swap or a
@@ -1207,6 +1580,7 @@ fn status_for_kind(kind: ProblemKind) -> StatusCode {
         }
         ProblemKind::SeedUnavailable
         | ProblemKind::ChainUnreachable
+        | ProblemKind::WalletUnavailable
         | ProblemKind::RevocationCacheStale
         | ProblemKind::NotReady => StatusCode::SERVICE_UNAVAILABLE,
         ProblemKind::TargetExpiryMismatchInternal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1360,6 +1734,7 @@ fn retry_after_seconds(kind: ProblemKind) -> Option<u64> {
     match kind {
         ProblemKind::RevocationCacheStale => Some(DEFAULT_REVOCATION_MAX_STALENESS_SECONDS),
         ProblemKind::NotReady => Some(ledger::PENDING_RESERVATION_TTL.as_secs()),
+        ProblemKind::WalletUnavailable => Some(DEFAULT_WALLET_SYNC_RETRY_SECONDS),
         _ => None,
     }
 }
@@ -1399,68 +1774,55 @@ struct ResolvedConfig {
     revocation_max_staleness: std::time::Duration,
     indexer_grpc_addr: Option<String>,
     birthday_override: Option<u32>,
+    /// Polling cadence for the long-lived wallet sync driver.
+    wallet_sync_poll_interval_ms: u64,
+    /// Maximum sync iterations per driver wakeup.
+    wallet_sync_max_iterations_per_wake_count: u32,
+    /// Timeout for one wallet sync iteration.
+    wallet_sync_timeout_seconds: u64,
+    /// Maximum wallet lag accepted by readiness and signing.
+    wallet_sync_max_lag_blocks: u32,
+    /// Maximum accepted age for the latest wallet sync snapshot.
+    wallet_sync_stale_after_seconds: u64,
+}
+
+struct ListenerConfig {
+    bind_addr: SocketAddr,
+    network: Network,
+}
+
+struct WalletPaths {
+    sealed_seed_path: PathBuf,
+    storage_path: PathBuf,
+}
+
+struct SigningConfig {
+    max_amount_zat: u64,
+    audience: String,
+    jwks_file: Option<PathBuf>,
+    public_sign_url: String,
+    leeway_seconds: u64,
+}
+
+struct WalletSyncConfig {
+    poll_interval_ms: u64,
+    max_iterations_per_wake_count: u32,
+    timeout_seconds: u64,
+    max_lag_blocks: u32,
+    stale_after_seconds: u64,
 }
 
 impl ResolvedConfig {
     fn from_env() -> Result<Self, StartupError> {
-        let bind_raw =
-            std::env::var("ZSPEND_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8090".to_owned());
-        let bind_addr = bind_raw
-            .parse()
-            .map_err(|source| StartupError::BindAddress {
-                provided: bind_raw,
-                source,
-            })?;
-
-        let network_raw = std::env::var("ZSPEND_NETWORK").unwrap_or_else(|_| "testnet".to_owned());
-        let network = parse_network(&network_raw)?;
-
-        let sealed_seed_path = required_path("ZSPEND_SEALED_SEED_PATH")?;
-        // The `ZSPEND_AGE_IDENTITY_PATH` env var is consumed by
-        // `AgeFileSealing`, which stores the identity sidecar at
-        // `<sealed_seed_path>.age-identity`. We read the env var (and log it
-        // when set) so operators can pin a non-default identity location for
-        // diagnostics, even though the sealing implementation derives the
-        // path from the sealed seed location.
-        if let Ok(custom_identity) = std::env::var("ZSPEND_AGE_IDENTITY_PATH") {
-            tracing::info!(
-                custom_identity_path = %custom_identity,
-                "ZSPEND_AGE_IDENTITY_PATH is informational: sealing derives identity path from sealed seed path",
-            );
-        }
-        let storage_path = required_path("ZSPEND_STORAGE_PATH")?;
-
-        // The local backstop cap keeps a runnable dev default; the issuer is
-        // the authoritative policy gate per D-2.
-        let max_amount_zat = std::env::var("ZSPEND_MAX_AMOUNT_ZAT")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(1_000_000_000);
-        // The audience pins every access token to THIS wallet instance (D-5):
-        // an absolute-URI identity (e.g. `urn:zentity:wallet:<jkt>`) that the
-        // issuer mints into `aud` via an RFC 8707 resource indicator. Required
-        // and fails closed: a missing pin would let any token minted for any
-        // wallet verify here, so there is no safe default. The URI shape is
-        // validated when the SigningPolicy is built.
-        let audience = optional_env("ZSPEND_AUDIENCE").ok_or(StartupError::EnvMissing {
-            name: "ZSPEND_AUDIENCE",
-        })?;
-
-        let jwks_file = optional_env("ZSPEND_JWKS_FILE").map(PathBuf::from);
-        let public_base =
-            optional_env("ZSPEND_PUBLIC_URL").unwrap_or_else(|| format!("http://{bind_addr}"));
-        let public_sign_url = format!("{}/v1/payments/sign", public_base.trim_end_matches('/'));
-        let leeway_seconds = std::env::var("ZSPEND_LEEWAY_SECONDS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(60);
-
-        let posture = posture_for_network(network);
-        let ledger_url =
-            optional_env("ZSPEND_LEDGER_URL").unwrap_or_else(|| default_ledger_url(&storage_path));
+        let listener = read_listener_config()?;
+        let wallet_paths = read_wallet_paths()?;
+        let signing = read_signing_config(listener.bind_addr)?;
+        let wallet_sync = read_wallet_sync_config();
+        let posture = posture_for_network(listener.network);
+        let ledger_url = optional_env("ZSPEND_LEDGER_URL")
+            .unwrap_or_else(|| default_ledger_url(&wallet_paths.storage_path));
         let ledger_auth_token = optional_env("ZSPEND_LEDGER_AUTH_TOKEN");
         let allow_dev_seed = env_flag("ZSPEND_ALLOW_DEV_SEED");
-
         let issuer_url = optional_env("ZSPEND_ISSUER_URL");
         let revocation_token = optional_env("ZSPEND_REVOCATION_TOKEN");
         let revocation_max_staleness = std::time::Duration::from_secs(
@@ -1476,15 +1838,15 @@ impl ResolvedConfig {
             .and_then(|raw| raw.trim().parse::<u32>().ok());
 
         Ok(Self {
-            bind_addr,
-            network,
-            sealed_seed_path,
-            storage_path,
-            max_amount_zat,
-            audience,
-            jwks_file,
-            public_sign_url,
-            leeway_seconds,
+            bind_addr: listener.bind_addr,
+            network: listener.network,
+            sealed_seed_path: wallet_paths.sealed_seed_path,
+            storage_path: wallet_paths.storage_path,
+            max_amount_zat: signing.max_amount_zat,
+            audience: signing.audience,
+            jwks_file: signing.jwks_file,
+            public_sign_url: signing.public_sign_url,
+            leeway_seconds: signing.leeway_seconds,
             posture,
             ledger_url,
             ledger_auth_token,
@@ -1494,7 +1856,88 @@ impl ResolvedConfig {
             revocation_max_staleness,
             indexer_grpc_addr,
             birthday_override,
+            wallet_sync_poll_interval_ms: wallet_sync.poll_interval_ms,
+            wallet_sync_max_iterations_per_wake_count: wallet_sync.max_iterations_per_wake_count,
+            wallet_sync_timeout_seconds: wallet_sync.timeout_seconds,
+            wallet_sync_max_lag_blocks: wallet_sync.max_lag_blocks,
+            wallet_sync_stale_after_seconds: wallet_sync.stale_after_seconds,
         })
+    }
+}
+
+fn read_listener_config() -> Result<ListenerConfig, StartupError> {
+    let bind_raw =
+        std::env::var("ZSPEND_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8090".to_owned());
+    let bind_addr = bind_raw
+        .parse()
+        .map_err(|source| StartupError::BindAddress {
+            provided: bind_raw,
+            source,
+        })?;
+    let network_raw = std::env::var("ZSPEND_NETWORK").unwrap_or_else(|_| "testnet".to_owned());
+    let network = parse_network(&network_raw)?;
+    Ok(ListenerConfig { bind_addr, network })
+}
+
+fn read_wallet_paths() -> Result<WalletPaths, StartupError> {
+    let sealed_seed_path = required_path("ZSPEND_SEALED_SEED_PATH")?;
+    if let Ok(custom_identity) = std::env::var("ZSPEND_AGE_IDENTITY_PATH") {
+        tracing::info!(
+            custom_identity_path = %custom_identity,
+            "ZSPEND_AGE_IDENTITY_PATH is informational: sealing derives identity path from sealed seed path",
+        );
+    }
+    let storage_path = required_path("ZSPEND_STORAGE_PATH")?;
+    Ok(WalletPaths {
+        sealed_seed_path,
+        storage_path,
+    })
+}
+
+fn read_signing_config(bind_addr: SocketAddr) -> Result<SigningConfig, StartupError> {
+    let max_amount_zat = std::env::var("ZSPEND_MAX_AMOUNT_ZAT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(1_000_000_000);
+    let audience = optional_env("ZSPEND_AUDIENCE").ok_or(StartupError::EnvMissing {
+        name: "ZSPEND_AUDIENCE",
+    })?;
+    let jwks_file = optional_env("ZSPEND_JWKS_FILE").map(PathBuf::from);
+    let public_base =
+        optional_env("ZSPEND_PUBLIC_URL").unwrap_or_else(|| format!("http://{bind_addr}"));
+    let public_sign_url = format!("{}/v1/payments/sign", public_base.trim_end_matches('/'));
+    let leeway_seconds = env_u64_or("ZSPEND_LEEWAY_SECONDS", 60);
+    Ok(SigningConfig {
+        max_amount_zat,
+        audience,
+        jwks_file,
+        public_sign_url,
+        leeway_seconds,
+    })
+}
+
+fn read_wallet_sync_config() -> WalletSyncConfig {
+    WalletSyncConfig {
+        poll_interval_ms: env_u64_or(
+            "ZSPEND_WALLET_SYNC_POLL_INTERVAL_MS",
+            DEFAULT_WALLET_SYNC_POLL_INTERVAL_MS,
+        ),
+        max_iterations_per_wake_count: env_u32_or(
+            "ZSPEND_WALLET_SYNC_MAX_ITERATIONS_PER_WAKE_COUNT",
+            DEFAULT_WALLET_SYNC_MAX_ITERATIONS_PER_WAKE_COUNT,
+        ),
+        timeout_seconds: env_u64_or(
+            "ZSPEND_WALLET_SYNC_TIMEOUT_SECONDS",
+            DEFAULT_WALLET_SYNC_TIMEOUT_SECONDS,
+        ),
+        max_lag_blocks: env_u32_or(
+            "ZSPEND_WALLET_SYNC_MAX_LAG_BLOCKS",
+            DEFAULT_WALLET_SYNC_MAX_LAG_BLOCKS,
+        ),
+        stale_after_seconds: env_u64_or(
+            "ZSPEND_WALLET_SYNC_STALE_AFTER_SECONDS",
+            DEFAULT_WALLET_SYNC_STALE_AFTER_SECONDS,
+        ),
     }
 }
 
@@ -1556,6 +1999,28 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|raw| raw.trim() == "1")
 }
 
+fn env_u64_or(name: &str, fallback: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(fallback)
+}
+
+fn env_u32_or(name: &str, fallback: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .unwrap_or(fallback)
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Default single-use ledger URL: a `usage-ledger.db` file next to the wallet
 /// storage database so the ledger persists on the same volume.
 fn default_ledger_url(storage_path: &std::path::Path) -> String {
@@ -1589,12 +2054,13 @@ fn parse_network(raw: &str) -> Result<Network, StartupError> {
 mod tests {
     use super::{
         AmountWire, AppState, ExpiresAtWire, PaymentRequest, ProblemResponse, RevocationStore,
-        SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL, SignPaymentResponse, SignedPayloadWire, WireNetwork,
+        SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL, SignPaymentResponse, SignedPayloadWire,
+        WalletSyncPhase, WalletSyncScanStatus, WalletSyncSnapshot, WalletSyncState, WireNetwork,
         WireNetworkOut, build_router, parse_network, readyz_state, recompute_intent_hash,
     };
     use crate::bootstrap::{BootstrapInputs, ChainSourceFactory, bootstrap};
     use crate::init;
-    use crate::ledger::UsageLedger;
+    use crate::ledger::{Reservation, UsageLedger};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
@@ -1614,7 +2080,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
     use tower::ServiceExt as _;
-    use zally_core::Network;
+    use zally_core::{BlockHeight, Network};
     use zally_keys::SealingPosture;
     use zally_testkit::MockChainSource;
     use zspend_core::{ProblemDetail, ProblemKind, SigningPolicy};
@@ -1806,6 +2272,24 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["jwks_cache"], "loaded");
         assert_eq!(body["revocation_cache"], "disabled");
+        assert_eq!(body["wallet_sync"]["freshness"], "fresh");
+        assert_eq!(body["wallet_sync"]["lag_blocks"].as_u64(), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readyz_reports_stale_wallet_sync_and_503() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = fixture_issuer()?;
+        let base = state_with_issuer(&issuer).await?;
+        let state = AppState {
+            wallet_sync: stale_wallet_sync(Network::Testnet, 4_047_000),
+            ..base
+        };
+        let (status, body) = readyz_state(&state);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["wallet_sync"]["phase"], "parked");
+        assert_eq!(body["wallet_sync"]["freshness"], "stale");
+        assert_eq!(body["wallet_sync"]["is_fresh"].as_bool(), Some(false));
         Ok(())
     }
 
@@ -1870,7 +2354,7 @@ mod tests {
         init::run(sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
-        let (wallet, account_id) = bootstrap(BootstrapInputs {
+        let (wallet, account_id, _chain) = bootstrap(BootstrapInputs {
             network,
             sealed_seed_path: sealed_seed,
             storage_path: storage,
@@ -1907,9 +2391,41 @@ mod tests {
             ),
             spend_idempotency_cache,
             revocation: RevocationStore::disabled(),
+            wallet_sync: fresh_wallet_sync(network, birthday),
+            wallet_sync_max_lag_blocks: 3,
+            wallet_sync_stale_after_seconds: 30,
             metrics: metrics_exporter_prometheus::PrometheusBuilder::new()
                 .build_recorder()
                 .handle(),
+        })
+    }
+
+    fn fresh_wallet_sync(network: Network, height: u32) -> WalletSyncState {
+        let height = BlockHeight::from(height);
+        WalletSyncState::new(WalletSyncSnapshot {
+            network,
+            phase: WalletSyncPhase::Waiting,
+            sync_status: WalletSyncScanStatus::AtTip,
+            scanned_height: Some(height),
+            safe_chain_tip_height: Some(height),
+            lag_blocks: Some(0),
+            last_fault: None,
+            published_at_ms: super::unix_now_ms(),
+        })
+    }
+
+    fn stale_wallet_sync(network: Network, height: u32) -> WalletSyncState {
+        let scanned_height = BlockHeight::from(height);
+        let safe_chain_tip_height = BlockHeight::from(height.saturating_add(10));
+        WalletSyncState::new(WalletSyncSnapshot {
+            network,
+            phase: WalletSyncPhase::Parked,
+            sync_status: WalletSyncScanStatus::CatchingUp,
+            scanned_height: Some(scanned_height),
+            safe_chain_tip_height: Some(safe_chain_tip_height),
+            lag_blocks: Some(10),
+            last_fault: None,
+            published_at_ms: super::unix_now_ms(),
         })
     }
 
@@ -2323,6 +2839,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_wallet_sync_refuses_signing_before_reserving_jti()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = fixture_issuer()?;
+        let base = state_with_issuer(&issuer).await?;
+        let ledger = base.spend_idempotency_cache.clone();
+        let state = AppState {
+            wallet_sync: stale_wallet_sync(Network::Testnet, 4_047_000),
+            ..base
+        };
+
+        let (status, kind) = post_conformant_sign(state, &issuer).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(kind, ProblemKind::WalletUnavailable);
+        assert!(
+            matches!(
+                ledger.reserve(ACCESS_TOKEN_JTI, "v1:sha256:any").await?,
+                Reservation::Fresh
+            ),
+            "stale wallet sync must not consume the access-token jti",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn identical_replay_returns_the_cached_signed_payload()
     -> Result<(), Box<dyn std::error::Error>> {
         let issuer = fixture_issuer()?;
@@ -2556,6 +3097,26 @@ mod tests {
         assert!(
             retry_after.is_some_and(|seconds| seconds > 0),
             "a not_ready response must hint a positive numeric Retry-After",
+        );
+    }
+
+    #[test]
+    fn wallet_unavailable_response_carries_numeric_retry_after() {
+        let response = super::problem_response(ProblemDetail::retryable(
+            ProblemKind::WalletUnavailable,
+            "wallet_unavailable",
+            "wallet sync stale",
+        ))
+        .into_response();
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        assert_eq!(
+            retry_after,
+            Some(super::DEFAULT_WALLET_SYNC_RETRY_SECONDS),
+            "a wallet_unavailable response must hint a numeric Retry-After",
         );
     }
 

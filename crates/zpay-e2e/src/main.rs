@@ -14,11 +14,19 @@
 //! u-address and exits gracefully when the balance is too low.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use p256::ecdsa::SigningKey;
+use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use zally_chain::{
@@ -31,8 +39,12 @@ use zally_core::{
 };
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions};
 use zally_storage::{Sqlite, SqliteOptions};
-use zally_wallet::{SendPaymentPlan, Wallet};
+use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet};
 use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
+use zspend_core::{
+    Amount, AmountUnit, ChainId, ExpiresAt, IntentHashString, PaymentAuthorization,
+    PaymentAuthorizationType, recompute_intent_hash,
+};
 
 /// CLI entry point.
 #[derive(Debug, Parser)]
@@ -56,6 +68,13 @@ struct Cli {
         default_value = "http://127.0.0.1:7402"
     )]
     zpay_url: String,
+    /// zspend-runtime base URL (the `/v1/payments/sign` route is appended).
+    #[arg(
+        long,
+        env = "ZPAY_E2E_ZSPEND_URL",
+        default_value = "http://127.0.0.1:8090"
+    )]
+    zspend_url: String,
     /// Birthday height the wallet starts scanning from on first run.
     /// Use a recent tip minus a small margin so initial sync is fast.
     /// Ignored if the wallet already exists at `wallet_dir`.
@@ -109,6 +128,52 @@ enum Command {
         #[arg(long, default_value_t = 600)]
         poll_seconds: u64,
     },
+    /// Run the agent-signed flow through zspend: prepare in zpay,
+    /// authorize and sign via `/v1/payments/sign`, settle in zpay,
+    /// then poll confirmation and zexplorer visibility.
+    AgentRun {
+        /// Payee id registered in zpay's accepts registry.
+        #[arg(long, default_value = "aether-ai")]
+        payee_id: String,
+        /// Audience URI zspend expects in the access token.
+        #[arg(long, env = "ZPAY_E2E_ZSPEND_AUDIENCE")]
+        audience: String,
+        /// Ed25519 issuer private key in PKCS#8 PEM or DER format. zspend
+        /// must be running with a JWKS containing the matching public key.
+        #[arg(long, env = "ZPAY_E2E_ISSUER_KEY_PATH")]
+        issuer_key_path: PathBuf,
+        /// Issuer JWKS key id.
+        #[arg(long, env = "ZPAY_E2E_ISSUER_KID", default_value = "zpay-e2e-dev")]
+        issuer_kid: String,
+        /// Public zspend URL used for the DPoP `htu` claim. Defaults to
+        /// `--zspend-url`.
+        #[arg(long, env = "ZPAY_E2E_ZSPEND_PUBLIC_URL")]
+        zspend_public_url: Option<String>,
+        /// Maximum seconds the minted authorization remains valid.
+        #[arg(long, default_value_t = 120)]
+        token_ttl_seconds: u64,
+        /// Maximum seconds to wait for the oracle to observe a
+        /// confirmation before exiting.
+        #[arg(long, default_value_t = 600)]
+        poll_seconds: u64,
+        /// Base URL for the external transaction visibility check.
+        #[arg(
+            long,
+            env = "ZPAY_E2E_ZEXPLORER_TX_URL",
+            default_value = "https://zexplorer.app/testnet/tx"
+        )]
+        zexplorer_tx_url: String,
+    },
+}
+
+struct HarnessContext {
+    wallet: Wallet,
+    account_id: AccountId,
+    chain: ZinderChainSource,
+    zpay_url: String,
+    zspend_url: String,
+    network: Network,
+    network_label: String,
 }
 
 #[tokio::main]
@@ -121,13 +186,14 @@ async fn main() -> Result<(), HarnessError> {
         .try_init();
 
     let cli = Cli::parse();
+    let context = build_harness_context(&cli).await?;
+    run_command(context, cli.command).await
+}
+
+async fn build_harness_context(cli: &Cli) -> Result<HarnessContext, HarnessError> {
     std::fs::create_dir_all(&cli.wallet_dir).map_err(HarnessError::WalletDir)?;
 
-    let network = match cli.network.as_str() {
-        "testnet" => Network::Testnet,
-        "regtest" => Network::regtest(),
-        other => return Err(HarnessError::NetworkInvalid(other.to_owned())),
-    };
+    let network = parse_harness_network(&cli.network)?;
     let network_label = cli.network.clone();
     let chain = ZinderChainSource::connect_remote(ZinderRemoteOptions {
         endpoint: cli.zinder_url.clone(),
@@ -141,30 +207,35 @@ async fn main() -> Result<(), HarnessError> {
         BlockHeight::from(cli.birthday),
     )
     .await?;
-    let params = network.to_parameters();
 
-    match cli.command {
+    Ok(HarnessContext {
+        wallet,
+        account_id,
+        chain,
+        zpay_url: cli.zpay_url.clone(),
+        zspend_url: cli.zspend_url.clone(),
+        network,
+        network_label,
+    })
+}
+
+async fn run_command(context: HarnessContext, command: Command) -> Result<(), HarnessError> {
+    let HarnessContext {
+        wallet,
+        account_id,
+        chain,
+        zpay_url,
+        zspend_url,
+        network,
+        network_label,
+    } = context;
+
+    match command {
         Command::Address => {
-            let ua = wallet
-                .derive_next_address_with_transparent(account_id)
-                .await?;
-            let encoded = ua.encode(&params);
-            info!(unified_address = %encoded, "wallet unified address (fund this via fauzec)");
+            print_wallet_address(&wallet, account_id, network).await?;
         }
         Command::Status => {
-            let outcome = wallet.sync(&chain).await?;
-            info!(
-                scanned_to_height = outcome.scanned_to_height.as_u32(),
-                block_count = outcome.block_count,
-                "sync complete",
-            );
-            let balance = wallet.get_account_balance(account_id).await?;
-            info!(
-                sapling_zat = balance.sapling_zat.as_u64(),
-                orchard_zat = balance.orchard_zat.as_u64(),
-                transparent_mature_zat = balance.transparent_mature_zat.as_u64(),
-                "account balance",
-            );
+            print_wallet_status(&wallet, account_id, &chain).await?;
         }
         Command::Shield {
             shielding_threshold_zat,
@@ -181,7 +252,7 @@ async fn main() -> Result<(), HarnessError> {
                 &wallet,
                 account_id,
                 &chain,
-                &cli.zpay_url,
+                &zpay_url,
                 payee_id,
                 recipient_address,
                 amount_zat,
@@ -191,8 +262,77 @@ async fn main() -> Result<(), HarnessError> {
             )
             .await?;
         }
+        Command::AgentRun {
+            payee_id,
+            audience,
+            issuer_key_path,
+            issuer_kid,
+            zspend_public_url,
+            token_ttl_seconds,
+            poll_seconds,
+            zexplorer_tx_url,
+        } => {
+            run_agent_signed_flow(AgentRunInputs {
+                zpay_url: &zpay_url,
+                zspend_url: &zspend_url,
+                zspend_public_url: zspend_public_url.as_deref(),
+                payee_id,
+                audience: &audience,
+                issuer_key_path: &issuer_key_path,
+                issuer_kid: &issuer_kid,
+                token_ttl_seconds,
+                poll_seconds,
+                zexplorer_tx_url: &zexplorer_tx_url,
+                network,
+                network_label: &network_label,
+            })
+            .await?;
+        }
     }
     Ok(())
+}
+
+async fn print_wallet_address(
+    wallet: &Wallet,
+    account_id: AccountId,
+    network: Network,
+) -> Result<(), HarnessError> {
+    let ua = wallet
+        .derive_next_address_with_transparent(account_id)
+        .await?;
+    let params = network.to_parameters();
+    let encoded = ua.encode(&params);
+    info!(unified_address = %encoded, "wallet unified address (fund this via fauzec)");
+    Ok(())
+}
+
+async fn print_wallet_status(
+    wallet: &Wallet,
+    account_id: AccountId,
+    chain: &ZinderChainSource,
+) -> Result<(), HarnessError> {
+    let outcome = wallet.sync(chain).await?;
+    info!(
+        scanned_to_height = outcome.scanned_to_height.as_u32(),
+        block_count = outcome.block_count,
+        "sync complete",
+    );
+    let balance = wallet.get_account_balance(account_id).await?;
+    info!(
+        sapling_zat = balance.sapling_zat.as_u64(),
+        orchard_zat = balance.orchard_zat.as_u64(),
+        transparent_mature_zat = balance.transparent_mature_zat.as_u64(),
+        "account balance",
+    );
+    Ok(())
+}
+
+fn parse_harness_network(raw: &str) -> Result<Network, HarnessError> {
+    match raw {
+        "testnet" => Ok(Network::Testnet),
+        "regtest" => Ok(Network::regtest()),
+        other => Err(HarnessError::NetworkInvalid(other.to_owned())),
+    }
 }
 
 async fn shield_funds(
@@ -328,7 +468,8 @@ async fn run_flow(
         informational_expiry = chain_tip_height.saturating_add(41),
         "wallet-side tip for orientation only; zpay's tip oracle is authoritative for expiry_height",
     );
-    let prepared = call_prepare(zpay_url, &payee_id, network_label).await?;
+    let zpay_dpop_key = Arc::new(DpopKey::generate()?);
+    let prepared = call_prepare(zpay_url, &payee_id, network_label, &zpay_dpop_key).await?;
     info!(
         payment_id = %prepared.payment_id,
         expiry_height = prepared.expiry_height,
@@ -340,6 +481,7 @@ async fn run_flow(
         zpay_url.to_owned(),
         prepared.payment_id.clone(),
         chain.network(),
+        Arc::clone(&zpay_dpop_key),
     );
     let plan = SendPaymentPlan::conventional(
         account_id,
@@ -364,6 +506,374 @@ async fn run_flow(
 
     poll_until_confirmed(zpay_url, &prepared.payment_id, poll_seconds).await?;
     Ok(())
+}
+
+struct AgentRunInputs<'a> {
+    zpay_url: &'a str,
+    zspend_url: &'a str,
+    zspend_public_url: Option<&'a str>,
+    payee_id: String,
+    audience: &'a str,
+    issuer_key_path: &'a std::path::Path,
+    issuer_kid: &'a str,
+    token_ttl_seconds: u64,
+    poll_seconds: u64,
+    zexplorer_tx_url: &'a str,
+    network: Network,
+    network_label: &'a str,
+}
+
+async fn run_agent_signed_flow(inputs: AgentRunInputs<'_>) -> Result<(), HarnessError> {
+    let zpay_dpop_key = DpopKey::generate()?;
+    let prepared = call_prepare(
+        inputs.zpay_url,
+        &inputs.payee_id,
+        inputs.network_label,
+        &zpay_dpop_key,
+    )
+    .await?;
+    info!(
+        payment_id = %prepared.payment_id,
+        expiry_height = prepared.expiry_height,
+        "prepared row received from zpay for agent-signed flow",
+    );
+
+    let sign_url = format!(
+        "{}/v1/payments/sign",
+        inputs
+            .zspend_public_url
+            .unwrap_or(inputs.zspend_url)
+            .trim_end_matches('/')
+    );
+    let call_sign_url = format!(
+        "{}/v1/payments/sign",
+        inputs.zspend_url.trim_end_matches('/')
+    );
+    let authorization = build_agent_authorization(&prepared, inputs.network)?;
+    let issuer_key = load_issuer_encoding_key(inputs.issuer_key_path)?;
+    let dpop_key = DpopKey::generate()?;
+    let access_token = mint_access_token(&AccessTokenGrant {
+        issuer_key: &issuer_key,
+        issuer_kid: inputs.issuer_kid,
+        audience: inputs.audience,
+        dpop_jkt: &dpop_key.jkt,
+        authorization: &authorization,
+        token_ttl_seconds: inputs.token_ttl_seconds,
+    })?;
+    let dpop_proof = dpop_key.mint_access_bound_proof(&access_token, "POST", &sign_url)?;
+
+    let signed = request_zspend_signature(SignPaymentCall {
+        call_sign_url: &call_sign_url,
+        access_token: &access_token,
+        dpop_proof: &dpop_proof,
+        prepared: &prepared,
+        network_label: inputs.network_label,
+    })
+    .await?;
+
+    submit_signed_bytes(
+        inputs.zpay_url,
+        &prepared.payment_id,
+        &signed.raw_tx,
+        &zpay_dpop_key,
+    )
+    .await?;
+    poll_until_confirmed(inputs.zpay_url, &prepared.payment_id, inputs.poll_seconds).await?;
+    check_zexplorer(inputs.network, inputs.zexplorer_tx_url, &signed.tx_id).await?;
+    Ok(())
+}
+
+fn build_agent_authorization(
+    prepared: &PreparedPayment,
+    network: Network,
+) -> Result<PaymentAuthorization, HarnessError> {
+    let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
+    let payment = parsed
+        .payments()
+        .first()
+        .ok_or(HarnessError::PaymentMissing)?;
+    let reference = chain_reference(network);
+    let recipient_caip10 = format!("zcash:{}:{}", reference, payment.recipient.encoded());
+    let mut authorization = PaymentAuthorization {
+        authorization_type: PaymentAuthorizationType::PaymentAuthorization,
+        chain: ChainId {
+            namespace: "zcash".to_owned(),
+            reference: reference.to_owned(),
+        },
+        recipient: recipient_caip10.clone(),
+        amount: Amount {
+            currency: "ZEC".to_owned(),
+            value: payment.amount.as_u64().to_string(),
+            unit: AmountUnit::Base,
+        },
+        payment_id: prepared.payment_id.clone(),
+        intent_hash: IntentHashString("v1:sha256:placeholder".to_owned()),
+        expires_at: ExpiresAt::BlockHeight(prepared.expiry_height),
+    };
+    authorization.intent_hash = IntentHashString(
+        recompute_intent_hash(&authorization, &recipient_caip10, payment.amount.as_u64())
+            .map_err(|err| HarnessError::Jwt(err.to_string()))?,
+    );
+    Ok(authorization)
+}
+
+struct SignPaymentCall<'a> {
+    call_sign_url: &'a str,
+    access_token: &'a str,
+    dpop_proof: &'a str,
+    prepared: &'a PreparedPayment,
+    network_label: &'a str,
+}
+
+struct AgentSignedTransaction {
+    tx_id: String,
+    raw_tx: Vec<u8>,
+}
+
+async fn request_zspend_signature(
+    call: SignPaymentCall<'_>,
+) -> Result<AgentSignedTransaction, HarnessError> {
+    let sign_body = SignPaymentRequestBody {
+        payment_request: WirePaymentRequestBody {
+            scheme: "zip321".to_owned(),
+            request_uri: call.prepared.payment_uri.clone(),
+        },
+        network: call.network_label.to_owned(),
+        payment_id: call.prepared.payment_id.clone(),
+        target_expiry_height: call.prepared.expiry_height,
+    };
+    let client = reqwest::Client::new();
+    let response = client
+        .post(call.call_sign_url)
+        .header("authorization", format!("DPoP {}", call.access_token))
+        .header("dpop", call.dpop_proof)
+        .json(&sign_body)
+        .send()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(HarnessError::SignFailed { status, body: text });
+    }
+    let signed: SignResponseBody = response
+        .json()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if signed.signed.format != "raw-zcash-v5" {
+        return Err(HarnessError::SignedBytes(format!(
+            "expected raw-zcash-v5, got {}",
+            signed.signed.format
+        )));
+    }
+    let raw_tx = BASE64_STANDARD
+        .decode(signed.signed.bytes.as_bytes())
+        .map_err(|err| HarnessError::SignedBytes(err.to_string()))?;
+    info!(
+        tx_id = %signed.signed.tx_id,
+        raw_tx_bytes = raw_tx.len(),
+        "zspend returned signed raw transaction",
+    );
+    Ok(AgentSignedTransaction {
+        tx_id: signed.signed.tx_id,
+        raw_tx,
+    })
+}
+
+async fn submit_signed_bytes(
+    zpay_url: &str,
+    payment_id: &str,
+    raw_tx: &[u8],
+    dpop_key: &DpopKey,
+) -> Result<(), HarnessError> {
+    let client = reqwest::Client::new();
+    let settle_url = format!("{}/x402/v2/settle", zpay_url.trim_end_matches('/'));
+    let dpop_proof = dpop_key.mint_proof("POST", &settle_url)?;
+    let response = client
+        .post(&settle_url)
+        .header("dpop", dpop_proof)
+        .json(&SettleRequestBody {
+            payment_id: payment_id.to_owned(),
+            raw_tx_hex: hex::encode(raw_tx),
+        })
+        .send()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(HarnessError::SettleFailed { status, body: text });
+    }
+    let outcome: SettlementResponseData = response
+        .json()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    info!(
+        payment_id = %outcome.payment_id,
+        broadcast_kind = %outcome.broadcast_outcome.kind,
+        tx_id = ?outcome.broadcast_outcome.transaction_id,
+        "zpay settle accepted signed transaction",
+    );
+    Ok(())
+}
+
+async fn check_zexplorer(
+    network: Network,
+    zexplorer_tx_url: &str,
+    tx_id: &str,
+) -> Result<(), HarnessError> {
+    if !matches!(network, Network::Testnet) {
+        warn!("zexplorer check skipped outside testnet");
+        return Ok(());
+    }
+    let url = format!("{}/{}", zexplorer_tx_url.trim_end_matches('/'), tx_id);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !response.status().is_success() {
+        return Err(HarnessError::ZexplorerFailed {
+            url,
+            status: response.status(),
+        });
+    }
+    info!(url = %url, "zexplorer returned a successful response for tx");
+    Ok(())
+}
+
+fn load_issuer_encoding_key(path: &std::path::Path) -> Result<EncodingKey, HarnessError> {
+    let raw = std::fs::read(path).map_err(|source| HarnessError::KeyRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if raw.starts_with(b"-----BEGIN") {
+        EncodingKey::from_ed_pem(&raw).map_err(|err| HarnessError::Jwt(err.to_string()))
+    } else {
+        Ok(EncodingKey::from_ed_der(&raw))
+    }
+}
+
+struct DpopKey {
+    encoding: EncodingKey,
+    x: String,
+    y: String,
+    jkt: String,
+}
+
+impl DpopKey {
+    fn generate() -> Result<Self, HarnessError> {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let point = signing_key.verifying_key().to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(
+            point
+                .x()
+                .ok_or_else(|| HarnessError::Jwt("P-256 point missing x coordinate".to_owned()))?,
+        );
+        let y = URL_SAFE_NO_PAD.encode(
+            point
+                .y()
+                .ok_or_else(|| HarnessError::Jwt("P-256 point missing y coordinate".to_owned()))?,
+        );
+        let pem = signing_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|err| HarnessError::Jwt(err.to_string()))?
+            .to_string();
+        let encoding = EncodingKey::from_ec_pem(pem.as_bytes())
+            .map_err(|err| HarnessError::Jwt(err.to_string()))?;
+        let jkt = zspend_core::ec_jwk_thumbprint("P-256", "EC", &x, &y);
+        Ok(Self {
+            encoding,
+            x,
+            y,
+            jkt,
+        })
+    }
+
+    fn mint_proof(&self, method: &str, proof_url: &str) -> Result<String, HarnessError> {
+        self.mint_proof_inner(method, proof_url, None)
+    }
+
+    fn mint_access_bound_proof(
+        &self,
+        access_token: &str,
+        method: &str,
+        proof_url: &str,
+    ) -> Result<String, HarnessError> {
+        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
+        self.mint_proof_inner(method, proof_url, Some(ath))
+    }
+
+    fn mint_proof_inner(
+        &self,
+        method: &str,
+        proof_url: &str,
+        ath: Option<String>,
+    ) -> Result<String, HarnessError> {
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some("dpop+jwt".to_owned());
+        header.jwk = Some(
+            serde_json::from_value(serde_json::json!({
+                "kty": "EC",
+                "crv": "P-256",
+                "x": self.x,
+                "y": self.y,
+            }))
+            .map_err(|err| HarnessError::Jwt(err.to_string()))?,
+        );
+        let mut claims = serde_json::json!({
+            "htm": method,
+            "htu": proof_url,
+            "jti": format!("zpay-e2e-dpop-{}", unix_now_ms()),
+            "iat": unix_now_seconds(),
+        });
+        if let Some(ath) = ath {
+            claims["ath"] = serde_json::Value::String(ath);
+        }
+        encode(&header, &claims, &self.encoding).map_err(|err| HarnessError::Jwt(err.to_string()))
+    }
+}
+
+struct AccessTokenGrant<'a> {
+    issuer_key: &'a EncodingKey,
+    issuer_kid: &'a str,
+    audience: &'a str,
+    dpop_jkt: &'a str,
+    authorization: &'a PaymentAuthorization,
+    token_ttl_seconds: u64,
+}
+
+fn mint_access_token(grant: &AccessTokenGrant<'_>) -> Result<String, HarnessError> {
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(grant.issuer_kid.to_owned());
+    let claims = serde_json::json!({
+        "aud": grant.audience,
+        "jti": format!("zpay-e2e-at-{}", unix_now_ms()),
+        "exp": unix_now_seconds().saturating_add(grant.token_ttl_seconds),
+        "cnf": { "jkt": grant.dpop_jkt },
+        "authorization_details": [grant.authorization],
+    });
+    encode(&header, &claims, grant.issuer_key).map_err(|err| HarnessError::Jwt(err.to_string()))
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis())
+}
+
+fn chain_reference(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "main",
+        Network::Regtest(_) => "regtest",
+        Network::Testnet | _ => "test",
+    }
 }
 
 async fn poll_until_confirmed(
@@ -412,6 +922,7 @@ async fn call_prepare(
     zpay_url: &str,
     payee_id: &str,
     network_label: &str,
+    dpop_key: &DpopKey,
 ) -> Result<PreparedPayment, HarnessError> {
     let idempotency_key = format!(
         "zpay-e2e-{}",
@@ -429,11 +940,11 @@ async fn call_prepare(
         idempotency_key: Some(idempotency_key),
     };
     let client = reqwest::Client::new();
+    let prepare_url = format!("{}/x402/v2/prepare", zpay_url.trim_end_matches('/'));
+    let dpop_proof = dpop_key.mint_proof("POST", &prepare_url)?;
     let response = client
-        .post(format!(
-            "{}/x402/v2/prepare",
-            zpay_url.trim_end_matches('/')
-        ))
+        .post(&prepare_url)
+        .header("dpop", dpop_proof)
         .json(&body)
         .send()
         .await
@@ -476,15 +987,17 @@ struct ZpaySettleSubmitter {
     zpay_url: String,
     payment_id: String,
     network: Network,
+    dpop_key: Arc<DpopKey>,
     client: reqwest::Client,
 }
 
 impl ZpaySettleSubmitter {
-    fn new(zpay_url: String, payment_id: String, network: Network) -> Self {
+    fn new(zpay_url: String, payment_id: String, network: Network, dpop_key: Arc<DpopKey>) -> Self {
         Self {
             zpay_url,
             payment_id,
             network,
+            dpop_key,
             client: reqwest::Client::new(),
         }
     }
@@ -501,12 +1014,17 @@ impl Submitter for ZpaySettleSubmitter {
             payment_id: self.payment_id.clone(),
             raw_tx_hex: hex::encode(raw_tx),
         };
+        let settle_url = format!("{}/x402/v2/settle", self.zpay_url.trim_end_matches('/'));
+        let dpop_proof = self
+            .dpop_key
+            .mint_proof("POST", &settle_url)
+            .map_err(|err| SubmitterError::Unavailable {
+                reason: err.to_string(),
+            })?;
         let response = self
             .client
-            .post(format!(
-                "{}/x402/v2/settle",
-                self.zpay_url.trim_end_matches('/')
-            ))
+            .post(&settle_url)
+            .header("dpop", dpop_proof)
             .json(&body)
             .send()
             .await
@@ -558,6 +1076,36 @@ fn decode_txid(tx_id_hex: &str) -> Result<[u8; 32], SubmitterError> {
     bytes.try_into().map_err(|_| SubmitterError::Unavailable {
         reason: "zpay broadcast outcome txid was not 32 bytes".to_owned(),
     })
+}
+
+/// Wire types for `POST /v1/payments/sign`.
+
+#[derive(Debug, Serialize)]
+struct SignPaymentRequestBody {
+    payment_request: WirePaymentRequestBody,
+    network: String,
+    payment_id: String,
+    target_expiry_height: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct WirePaymentRequestBody {
+    scheme: String,
+    #[serde(rename = "value")]
+    request_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignResponseBody {
+    #[serde(rename = "signed_payload")]
+    signed: SignedSpendWire,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignedSpendWire {
+    format: String,
+    bytes: String,
+    tx_id: String,
 }
 
 /// Wire types for `/x402/v2/prepare`.
@@ -659,8 +1207,35 @@ enum HarnessError {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error("zspend /v1/payments/sign returned {status}: {body}")]
+    SignFailed {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("zpay /settle returned {status}: {body}")]
+    SettleFailed {
+        status: reqwest::StatusCode,
+        body: String,
+    },
     #[error("http error: {0}")]
     Http(String),
+    #[error("issuer key read failed at {path:?}: {source}")]
+    KeyRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("jwt error: {0}")]
+    Jwt(String),
+    #[error("signed bytes invalid: {0}")]
+    SignedBytes(String),
+    #[error("prepared payment URI carried no payment")]
+    PaymentMissing,
+    #[error("zexplorer check failed for {url}: {status}")]
+    ZexplorerFailed {
+        url: String,
+        status: reqwest::StatusCode,
+    },
     #[error(
         "insufficient funds: spendable={spendable_zat}, requested={requested_zat} (+ ~5000 zat fee)"
     )]

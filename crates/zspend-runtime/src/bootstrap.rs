@@ -3,7 +3,7 @@
 //! `init` seals a fresh BIP-39 seed at `$ZSPEND_SEALED_SEED_PATH` and lets the
 //! zally storage migrations stand up `wallet.db`, but the underlying schema
 //! has no account row until one is materialised from the unsealed seed plus a
-//! chain anchor. Without that row, [`zally_wallet::WalletBuilder::open`] short-
+//! chain anchor. Without that row, [`zally_wallet::WalletBuilder::open`] short
 //! circuits with [`zally_wallet::WalletError::AccountNotFound`] and the
 //! container restart-loops on a fresh volume.
 //!
@@ -79,11 +79,6 @@ pub(crate) enum BootstrapError {
         #[source]
         source: WalletError,
     },
-    #[error("wallet sync after open failed: {source}")]
-    WalletSync {
-        #[source]
-        source: WalletError,
-    },
     #[error(
         "ZSPEND_CHAIN_SOURCE_URL is unset; required to materialise the wallet account on a fresh volume"
     )]
@@ -107,7 +102,7 @@ pub(crate) enum BootstrapError {
 /// [`DEFAULT_MAINNET_BIRTHDAY`], or [`DEFAULT_REGTEST_BIRTHDAY`]).
 pub(crate) async fn bootstrap(
     inputs: BootstrapInputs,
-) -> Result<(Wallet, AccountId), BootstrapError> {
+) -> Result<(Wallet, AccountId, Arc<dyn ChainSource>), BootstrapError> {
     let BootstrapInputs {
         network,
         sealed_seed_path,
@@ -140,30 +135,7 @@ pub(crate) async fn bootstrap(
         .await
         .map_err(|source| BootstrapError::WalletOpen { source })?;
 
-    tracing::info!(
-        account_id = ?account_id,
-        "zspend wallet bootstrap: catching up to chain tip",
-    );
-    let mut total_blocks = 0u64;
-    let mut iterations = 0u32;
-    loop {
-        let outcome = wallet
-            .sync(chain.as_ref())
-            .await
-            .map_err(|source| BootstrapError::WalletSync { source })?;
-        total_blocks = total_blocks.saturating_add(outcome.block_count);
-        iterations = iterations.saturating_add(1);
-        if outcome.block_count == 0 {
-            tracing::info!(
-                iterations,
-                total_blocks_scanned = total_blocks,
-                "zspend wallet bootstrap: sync caught up to chain tip",
-            );
-            break;
-        }
-    }
-
-    Ok((wallet, account_id))
+    Ok((wallet, account_id, chain))
 }
 
 fn build_zinder_chain_source(
@@ -286,7 +258,7 @@ mod tests {
         init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
-        let (_wallet, first_account_id) = bootstrap(inputs(
+        let (_wallet, first_account_id, _chain) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(mock),
@@ -295,7 +267,7 @@ mod tests {
         .await?;
 
         let warm_mock = Arc::new(MockChainSource::new(network));
-        let (_wallet_again, second_account_id) = bootstrap(inputs(
+        let (_wallet_again, second_account_id, _chain_again) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(warm_mock),
@@ -318,14 +290,14 @@ mod tests {
         init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
-        let (_w1, first) = bootstrap(inputs(
+        let (_w1, first, _chain1) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(Arc::clone(&mock) as Arc<dyn zally_chain::ChainSource>),
             Some(DEFAULT_REGTEST_BIRTHDAY),
         ))
         .await?;
-        let (_w2, second) = bootstrap(inputs(
+        let (_w2, second, _chain2) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(Arc::clone(&mock) as Arc<dyn zally_chain::ChainSource>),

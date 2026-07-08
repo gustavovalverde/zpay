@@ -80,6 +80,41 @@ refresh; they are `null` before the first chain read. A dead poll loop
 surfaces as a growing `cache_age_seconds` even while the live probe still
 succeeds, which is the signal an operator alerts on.
 
+`GET /readyz` on `zspend-runtime` reports the wallet signer dependencies. The
+probe returns HTTP 200 only when the issuer JWKS is loaded, revocation is fresh
+or disabled in dev, and the wallet sync snapshot is fresh:
+
+```json
+{
+  "network": "testnet",
+  "sealed_seed": "dev",
+  "posture": "dev",
+  "jwks_cache": "loaded",
+  "revocation_cache": "disabled",
+  "wallet_sync": {
+    "network": "testnet",
+    "phase": "waiting",
+    "sync_status": "at_tip",
+    "scanned_height": 4152766,
+    "safe_chain_tip_height": 4152766,
+    "lag_blocks": 0,
+    "snapshot_age_seconds": 2,
+    "freshness": "fresh",
+    "is_fresh": true,
+    "last_fault": null
+  }
+}
+```
+
+`wallet_sync.freshness` is `fresh` only when the zally `SyncDriver` phase is
+`syncing` or `waiting`, the snapshot network matches the signer network, both
+heights are known, `lag_blocks` is within `ZSPEND_WALLET_SYNC_MAX_LAG_BLOCKS`,
+and `snapshot_age_seconds` is within
+`ZSPEND_WALLET_SYNC_STALE_AFTER_SECONDS`. A stale, recovering, parked, closing,
+or closed sync driver makes `/readyz` return 503 and makes
+`POST /v1/payments/sign` return retryable `wallet_unavailable` before the
+access-token `jti` is reserved.
+
 ## Ops listener endpoints
 
 | Path | Method | Response | Purpose |
@@ -108,6 +143,11 @@ carry bounded label sets so cardinality stays fixed.
 | `zpay_chain_visible_tip_height` | gauge | none |
 | `zpay_chain_settled_tip_height` | gauge | none |
 | `zpay_chain_status_cache_age_seconds` | gauge | none |
+| `zspend_wallet_sync_snapshot_age_seconds` | gauge | none |
+| `zspend_wallet_sync_fresh` | gauge | none |
+| `zspend_wallet_sync_lag_blocks` | gauge | none |
+| `zspend_wallet_sync_scanned_height` | gauge | none |
+| `zspend_wallet_sync_safe_chain_tip_height` | gauge | none |
 
 The chain gauges resample every 15 seconds from the shared chain view,
 independent of the confirmation poll, so a stalled poll loop still shows a
@@ -178,6 +218,22 @@ with a `Retry-After` header and the standard problem envelope (see
 |-----|---------|-------------|
 | `ZPAY_ALLOW_DEMO_PAYEE` | off | Truthy (`1`, `true`, `yes`) bypasses the placeholder-receiver boot gate for dev and compose stacks. Emits a `WARN` per offending payee. Never set in production. |
 | `RUST_LOG` | `zpay=info` | `tracing-subscriber` env filter. |
+
+### zspend-runtime wallet sync
+
+`zspend-runtime` uses the `ZSPEND_*` namespace. The wallet opens or creates its
+account at startup, then a long-lived zally `SyncDriver` keeps the wallet at
+the configured zinder chain tip.
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ZSPEND_CHAIN_SOURCE_URL` | none | zinder gRPC endpoint. Required to materialise a fresh wallet account and to run continuous wallet sync. |
+| `ZSPEND_BIRTHDAY_HEIGHT` | network default | Optional wallet birthday override. Use for repros such as Orchard divergence from height `4050200`. |
+| `ZSPEND_WALLET_SYNC_POLL_INTERVAL_MS` | `5000` | Polling cadence when no chain event arrives. |
+| `ZSPEND_WALLET_SYNC_MAX_ITERATIONS_PER_WAKE_COUNT` | `1000` | Maximum `Wallet::sync` iterations for one driver wakeup. |
+| `ZSPEND_WALLET_SYNC_TIMEOUT_SECONDS` | `120` | Timeout for one wallet sync iteration. |
+| `ZSPEND_WALLET_SYNC_MAX_LAG_BLOCKS` | `3` | Maximum signer lag accepted by `/readyz` and `/v1/payments/sign`. |
+| `ZSPEND_WALLET_SYNC_STALE_AFTER_SECONDS` | `30` | Maximum age for the latest sync snapshot. |
 
 ## CLI
 

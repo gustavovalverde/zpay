@@ -183,6 +183,7 @@ PRC-7807 envelope, `type: https://errors.zentity.xyz/wallet/<code>`, top-level `
 | 503 | `seed_unavailable` | true | Operator page; remediation hint includes runbook link. |
 | 503 | `chain_unreachable` | true | Submitter cannot reach its chain backend. |
 | 503 | `revocation_cache_stale` | true | Wallet failed closed on stale revocation. |
+| 503 | `wallet_unavailable` | true | Wallet sync is stale, catching up, recovering, or parked. |
 | 503 | `not_ready` | true | Pre-readiness; check `/readyz`. |
 
 ## 5. Wire surfaces
@@ -460,9 +461,9 @@ Phases reference decisions by D-N.
 
 ## 11. Revision history
 
-### 2026-06-08 — Slice 1 implementation review (zentity PRD-43)
+### 2026-06-08: Slice 1 implementation review (zentity PRD-43)
 
-A two-repo code review ahead of Slice 1 (the BFF→wallet trust boundary) found drift between this locked design and the shipped code, plus learnings that postdate the original lock. The locked decisions (D-1–D-15) stand; the amendments below correct stale references and refine three decisions for the current single-instance/testnet scale. Tracked in zentity `docs/plans/prd-43-agent-wallet-trust-boundary.md`.
+A two-repo code review ahead of Slice 1 (the BFF to wallet trust boundary) found drift between this locked design and the shipped code, plus learnings that postdate the original lock. The locked decisions (D-1 to D-15) stand; the amendments below correct stale references and refine three decisions for the current single-instance/testnet scale. Tracked in zentity `docs/plans/prd-43-agent-wallet-trust-boundary.md`.
 
 **Stale references (code wins; this doc was the stale part):**
 

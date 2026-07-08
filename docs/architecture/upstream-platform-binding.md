@@ -15,14 +15,14 @@ zpay depends on:
 | Crate | Used by | For |
 |-------|---------|-----|
 | `zally-core` | `zpay-core`, `zspend-*` | `Zatoshis`, `TxId`, `Memo`, `Network`, `SignedPayload` newtypes. |
-| `zally-chain` | `zpay-core`, `zpay-runtime` | `Submitter`, `ChainSource`, `ZinderChainSource`. |
+| `zally-chain` | `zpay-core`, `zpay-runtime`, `zspend-runtime` | `Submitter`, `ChainSource`, `ZinderChainSource`. |
 | `zally-keys` | `zspend-runtime` | `SeedSealing` trait, `AgeFileSealing`, `SealingPosture`. |
 | `zally-storage` | `zpay-core` | `parse_v5_expiry_height` (the settle expiry gate). |
-| `zally-wallet` | `zspend-runtime` | `Wallet`, transaction proposal and signing. |
+| `zally-wallet` | `zspend-runtime` | `Wallet`, `SyncDriver`, transaction proposal and signing. |
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
 Pin: workspace `Cargo.toml` pins one git rev for every zally crate,
-currently `ab9cba7` (Ironwood/NU6.3-aware). Bumps land in their own PR.
+currently `4ec16bd` (Ironwood sync hardening). Bumps land in their own PR.
 
 ## zinder
 
@@ -37,8 +37,11 @@ zpay depends on:
 | `zinder-client` | `zpay-runtime` | `RemoteChainIndex::broadcast_transaction`, `ChainEvents`, tip reads, disclosure fetch. |
 | `zinder-proto` | `zpay-runtime` | the generated protobuf types. |
 
-Pin: `zinder-client` and `zinder-proto` at git rev `429db6a`. Bumps land in
+Pin: `zinder-client` and `zinder-proto` at git rev `6d3d332`. Bumps land in
 their own PR.
+
+Wallet deployments that claim Ironwood subtree-root coverage must observe the
+`wallet.read.subtree_roots_ironwood_v1` capability from zinder `ServerInfo`.
 
 The broadcast endpoint is `ZPAY_CHAIN_SOURCE_URL`; the disclosure-fetch
 explorer plane is `ZPAY_EXPLORER_URL`. Both point at a zinder deployment;
@@ -53,12 +56,12 @@ runbook.
 ## librustzcash fork family
 
 zpay pins the entire librustzcash workspace to a fork
-(`github.com/gustavovalverde/librustzcash`, rev `235d581`) through
+(`github.com/gustavovalverde/librustzcash`, rev `693338fe`) through
 `[patch.crates-io]`. Every librustzcash-internal crate is patched from the
 same commit so intra-workspace types stay coherent: `zcash_client_backend`,
-`zcash_client_sqlite`, `pczt`, `zcash_protocol`, `zcash_primitives`,
-`zcash_keys`, `zcash_address`, `zcash_transparent`, `zcash_proofs`, and
-`zip321`.
+`zcash_client_sqlite`, `zcash_encoding`, `equihash`, `pczt`,
+`zcash_protocol`, `zcash_primitives`, `zcash_keys`, `zcash_address`,
+`zcash_transparent`, `zcash_proofs`, and `zip321`.
 
 The fork tracks the unreleased Ironwood/NU6.3 dependency family and carries
 two patches on top of upstream `main`:
@@ -71,6 +74,10 @@ two patches on top of upstream `main`:
 Drop the patch set once upstream releases ship both. `deny.toml` allows these
 fork sources under `[sources] allow-git`, alongside the zally and zinder
 sources.
+
+`shardtree` and `incrementalmerkletree` are pinned to the
+`github.com/gustavovalverde/incrementalmerkletree` fork at `7e79e55`, matching
+zally's anchor-retention APIs.
 
 **Validator requirement.** Ironwood/NU6.3 is served by Zebra only; it is the
 only full validator past NU6.3. A zinder deployment behind zpay must index a

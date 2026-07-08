@@ -110,7 +110,9 @@ services:
       ZSPEND_CHAIN_SOURCE_URL: ${ZSPEND_CHAIN_SOURCE_URL:-http://zinder-query:9101}
       # Optional overrides; see crates/zspend-runtime/src/main.rs.
       # ZSPEND_MAX_AMOUNT_ZAT: "100000000"
-      # ZSPEND_AUDIENCE: "urn:zentity:wallet:phase4-stub"
+      ZSPEND_AUDIENCE: ${ZSPEND_AUDIENCE:-urn:zpay:zspend:local-dev}
+      ZSPEND_JWKS_FILE: ${ZSPEND_JWKS_FILE:-}
+      ZSPEND_PUBLIC_URL: ${ZSPEND_PUBLIC_URL:-http://127.0.0.1:8090}
       # Pinned to a height well below zinder's safe_tip so the
       # first-boot tree_state_at(birthday - 1) lookup hits an
       # already-indexed checkpoint. zinder's safe_tip lags the actual

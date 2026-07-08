@@ -71,14 +71,14 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "ec5b213f82fdc28dba211802bdc3cf3936cd4823", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "74abb4b8f708dfb511c5f301c3d59f2127a5e2ed" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "74abb4b8f708dfb511c5f301c3d59f2127a5e2ed" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "6d3d332f2f0343ce91b57053f32f7a87fed606c9" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "6d3d332f2f0343ce91b57053f32f7a87fed606c9" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -120,21 +120,24 @@ undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 wildcard_enum_match_arm = "deny"
 
-# Pinned to a fork of the librustzcash workspace tracking the unreleased
-# Ironwood/NU6.3 dependency family. Two patches ride on top of upstream main:
-# the `target_expiry_height` argument on `create_pczt_from_proposal`
-# (https://github.com/zcash/librustzcash/pull/2412) and wallet scanning/storage
-# for the Ironwood shielded pool (https://github.com/zcash/librustzcash/pull/2539).
-# Every librustzcash-internal crate is patched from the same commit so
-# intra-workspace types stay coherent. Drop once upstream releases ship both.
+# Mirrors zally's [patch.crates-io]: Cargo patch sections do not propagate from
+# git dependencies, so the workspace that builds zally-storage must repeat the
+# full pin set. Drop this once the NU6.3/Ironwood librustzcash stack ships from
+# crates.io.
 [patch.crates-io]
-zcash_client_backend = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_client_sqlite = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-pczt = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_protocol = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_primitives = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_keys = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_address = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_transparent = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zcash_proofs = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
-zip321 = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "235d581f2c6eface19e857e69e9bfa4765c2d4bf" }
+zcash_client_backend = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_client_sqlite = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_encoding = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+equihash = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+pczt = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_protocol = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_primitives = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_keys = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_address = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_transparent = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zcash_proofs = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+zip321 = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+# Mirrors zally's shardtree/incrementalmerkletree patch: the fork's
+# anchor-retention APIs exist only at this incrementalmerkletree rev.
+shardtree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "7e79e55dedea24b4e56f3f3ad2afeed9fc88ab26" }
+incrementalmerkletree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "7e79e55dedea24b4e56f3f3ad2afeed9fc88ab26" }

@@ -106,6 +106,32 @@ variant renders as 401.
 | `ClockSkew { drift_seconds }` | retryable | 401 | `dpop_clock_skew` | Proof timestamp drift exceeds tolerance; the caller resigns with a corrected clock. |
 | `Replay` | not_retryable | 401 | `dpop_replay` | Proof was already used; the caller mints a fresh proof. |
 
+### `zspend_core::ProblemKind`
+
+Produced by `zspend-runtime`; rendered at `POST /v1/payments/sign`.
+
+| Variant | Retry | HTTP | `kind` | Operator hint |
+|---------|-------|------|--------|---------------|
+| `PaymentRequestInvalid` | not_retryable | 400 | `payment_request_invalid` | The ZIP-321 request is malformed or names the wrong network. |
+| `DpopProofInvalid` | not_retryable | 401 | `dpop_proof_invalid` | The caller must mint a fresh DPoP proof. |
+| `AccessTokenInvalid` | not_retryable | 401 | `access_token_invalid` | The caller must re-authenticate and obtain a valid `payment_authorization`. |
+| `TokenRevoked` | not_retryable | 401 | `token_revoked` | The issuer revoked this access-token `jti`; request a new authorization. |
+| `IntentMismatch` | not_retryable | 403 | `intent_mismatch` | The signed RAR tuple does not match the parsed payment request. |
+| `RecipientMismatch` | not_retryable | 403 | `recipient_mismatch` | The recipient differs from the signed RAR tuple. |
+| `AmountExceeded` | not_retryable | 403 | `amount_exceeded` | The requested amount exceeds the wallet's local backstop cap. |
+| `AudienceMismatch` | not_retryable | 403 | `audience_mismatch` | The access token was minted for another wallet audience. |
+| `TokenAlreadyConsumed` | not_retryable | 409 | `token_already_consumed` | This access-token `jti` was already used for a different intent. |
+| `TargetExpiryStale` | not_retryable | 409 | `target_expiry_stale` | The prepared expiry is stale; prepare again and sign a new request. |
+| `AuthorizationExpired` | not_retryable | 410 | `authorization_expired` | The authorization's block-height expiry has passed. |
+| `InsufficientFunds` | not_retryable | 422 | `insufficient_funds` | Fund the wallet and wait for sync. |
+| `RarTooManyEntries` | not_retryable | 422 | `rar_too_many_entries` | v1 accepts exactly one `payment_authorization` RAR entry. |
+| `SeedUnavailable` | requires_operator | 503 | `seed_unavailable` | Restore or unseal the wallet seed. |
+| `ChainUnreachable` | retryable | 503 | `chain_unreachable` | The wallet chain plane is unreachable. |
+| `RevocationCacheStale` | retryable | 503 | `revocation_cache_stale` | The revocation cache cannot be proven fresh. |
+| `WalletUnavailable` | retryable | 503 | `wallet_unavailable` | Wallet sync is stale, catching up, recovering, or parked; check `/readyz.wallet_sync`. |
+| `NotReady` | retryable | 503 | `not_ready` | A transient signer precondition is not satisfied. |
+| `TargetExpiryMismatchInternal` | requires_operator | 500 | `target_expiry_mismatch_internal` | The wallet signed a transaction with the wrong expiry height. |
+
 ### `zpay_core::oracle::OracleError`
 
 Internal to the confirmation path. The `ConfirmationOracle` surfaces it

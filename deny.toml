@@ -81,6 +81,9 @@ allow-git = [
     # librustzcash workspace fork carrying the Ironwood/NU6.3 dependency family
     # and the target_expiry_height patch; consumed via [patch.crates-io].
     "https://github.com/gustavovalverde/librustzcash.git",
+    # shardtree/incrementalmerkletree fork carrying anchor-retention APIs used
+    # by zally's Ironwood wallet sync stack.
+    "https://github.com/gustavovalverde/incrementalmerkletree",
     # Sibling library workspace consumed by pinned rev; bump in lockstep with
     # zpay-core when upstream changes the wallet surface.
     "https://github.com/gustavovalverde/zally",
