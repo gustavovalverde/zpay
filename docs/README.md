@@ -47,6 +47,14 @@ The docs are organised by lifecycle, not by topic:
 - [error-vocabulary.md](reference/error-vocabulary.md): every typed error with
   retry posture and operator action
 
+## Runbook index
+
+- [end-to-end-validation.md](runbooks/end-to-end-validation.md): local x402
+  smoke test with zpay, zinder, fauzec, and zexplorer
+- [railway-deploy.md](runbooks/railway-deploy.md): Railway deployment
+- [reorg-recovery.md](runbooks/reorg-recovery.md): settlement reorg response
+- [zspend-seed.md](runbooks/zspend-seed.md): wallet seed lifecycle
+
 ## Proposals index
 
 Empty at scaffold time. See the upstream-asks list in

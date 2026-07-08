@@ -277,7 +277,8 @@ the protocol memo, propose and sign through a real zally wallet, POST the
 signed bytes to `/settle`, then poll `/payments/{payment_id}` until the
 confirmation oracle observes the transaction mine. Funding is out-of-band
 through fauzec; the harness prints a u-address and exits when the balance is
-too low.
+too low. The operator procedure lives in
+[end-to-end-validation.md](../runbooks/end-to-end-validation.md).
 
 ## Operational invariants
 

@@ -307,7 +307,7 @@ contract; treat any change to a probe assertion as a wire-shape decision.
 | [Operational surfaces](docs/architecture/operational-surfaces.md) | Env-var schema, readiness, ops port |
 | [Facilitator plane](docs/architecture/facilitator-plane.md) | Lifecycle and typed errors across boundaries |
 | [Error vocabulary](docs/reference/error-vocabulary.md) | Every typed error, retry posture, operator action |
-| [Runbooks](docs/runbooks/) | Railway deploy, reorg recovery, zspend seed ceremony |
+| [Runbooks](docs/runbooks/) | x402 smoke test, Railway deploy, reorg recovery, zspend seed ceremony |
 | [ADR index](docs/adrs/) | Locked architectural decisions, including [ADR-0006](docs/adrs/0006-facilitator-trust-boundary.md) (trust boundary), [ADR-0008](docs/adrs/0008-compliance-authority-placement.md) (compliance authority), and [ADR-0009](docs/adrs/0009-settlement-lifecycle-and-finality.md) (settlement finality) |
 
 ## Ecosystem position
