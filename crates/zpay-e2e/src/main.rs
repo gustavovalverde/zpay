@@ -321,6 +321,7 @@ async fn print_wallet_status(
     info!(
         sapling_zat = balance.sapling_zat.as_u64(),
         orchard_zat = balance.orchard_zat.as_u64(),
+        ironwood_zat = balance.ironwood_zat.as_u64(),
         transparent_mature_zat = balance.transparent_mature_zat.as_u64(),
         "account balance",
     );
@@ -431,6 +432,7 @@ async fn run_flow(
     info!(
         sapling_zat = balance.sapling_zat.as_u64(),
         orchard_zat = balance.orchard_zat.as_u64(),
+        ironwood_zat = balance.ironwood_zat.as_u64(),
         transparent_mature_zat = balance.transparent_mature_zat.as_u64(),
         "account balance after sync",
     );
