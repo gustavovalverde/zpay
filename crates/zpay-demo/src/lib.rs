@@ -343,7 +343,7 @@ impl DemoState {
     fn record_settlement(&self, payment_id: &str, transaction_id: String) {
         if let Some(stored) = self.payments.lock().get_mut(payment_id) {
             stored.settled_transaction_id = Some(transaction_id);
-            stored.stage_override = Some(DemoStage::Paid);
+            stored.stage_override = None;
         }
     }
 }
@@ -771,13 +771,16 @@ async fn payment_snapshot(state: &DemoState, payment_id: &str) -> Result<Payment
             .as_ref()
             .and_then(|snapshot| snapshot.mined_block_height),
         reorg_count: status.as_ref().map_or(0, |snapshot| snapshot.reorg_count),
-        settled: status.as_ref().is_some_and(|snapshot| snapshot.settled)
-            || matches!(ui_stage, DemoStage::Paid),
+        settled: is_settled(status.as_ref()),
         transaction_id: tx_id,
         zexplorer_url,
         can_settle: matches!(ui_stage, DemoStage::Review),
         message: ui_stage.message().to_owned(),
     })
+}
+
+fn is_settled(status: Option<&PaymentStatusBody>) -> bool {
+    status.is_some_and(|snapshot| snapshot.settled)
 }
 
 async fn fetch_payment_status(
@@ -1769,8 +1772,9 @@ mod tests {
         DEFAULT_NETWORK_LABEL, DEFAULT_PAYEE_ID, DEFAULT_RESOURCE_URI, DEFAULT_TOKEN_TTL_SECONDS,
         DEFAULT_ZEXPLORER_TX_URL, DEFAULT_ZINDER_URL, DEFAULT_ZPAY_OPS_URL, DEFAULT_ZPAY_URL,
         DEFAULT_ZSPEND_AUDIENCE, DEFAULT_ZSPEND_URL, DemoConfig, DemoStage, PaymentBody,
-        PaymentMode, PaymentStatusBody, SettlementResponseBody, load_or_create_issuer_encoding_key,
-        parse_demo_network, stage_from_status, zpay_outcome_to_submit_outcome,
+        PaymentMode, PaymentStatusBody, SettlementResponseBody, is_settled,
+        load_or_create_issuer_encoding_key, parse_demo_network, stage_from_status,
+        zpay_outcome_to_submit_outcome,
     };
     use jsonwebtoken::Algorithm;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -1806,6 +1810,22 @@ mod tests {
         };
 
         assert_eq!(stage_from_status(&status), DemoStage::Paid);
+    }
+
+    #[test]
+    fn settlement_flag_tracks_zpay_status_only() {
+        let mut status = PaymentStatusBody {
+            status: "final".to_owned(),
+            broadcast_outcome: None,
+            confirmation_count: Some(3),
+            mined_block_height: Some(4100),
+            reorg_count: 0,
+            settled: false,
+        };
+
+        assert!(!is_settled(Some(&status)));
+        status.settled = true;
+        assert!(is_settled(Some(&status)));
     }
 
     #[test]
