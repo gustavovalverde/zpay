@@ -19,9 +19,10 @@ zpay-runtime
    |
    +-- main listener  (HTTP, ZPAY_SERVER__BIND_ADDR, default 127.0.0.1:8080)
    |     /healthz
-   |     /x402/v2/accepts, /tip, /prepare, /settle, /verify
-   |     /x402/v2/payments/{payment_id}
-   |     /x402/v2/payments/{payment_id}/events   (SSE)
+   |     /x402/v2/supported, /verify, /settle
+   |     /zpay/v1/accepts, /tip, /prepare, /settle, /verify
+   |     /zpay/v1/payments/{payment_id}
+   |     /zpay/v1/payments/{payment_id}/events   (SSE)
    |
    +-- ops listener   (HTTP, ZPAY_OPS__BIND_ADDR, default 127.0.0.1:9295)
    |     /healthz
@@ -212,12 +213,68 @@ socket when neither header is present. A limited request returns HTTP 429
 with a `Retry-After` header and the standard problem envelope (see
 [error-vocabulary.md](../reference/error-vocabulary.md)).
 
+The official x402 routes are unauthenticated facilitator routes. They are rate
+limited by client IP, advertise the configured Zcash `exact` payment kind, and
+settle `x402-zcash-exact-v1` authorizations by verifying, extracting, and
+broadcasting `pczt-v2-extractable` PCZT bytes. The zpay lifecycle routes keep
+their DPoP-bound prepare and settle contract. Because verification and
+settlement both run PCZT extraction, the runtime must have Sapling verifying
+parameters available at the `zcash_proofs` default location. The Docker image
+sets `HOME=/opt/zpay-home`; compose mounts
+`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}` at both
+`/opt/zpay-home/.zcash-params` and `/home/zpay/.zcash-params`.
+
 ### Dev-only
 
 | Var | Default | Description |
 |-----|---------|-------------|
 | `ZPAY_ALLOW_DEMO_PAYEE` | off | Truthy (`1`, `true`, `yes`) bypasses the placeholder-receiver boot gate for dev and compose stacks. Emits a `WARN` per offending payee. Never set in production. |
 | `RUST_LOG` | `zpay=info` | `tracing-subscriber` env filter. |
+
+### Demo UI gateway
+
+`zpay-demo` is a separate dev-only binary for browser demonstrations. It is not
+part of the production zpay process model. The gateway binds to loopback by
+default, opens a local testnet wallet, owns demo DPoP and issuer keys, and
+calls the existing `zpay-runtime`, `zspend-runtime`, zinder, fauzec, and
+zexplorer surfaces.
+
+Routes:
+
+| Path | Method | Purpose |
+|------|--------|---------|
+| `/demo/v1/readiness` | GET | Readiness projection for zpay, zspend, zinder, wallet, faucet, and network. |
+| `/demo/v1/wallet` | GET | Demo wallet address, balances, funding posture, and network. |
+| `/demo/v1/faucet-claims` | POST | Submit a fauzec claim for the demo wallet. |
+| `/demo/v1/faucet-claims/{request_id}` | GET | Poll a fauzec claim. |
+| `/demo/v1/payments` | POST | Prepare a checkout through zpay. |
+| `/demo/v1/payments/{payment_id}/settle` | POST | Sign and settle using the stored payment mode. |
+| `/demo/v1/payments/{payment_id}` | GET | Enriched payment status for the UI. |
+| `/demo/v1/payments/{payment_id}/events` | GET | SSE status stream for the UI. |
+
+Configuration:
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ZPAY_DEMO_BIND_ADDR` | `127.0.0.1:7410` | Demo gateway listener. Non-loopback binds are for deliberate local demos only. |
+| `ZPAY_DEMO_NETWORK` | `testnet` | `testnet` or `regtest`. `mainnet` is refused. |
+| `ZPAY_DEMO_ZPAY_URL` | `http://127.0.0.1:8080` | zpay main listener. |
+| `ZPAY_DEMO_ZPAY_OPS_URL` | `http://127.0.0.1:9295` | zpay ops listener for readiness. |
+| `ZPAY_DEMO_ZSPEND_URL` | `http://127.0.0.1:8090` | zspend listener used by the gateway. |
+| `ZPAY_DEMO_ZSPEND_PUBLIC_URL` | `ZPAY_DEMO_ZSPEND_URL` | URL encoded into zspend DPoP proofs. |
+| `ZPAY_DEMO_ZINDER_URL` | `http://127.0.0.1:19101` | zinder gRPC endpoint for the demo wallet. |
+| `ZPAY_DEMO_WALLET_DIR` | `.tmp/zpay-demo/wallet` | Local wallet seed and storage directory. |
+| `ZPAY_DEMO_BIRTHDAY_HEIGHT` | zinder visible tip minus 500 blocks | Optional demo wallet birthday override. Leave unset for fresh demo wallets. |
+| `ZPAY_DEMO_PAYEE_ID` | `aether-demo` | zpay payee used for prepare. |
+| `ZPAY_DEMO_RESOURCE_URI` | `https://zpay.local/demo/reports/aether-brief` | Resource URI bound into prepare. |
+| `ZPAY_DEMO_FAUZEC_URL` | `https://fauzec.com` | Faucet base URL. |
+| `ZPAY_DEMO_ZEXPLORER_TX_URL` | `https://zexplorer.app/testnet/tx` | Explorer transaction URL prefix. |
+| `ZPAY_DEMO_ISSUER_KEY_PATH` | `$ZPAY_DEMO_WALLET_DIR/dev-issuer-p256.pem` | Ed25519 or P-256 private key used to mint dev `payment_authorization` tokens for autopay. If absent, the gateway creates a local P-256 issuer key. |
+| `ZPAY_DEMO_ISSUER_JWKS_PATH` | `$ZPAY_DEMO_WALLET_DIR/dev-jwks.json` | JWKS written when the gateway creates the default P-256 issuer key. Configure zspend with the matching `ZSPEND_JWKS_FILE`. |
+| `ZPAY_DEMO_ISSUER_KID` | `zpay-demo-dev` | JWT `kid` for demo-issued autopay tokens. |
+| `ZPAY_DEMO_ZSPEND_AUDIENCE` | `urn:zpay:zspend:local-dev` | Audience expected by zspend for demo-issued tokens. |
+| `ZPAY_DEMO_TOKEN_TTL_SECONDS` | `120` | Demo access-token TTL. |
+| `ZPAY_DEMO_MIN_FUNDED_ZAT` | `15000` | Minimum wallet balance before the UI can prepare a payment. |
 
 ### zspend-runtime wallet sync
 
@@ -271,10 +328,11 @@ detached and end with the process.
 
 ## Live validation
 
-`zpay-e2e` is a standalone binary (not a test gate) that drives the full
-lifecycle against a running `zpay-runtime` plus zinder: `/prepare`, compose
-the protocol memo, propose and sign through a real zally wallet, POST the
-signed bytes to `/settle`, then poll `/payments/{payment_id}` until the
+`zpay-e2e` is a standalone binary (not a test gate) that drives the full zpay
+lifecycle against a running `zpay-runtime` plus zinder: `/zpay/v1/prepare`,
+compose the protocol memo, propose and sign through a real zally wallet, POST
+the signed bytes to `/zpay/v1/settle`, then poll
+`/zpay/v1/payments/{payment_id}` until the
 confirmation oracle observes the transaction mine. Funding is out-of-band
 through fauzec; the harness prints a u-address and exits when the balance is
 too low. The operator procedure lives in

@@ -37,13 +37,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zally_pczt::{Extractor, PcztBytes};
 use zally_storage::parse_v5_expiry_height;
+use zcash_keys::address::{Address as ParsedZcashAddress, Receiver};
 
 use crate::broadcast::BroadcastOutcome;
 use crate::prepare::{PROTOCOL_MEMO_VERSION, PreparedTxStore};
 use crate::status::{SettlementLedgerEntry, SettlementLedgerStore};
 use crate::store::StoreError;
-use crate::types::{PaymentId, WatchId};
+use crate::types::{PaymentId, PaymentNetwork, WatchId, Zatoshis};
 
 /// Input to [`submit_settlement`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,41 @@ pub struct SettlementOutcome {
     /// Watch handle the agent passes to the confirmation oracle. Present
     /// only on success-kind outcomes (`Accepted`, `Duplicate`).
     pub watch_id: Option<WatchId>,
+}
+
+/// Input to [`verify_pczt_settlement`] and [`submit_pczt_settlement`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcztSettlementRequest {
+    /// Zcash network selected by the x402 payment requirements.
+    pub network: PaymentNetwork,
+    /// Required exact payment amount.
+    pub amount_zat: Zatoshis,
+    /// Required Zcash recipient address from the x402 payment requirements.
+    pub pay_to: String,
+    /// Signed, proven, extractor-ready PCZT bytes.
+    pub pczt_bytes: Vec<u8>,
+}
+
+/// Verified PCZT settlement material ready for chain-plane broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedPcztSettlement {
+    /// Extracted Zcash transaction bytes.
+    pub raw_tx_bytes: Vec<u8>,
+    /// ZIP-244 transaction id produced by PCZT extraction.
+    pub transaction_id: String,
+    /// Transaction expiry height committed by the PCZT.
+    pub expiry_height: u32,
+}
+
+/// Output of [`submit_pczt_settlement`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcztSettlementOutcome {
+    /// Categorical outcome of the broadcast attempt.
+    pub broadcast_outcome: BroadcastOutcome,
+    /// ZIP-244 transaction id produced by PCZT extraction.
+    pub transaction_id: String,
+    /// Transaction expiry height committed by the PCZT.
+    pub expiry_height: u32,
 }
 
 /// Errors that arise during settlement.
@@ -135,6 +172,191 @@ pub enum SettleError {
     /// ledger) surfaced a [`StoreError`]. Retry posture: inherits.
     #[error("settle store failure: {0}")]
     Storage(#[from] StoreError),
+}
+
+/// Errors that arise while verifying or settling a Zcash exact PCZT.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PcztSettlementError {
+    /// PCZT bytes could not be decoded. Retry posture: `not_retryable`.
+    #[error("PCZT did not parse: {reason}")]
+    PcztMalformed {
+        /// Operator-facing parse failure.
+        reason: String,
+    },
+    /// The PCZT coin type does not match the requested network. Retry
+    /// posture: `not_retryable`.
+    #[error("PCZT coin type mismatch: expected={expected_coin_type}, pczt={pczt_coin_type}")]
+    PcztNetworkMismatch {
+        /// SLIP-44 coin type required by the payment network.
+        expected_coin_type: u32,
+        /// SLIP-44 coin type embedded in the PCZT.
+        pczt_coin_type: u32,
+    },
+    /// The configured chain plane does not serve the requested network.
+    /// Retry posture: `requires_operator`.
+    #[error("chain network mismatch: requested={requested_network:?}, chain={chain_network}")]
+    ChainNetworkMismatch {
+        /// Network selected by x402 payment requirements.
+        requested_network: PaymentNetwork,
+        /// Network advertised by the chain plane.
+        chain_network: String,
+    },
+    /// `pay_to` is not a Zcash address for the selected network. Retry
+    /// posture: `not_retryable`.
+    #[error("pay_to is not a Zcash address for the selected network")]
+    PayToMalformed,
+    /// The PCZT contains an external payment address that does not match
+    /// `pay_to`. Retry posture: `not_retryable`.
+    #[error("PCZT payment recipient does not match pay_to")]
+    PaymentAddressMismatch,
+    /// A labelled external payment omitted the amount needed for exact
+    /// verification. Retry posture: `not_retryable`.
+    #[error("PCZT {pool} output is missing an inspectable amount")]
+    PaymentAmountMissing {
+        /// Zcash pool whose output amount was redacted.
+        pool: &'static str,
+    },
+    /// Exact payment amount does not match the sum addressed to `pay_to`.
+    /// Retry posture: `not_retryable`.
+    #[error("PCZT amount mismatch: required={required_amount_zat}, matched={matched_amount_zat}")]
+    PaymentAmountMismatch {
+        /// Required amount from x402 payment requirements.
+        required_amount_zat: u64,
+        /// Sum of PCZT outputs addressed to `pay_to`.
+        matched_amount_zat: u64,
+    },
+    /// Output amounts overflowed `u64` while summing. Retry posture:
+    /// `not_retryable`.
+    #[error("PCZT output amounts overflowed during exact verification")]
+    PaymentAmountOverflow,
+    /// The PCZT uses payment effects zpay cannot safely verify yet. Retry
+    /// posture: `not_retryable`.
+    #[error("PCZT payment effects are not verifiable: {reason}")]
+    PaymentNotVerifiable {
+        /// Operator-facing verification failure.
+        reason: String,
+    },
+    /// PCZT extraction failed before broadcast. Retry posture: follows the
+    /// underlying PCZT role error.
+    #[error("PCZT was not extractor-ready: {reason}")]
+    PcztNotExtractable {
+        /// Operator-facing extraction failure.
+        reason: String,
+    },
+    /// The chain plane could not be reached. Retry posture: `retryable`.
+    #[error("chain plane unavailable: {reason}")]
+    ChainUnavailable {
+        /// Operator-facing reason.
+        reason: String,
+    },
+}
+
+impl PcztSettlementError {
+    /// Machine-readable x402 failure reason.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::PcztMalformed { .. } => "zcash_exact_pczt_malformed",
+            Self::PcztNetworkMismatch { .. } | Self::ChainNetworkMismatch { .. } => {
+                "zcash_exact_network_mismatch"
+            }
+            Self::PayToMalformed => "zcash_exact_pay_to_invalid",
+            Self::PaymentAddressMismatch => "zcash_exact_pay_to_mismatch",
+            Self::PaymentAmountMissing { .. }
+            | Self::PaymentAmountMismatch { .. }
+            | Self::PaymentAmountOverflow => "zcash_exact_amount_mismatch",
+            Self::PaymentNotVerifiable { .. } => "zcash_exact_pczt_not_verifiable",
+            Self::PcztNotExtractable { .. } => "zcash_exact_pczt_not_extractable",
+            Self::ChainUnavailable { .. } => "chain_unavailable",
+        }
+    }
+
+    /// Whether retrying the same request may succeed.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::ChainUnavailable { .. })
+    }
+}
+
+/// Verify a Zcash exact PCZT and extract broadcast-ready transaction bytes.
+///
+/// The verifier checks the PCZT network, matches every labelled external
+/// output against the requested `pay_to` address, sums the inspectable
+/// amounts addressed to that recipient, and only then runs PCZT extraction.
+/// This keeps `/verify` and `/settle` on the same contract.
+pub fn verify_pczt_settlement(
+    request: &PcztSettlementRequest,
+) -> Result<VerifiedPcztSettlement, PcztSettlementError> {
+    let pczt_network = zally_network_for(request.network);
+    let pczt_bytes = PcztBytes::from_serialized(request.pczt_bytes.clone(), pczt_network);
+    let parsed_pczt = pczt_bytes
+        .parse()
+        .map_err(|err| PcztSettlementError::PcztMalformed {
+            reason: err.to_string(),
+        })?;
+    let matched_amount_zat = matched_pczt_amount_zat(&parsed_pczt, request)?;
+    let required_amount_zat = request.amount_zat.0;
+    if matched_amount_zat != required_amount_zat {
+        return Err(PcztSettlementError::PaymentAmountMismatch {
+            required_amount_zat,
+            matched_amount_zat,
+        });
+    }
+
+    let expiry_height = *parsed_pczt.global().expiry_height();
+    let extracted = Extractor::new().extract(pczt_bytes).map_err(|err| {
+        PcztSettlementError::PcztNotExtractable {
+            reason: err.to_string(),
+        }
+    })?;
+    Ok(VerifiedPcztSettlement {
+        raw_tx_bytes: extracted.raw_bytes,
+        transaction_id: extracted.tx_id.to_rpc_hex(),
+        expiry_height,
+    })
+}
+
+/// Verify and broadcast a Zcash exact PCZT through the chain plane.
+pub async fn submit_pczt_settlement<S>(
+    request: PcztSettlementRequest,
+    chain: &S,
+) -> Result<PcztSettlementOutcome, PcztSettlementError>
+where
+    S: zally_chain::Submitter + ?Sized,
+{
+    let verified = verify_pczt_settlement(&request)?;
+    broadcast_verified_pczt_settlement(&request, verified, chain).await
+}
+
+/// Broadcast a verified Zcash exact PCZT through the chain plane.
+pub async fn broadcast_verified_pczt_settlement<S>(
+    request: &PcztSettlementRequest,
+    verified: VerifiedPcztSettlement,
+    chain: &S,
+) -> Result<PcztSettlementOutcome, PcztSettlementError>
+where
+    S: zally_chain::Submitter + ?Sized,
+{
+    let requested_network = zally_network_for(request.network);
+    if chain.network() != requested_network {
+        return Err(PcztSettlementError::ChainNetworkMismatch {
+            requested_network: request.network,
+            chain_network: format!("{:?}", chain.network()),
+        });
+    }
+
+    let submit_outcome = chain.submit(&verified.raw_tx_bytes).await.map_err(|err| {
+        PcztSettlementError::ChainUnavailable {
+            reason: err.to_string(),
+        }
+    })?;
+    let broadcast_outcome = BroadcastOutcome::from_submit_outcome(submit_outcome);
+    Ok(PcztSettlementOutcome {
+        broadcast_outcome,
+        transaction_id: verified.transaction_id,
+        expiry_height: verified.expiry_height,
+    })
 }
 
 /// Submit a prepared payment to the chain plane.
@@ -241,6 +463,121 @@ where
         broadcast_outcome: outcome,
         watch_id,
     })
+}
+
+fn zally_network_for(network: PaymentNetwork) -> zally_core::Network {
+    match network {
+        PaymentNetwork::Mainnet => zally_core::Network::Mainnet,
+        PaymentNetwork::Testnet => zally_core::Network::Testnet,
+        PaymentNetwork::Regtest => zally_core::Network::regtest(),
+    }
+}
+
+fn matched_pczt_amount_zat(
+    parsed_pczt: &pczt::Pczt,
+    request: &PcztSettlementRequest,
+) -> Result<u64, PcztSettlementError> {
+    let params = zally_network_for(request.network).to_parameters();
+    let pay_to = ParsedZcashAddress::decode(&params, &request.pay_to)
+        .ok_or(PcztSettlementError::PayToMalformed)?
+        .to_zcash_address(&params);
+    let mut matched_amount_zat = 0_u64;
+
+    for output in parsed_pczt.sapling().outputs() {
+        let Some(label) = output.user_address().as_deref() else {
+            continue;
+        };
+        if label != request.pay_to {
+            return Err(PcztSettlementError::PaymentAddressMismatch);
+        }
+        let Some(recipient) = output.recipient() else {
+            return Err(PcztSettlementError::PaymentNotVerifiable {
+                reason: "sapling output omitted recipient bytes".to_owned(),
+            });
+        };
+        let Some(amount_zat) = *output.value() else {
+            return Err(PcztSettlementError::PaymentAmountMissing { pool: "sapling" });
+        };
+        let Some(payment_address) = sapling::PaymentAddress::from_bytes(recipient) else {
+            return Err(PcztSettlementError::PaymentNotVerifiable {
+                reason: "sapling output recipient bytes are invalid".to_owned(),
+            });
+        };
+        if !Receiver::Sapling(payment_address).corresponds(&pay_to) {
+            return Err(PcztSettlementError::PaymentAddressMismatch);
+        }
+        matched_amount_zat = add_matched_amount_zat(matched_amount_zat, amount_zat)?;
+    }
+
+    matched_amount_zat = match_orchard_bundle_amount_zat(
+        parsed_pczt.orchard(),
+        "orchard",
+        &request.pay_to,
+        &pay_to,
+        matched_amount_zat,
+    )?;
+    matched_amount_zat = match_orchard_bundle_amount_zat(
+        parsed_pczt.ironwood(),
+        "ironwood",
+        &request.pay_to,
+        &pay_to,
+        matched_amount_zat,
+    )?;
+
+    for output in parsed_pczt.transparent().outputs() {
+        if output.user_address().is_some() {
+            return Err(PcztSettlementError::PaymentNotVerifiable {
+                reason: "transparent labelled outputs are not accepted by zcash exact yet"
+                    .to_owned(),
+            });
+        }
+    }
+
+    Ok(matched_amount_zat)
+}
+
+fn match_orchard_bundle_amount_zat(
+    bundle: &pczt::orchard::Bundle,
+    pool: &'static str,
+    pay_to_label: &str,
+    pay_to: &zcash_address::ZcashAddress,
+    mut matched_amount_zat: u64,
+) -> Result<u64, PcztSettlementError> {
+    for action in bundle.actions() {
+        let output = action.output();
+        let Some(label) = output.user_address().as_deref() else {
+            continue;
+        };
+        if label != pay_to_label {
+            return Err(PcztSettlementError::PaymentAddressMismatch);
+        }
+        let Some(recipient) = output.recipient() else {
+            return Err(PcztSettlementError::PaymentNotVerifiable {
+                reason: format!("{pool} output omitted recipient bytes"),
+            });
+        };
+        let Some(amount_zat) = *output.value() else {
+            return Err(PcztSettlementError::PaymentAmountMissing { pool });
+        };
+        let payment_address = Option::from(orchard::Address::from_raw_address_bytes(recipient))
+            .ok_or_else(|| PcztSettlementError::PaymentNotVerifiable {
+                reason: format!("{pool} output recipient bytes are invalid"),
+            })?;
+        if !Receiver::Orchard(payment_address).corresponds(pay_to) {
+            return Err(PcztSettlementError::PaymentAddressMismatch);
+        }
+        matched_amount_zat = add_matched_amount_zat(matched_amount_zat, amount_zat)?;
+    }
+    Ok(matched_amount_zat)
+}
+
+fn add_matched_amount_zat(
+    current_amount_zat: u64,
+    additional_amount_zat: u64,
+) -> Result<u64, PcztSettlementError> {
+    current_amount_zat
+        .checked_add(additional_amount_zat)
+        .ok_or(PcztSettlementError::PaymentAmountOverflow)
 }
 
 fn current_unix_seconds() -> i64 {

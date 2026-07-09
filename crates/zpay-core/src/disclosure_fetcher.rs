@@ -3,7 +3,7 @@
 //! [`DisclosureFetcher`] is the chain-plane abstraction that the local
 //! payment-disclosure verifier in [`crate::verify::local`] composes with to
 //! reach the on-chain bytes a disclosure pins to. It mirrors the sibling
-//! pattern used by [`crate::broadcast::BroadcastClient`],
+//! pattern used by [`zally_chain::Submitter`],
 //! [`crate::tip::ChainTipOracle`], and [`crate::oracle::ConfirmationOracle`]:
 //! a single-method `Send + Sync` async trait that returns either a typed
 //! minimal subset of the transaction or a transport-class error.

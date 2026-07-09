@@ -1,10 +1,10 @@
 # zpay
 
 A Zcash payments stack for agents. It ships two binaries that split one
-trust boundary: `zpay-runtime`, a facilitator speaking an
-[x402](https://www.x402.org/)-style wire (`/x402/v2/*`) so agents and
-merchants can charge for content in native ZEC, and `zspend-runtime`, a
-wallet that signs agent spends under bounded, user-approved grants.
+trust boundary: `zpay-runtime`, a facilitator with an official
+[x402](https://www.x402.org/) boundary at `/x402/v2/*` and a zpay Zcash
+lifecycle boundary at `/zpay/v1/*`, and `zspend-runtime`, a wallet that signs
+agent spends under bounded, user-approved grants.
 Registered payees own the offer terms, the wallet signs the spend, the
 facilitator mediates the lifecycle and confirms on-chain.
 
@@ -18,6 +18,8 @@ Integrating a payee or agent? Start at [Wire surface](#wire-surface) and
 [Integrating as a relying party](#integrating-as-a-relying-party).
 Operating a deployment? Start at [Quick start](#quick-start),
 [Deploy](#deploy), and the [runbooks](docs/runbooks/).
+For a browser checkout demo, use
+[docs/runbooks/demo-ui.md](docs/runbooks/demo-ui.md).
 
 ## What it does
 
@@ -28,13 +30,13 @@ The facilitator runs a payment through four typed stages:
    delta, validity window.
 2. **Prepare.** An agent authenticated by a key-bound request proof
    ([DPoP](https://datatracker.ietf.org/doc/html/rfc9449)) posts
-   `(payee_id, scheme, network)` to `/x402/v2/prepare`. The facilitator
+   `(payee_id, scheme, network)` to `/zpay/v1/prepare`. The facilitator
    resolves the offer from the registry, derives expiry from a chain-tip
    oracle, composes a domain-separated structured memo (ZIP-302)
    server-side, and returns a payment URI
    ([ZIP-321](https://zips.z.cash/zip-0321)) plus a stable `payment_id`.
 3. **Settle.** The wallet signs and posts the transaction to
-   `/x402/v2/settle`; zpay checks the memo version and that the signed
+   `/zpay/v1/settle`; zpay checks the memo version and that the signed
    expiry height matches the prepared row, broadcasts through zinder,
    and records the outcome in libSQL.
 4. **Confirm.** A background oracle and a live chain-event subscription
@@ -45,7 +47,7 @@ The facilitator runs a payment through four typed stages:
    or below zinder's settled tip. See
    [ADR-0009](docs/adrs/0009-settlement-lifecycle-and-finality.md).
 
-For receipts, `POST /x402/v2/verify` accepts a payment disclosure
+For receipts, `POST /zpay/v1/verify` accepts a payment disclosure
 ([ZIP-311](https://zips.z.cash/zip-0311)), runs the BIP-322 transparent
 check in-process, and
 reports a three-axis posture: `cryptographic_verdict`, `chain_presence`,
@@ -58,16 +60,41 @@ surface as `Inconclusive { unsupported_pool }`.
 Every JSON response body is the bare inner type. Errors follow
 [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) as `application/problem+json`.
 
+The official x402 facilitator surface is intentionally small:
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/x402/v2/supported` | none | List official x402 scheme and network pairs supported by this facilitator |
+| POST | `/x402/v2/verify` | none | Verify an official x402 facilitator request |
+| POST | `/x402/v2/settle` | none | Settle an official x402 facilitator request |
+
+`/x402/v2/supported` advertises the configured Zcash network for the Zcash
+`exact` binding. The binding is `x402-zcash-exact-v1`: `scheme: "exact"`,
+`asset: "ZEC"`, integer zatoshi `amount`, ZIP-316 Unified Address `payTo`,
+and `payload.format: "pczt-v2-extractable"`. `/x402/v2/verify` parses and
+verifies the signed PCZT payment effects; `/x402/v2/settle` extracts and
+broadcasts the same PCZT. PCZT extraction loads Sapling verifying parameters
+from the platform default ZcashParams directory; container stacks mount
+`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}` into the zpay
+runtime for that reason. Requests derived from `/zpay/v1/prepare` may include
+`extra.zpayPaymentId`; when present, `/x402/v2/settle` records the broadcast
+outcome against that lifecycle row. See
+[ADR-0010](docs/adrs/0010-x402-public-boundary.md) and
+[ADR-0011](docs/adrs/0011-zcash-x402-exact-binding.md).
+
+The zpay Zcash lifecycle surface is product-owned and used by the demo,
+`zpay-e2e`, and local integrations:
+
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/healthz` | none | Liveness; returns `{"status":"alive"}` |
-| GET | `/x402/v2/accepts?payee_id=…` | none | List the payee's accepted `(scheme, network, pay_to, amount_zat)` offers |
-| GET | `/x402/v2/tip?network=…` | none | Chain-tip height the prepare path uses for expiry math |
-| POST | `/x402/v2/prepare` | DPoP | Allocate a `payment_id`, return a ZIP-321 URI and memo bytes |
-| POST | `/x402/v2/settle` | DPoP | Broadcast a wallet-signed transaction; jkt must match the prepare proof |
-| POST | `/x402/v2/verify` | none | Verify a ZIP-311 disclosure; three-axis response |
-| GET | `/x402/v2/payments/{id}` | none | Snapshot with `reorg_count` and `settled`; status is `awaiting`, `broadcast`, `mined`, `final`, `failed`, `never_issued`, or `expired` |
-| GET | `/x402/v2/payments/{id}/events` | none | SSE stream of snapshots; closes once the payment is `settled`, `expired`, `failed`, or `never_issued` |
+| GET | `/zpay/v1/accepts?payee_id=…` | none | List the payee's accepted `(scheme, network, pay_to, amount_zat)` offers |
+| GET | `/zpay/v1/tip?network=…` | none | Chain-tip height the prepare path uses for expiry math |
+| POST | `/zpay/v1/prepare` | DPoP | Allocate a `payment_id`, return a ZIP-321 URI and memo bytes |
+| POST | `/zpay/v1/settle` | DPoP | Broadcast a wallet-signed transaction; jkt must match the prepare proof |
+| POST | `/zpay/v1/verify` | none | Verify a ZIP-311 disclosure; three-axis response |
+| GET | `/zpay/v1/payments/{id}` | none | Snapshot with `reorg_count` and `settled`; status is `awaiting`, `broadcast`, `mined`, `final`, `failed`, `never_issued`, or `expired` |
+| GET | `/zpay/v1/payments/{id}/events` | none | SSE stream of snapshots; closes once the payment is `settled`, `expired`, `failed`, or `never_issued` |
 
 `/prepare` and `/settle` require a [DPoP](https://datatracker.ietf.org/doc/html/rfc9449)
 proof signed by the caller's ES256 key. Idempotency is scoped by
@@ -130,15 +157,15 @@ The expected flow for an agent or merchant BFF:
 3. Compute a deterministic `idempotency_key` from the intent
    (user, task, item, amount). The facilitator resolves replays of the
    same key to the same `payment_id`.
-4. `POST /x402/v2/prepare` with a DPoP header carrying `htm=POST`,
-   `htu=https://your-zpay-host/x402/v2/prepare`, `iat` within 60s, and a
+4. `POST /zpay/v1/prepare` with a DPoP header carrying `htm=POST`,
+   `htu=https://your-zpay-host/zpay/v1/prepare`, `iat` within 60s, and a
    fresh `jti`. The response is `{ payment_id, payment_uri,
    memo_bytes, expiry_height, amount_zat }`.
 5. Hand `payment_uri` to the user's wallet for signing. The wallet posts
    the signed transaction back through your own surface; you forward
-   it to `POST /x402/v2/settle` with a DPoP proof from the same
+   it to `POST /zpay/v1/settle` with a DPoP proof from the same
    keypair.
-6. Subscribe to `GET /x402/v2/payments/{payment_id}/events` to observe
+6. Subscribe to `GET /zpay/v1/payments/{payment_id}/events` to observe
    the lifecycle. Treat `final` as a confirmation-depth milestone, not
    settlement: a reorg can return a `mined` or `final` payment to
    `broadcast`, and the stream stays open until the payment is
@@ -187,10 +214,10 @@ is a separate binary in the same workspace, described above.
    |  zpay-runtime  (axum binary, ops listener, env-driven |
    |                  config, healthcheck on /healthz)     |
    |     +-------------------------------+                 |
-   |     | zpay-x402                     |  wire adapter   |
-   |     |   /accepts /tip /prepare      |  + DPoP middle  |
-   |     |   /settle /verify             |  + SSE hub      |
-   |     |   /payments/{id} /events      |                 |
+   |     | zpay-x402                     |  x402 adapter   |
+   |     |   /x402/v2/supported          |  + header codec |
+   |     |   /x402/v2/verify /settle     |                 |
+   |     |   /zpay/v1 lifecycle routes   |  + DPoP + SSE   |
    |     +---------------+---------------+                 |
    |                     |                                 |
    |                     v                                 |
@@ -307,7 +334,7 @@ contract; treat any change to a probe assertion as a wire-shape decision.
 | [Operational surfaces](docs/architecture/operational-surfaces.md) | Env-var schema, readiness, ops port |
 | [Facilitator plane](docs/architecture/facilitator-plane.md) | Lifecycle and typed errors across boundaries |
 | [Error vocabulary](docs/reference/error-vocabulary.md) | Every typed error, retry posture, operator action |
-| [Runbooks](docs/runbooks/) | x402 smoke test, Railway deploy, reorg recovery, zspend seed ceremony |
+| [Runbooks](docs/runbooks/) | zpay lifecycle smoke test, Railway deploy, reorg recovery, zspend seed ceremony |
 | [ADR index](docs/adrs/) | Locked architectural decisions, including [ADR-0006](docs/adrs/0006-facilitator-trust-boundary.md) (trust boundary), [ADR-0008](docs/adrs/0008-compliance-authority-placement.md) (compliance authority), and [ADR-0009](docs/adrs/0009-settlement-lifecycle-and-finality.md) (settlement finality) |
 
 ## Ecosystem position

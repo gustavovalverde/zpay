@@ -40,6 +40,7 @@ zpay-core.workspace = true
 p256 = { workspace = true, features = ["pkcs8", "pem"] }
 rand_core = { version = "0.6", features = ["std"] }
 tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
 # Pull in zpay-core's in-memory stores for the SSE handler integration
 # tests; the production wire path uses the libSQL stores via
 # `zpay-runtime`, so the in_memory feature is opt-in here.

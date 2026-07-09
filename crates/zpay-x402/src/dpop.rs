@@ -1,7 +1,7 @@
 //! DPoP (Demonstration of Proof-of-Possession) middleware for x402 v2.
 //!
 //! This module verifies a DPoP proof JWT on every authenticated request
-//! to `POST /x402/v2/prepare` and `POST /x402/v2/settle`. The proof is
+//! to `POST /zpay/v1/prepare` and `POST /zpay/v1/settle`. The proof is
 //! signed by an EC P-256 (ES256) key the caller supplied in the JWT's
 //! own `jwk` header. The verifier:
 //!
@@ -591,10 +591,10 @@ mod tests {
         let store = InMemoryReplayStore::new();
         let now = current_unix_seconds();
         let (proof, expected_jkt) =
-            mint_proof("POST", "https://example.test/x402/v2/prepare", "jti-1", now)?;
+            mint_proof("POST", "https://example.test/zpay/v1/prepare", "jti-1", now)?;
         let verified = verify_dpop_proof(
             "POST",
-            "https://example.test/x402/v2/prepare",
+            "https://example.test/zpay/v1/prepare",
             &proof,
             &store,
         )
@@ -800,40 +800,40 @@ mod tests {
 
     #[test]
     fn canonicalize_url_strips_default_port_https() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com:443/x402/v2/prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/x402/v2/prepare")?;
+        let a = canonicalize_url("https://zpay.example.com:443/zpay/v1/prepare")?;
+        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
         assert_eq!(a, b);
         Ok(())
     }
 
     #[test]
     fn canonicalize_url_strips_default_port_http() -> Result<(), DpopError> {
-        let a = canonicalize_url("http://zpay.example.com:80/x402/v2/prepare")?;
-        let b = canonicalize_url("http://zpay.example.com/x402/v2/prepare")?;
+        let a = canonicalize_url("http://zpay.example.com:80/zpay/v1/prepare")?;
+        let b = canonicalize_url("http://zpay.example.com/zpay/v1/prepare")?;
         assert_eq!(a, b);
         Ok(())
     }
 
     #[test]
     fn canonicalize_url_resolves_dot_segments() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com/x402/v2/./prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/x402/v2/prepare")?;
+        let a = canonicalize_url("https://zpay.example.com/zpay/v1/./prepare")?;
+        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
         assert_eq!(a, b);
         Ok(())
     }
 
     #[test]
     fn canonicalize_url_lowercases_host() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://ZPay.Example.COM/x402/v2/prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/x402/v2/prepare")?;
+        let a = canonicalize_url("https://ZPay.Example.COM/zpay/v1/prepare")?;
+        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
         assert_eq!(a, b);
         Ok(())
     }
 
     #[test]
     fn canonicalize_url_strips_query_and_fragment() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com/x402/v2/prepare?k=v#frag")?;
-        let b = canonicalize_url("https://zpay.example.com/x402/v2/prepare")?;
+        let a = canonicalize_url("https://zpay.example.com/zpay/v1/prepare?k=v#frag")?;
+        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
         assert_eq!(a, b);
         Ok(())
     }
@@ -844,7 +844,7 @@ mod tests {
         // Otherwise an attacker could tunnel path traversal through an
         // encoded slash.
         let encoded = canonicalize_url("https://zpay.example.com/x402/v2%2fprepare")?;
-        let literal = canonicalize_url("https://zpay.example.com/x402/v2/prepare")?;
+        let literal = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
         assert_ne!(encoded, literal);
         Ok(())
     }

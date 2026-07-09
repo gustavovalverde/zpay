@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/zpay-demo",
   "crates/zpay-core",
   "crates/zpay-e2e",
   "crates/zpay-runtime",
@@ -56,10 +57,16 @@ url = "2.5.8"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "json", "smallvec", "std", "tracing-log"] }
 ulid = "1.2.1"
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
+pczt = { version = "0.7", features = ["orchard", "sapling", "transparent", "tx-extractor"] }
+orchard = "0.15.0-pre.2"
+sapling = { package = "sapling-crypto", version = "0.7" }
+zcash_keys = { version = "0.15.0-pre.0", features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_address = { version = "0.13.0-pre.0" }
 
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.
 zpay-core = { version = "0.1.0", path = "crates/zpay-core", default-features = false }
+zpay-demo = { version = "0.1.0", path = "crates/zpay-demo" }
 zpay-e2e = { version = "0.1.0", path = "crates/zpay-e2e" }
 zpay-runtime = { version = "0.1.0", path = "crates/zpay-runtime" }
 zpay-store = { version = "0.1.0", path = "crates/zpay-store" }
@@ -71,14 +78,15 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "4ec16bdb367ae086c078777dec40596248a023d1", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "6d3d332f2f0343ce91b57053f32f7a87fed606c9" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "6d3d332f2f0343ce91b57053f32f7a87fed606c9" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
+zally-pczt = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
+zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -125,19 +133,20 @@ wildcard_enum_match_arm = "deny"
 # full pin set. Drop this once the NU6.3/Ironwood librustzcash stack ships from
 # crates.io.
 [patch.crates-io]
-zcash_client_backend = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_client_sqlite = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_encoding = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-equihash = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-pczt = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_protocol = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_primitives = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_keys = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_address = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_transparent = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zcash_proofs = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
-zip321 = { git = "https://github.com/gustavovalverde/librustzcash.git", rev = "693338fea7a50313905ad00d2f08be1b9e4e7322" }
+orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff93cb039d639250d82518a3" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
 # Mirrors zally's shardtree/incrementalmerkletree patch: the fork's
 # anchor-retention APIs exist only at this incrementalmerkletree rev.
-shardtree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "7e79e55dedea24b4e56f3f3ad2afeed9fc88ab26" }
-incrementalmerkletree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "7e79e55dedea24b4e56f3f3ad2afeed9fc88ab26" }
+shardtree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "48b5297872f9c321e7d7e65b803132362035c4ee" }
+incrementalmerkletree = { git = "https://github.com/gustavovalverde/incrementalmerkletree", rev = "48b5297872f9c321e7d7e65b803132362035c4ee" }

@@ -3,7 +3,7 @@
 //! Two concrete strategies:
 //!
 //! - [`ZinderTipOracle`] reads the current tip via zinder's
-//!   `chain_value_pools_at_tip` RPC. Production deployments wire this.
+//!   `latest_block` RPC. Production deployments wire this.
 //! - [`StaticTipOracle`] returns a configurable fixed height and logs a
 //!   WARN on every call. Demo / dev deployments without a chain plane
 //!   wire this so `/prepare` still produces a deterministic
@@ -12,14 +12,12 @@
 //! The composition root selects between them in `build_tip_oracle`.
 
 use zinder_client::{
-    EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex,
-    RemoteOpenOptions,
+    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
 };
 use zpay_core::tip::{ChainTipOracle, TipError};
 use zpay_core::types::PaymentNetwork;
 
-/// Production chain-tip oracle backed by zinder's
-/// `WalletQuery.ChainValuePoolsAtTip`.
+/// Production chain-tip oracle backed by zinder's `WalletQuery.LatestBlock`.
 pub(crate) struct ZinderTipOracle {
     chain: RemoteChainIndex,
 }
@@ -54,12 +52,12 @@ impl ZinderTipOracle {
 
 impl ChainTipOracle for ZinderTipOracle {
     async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
-        let tip = self
+        let block = self
             .chain
-            .chain_value_pools_at_tip()
+            .latest_block(None)
             .await
             .map_err(|err| map_indexer_error(&err))?;
-        Ok(tip.tip_height.value())
+        Ok(block.height.value())
     }
 }
 

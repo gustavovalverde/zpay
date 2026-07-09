@@ -32,7 +32,7 @@ caught on reconnect.
 
 ### SSE corrections
 
-An open `GET /x402/v2/payments/{payment_id}/events` stream receives a fresh
+An open `GET /zpay/v1/payments/{payment_id}/events` stream receives a fresh
 snapshot whenever a downgrade touches its payment: the status returns to
 `broadcast` (or `expired` if the expiry height has since lapsed) and
 `reorg_count` rises. The stream does not close on `final`, so a subscriber
@@ -49,7 +49,7 @@ is the bit a caller keys an irreversible action on, not `final`.
 
 | Signal | Where | Reading |
 |--------|-------|---------|
-| `reorg_count` | `GET /x402/v2/payments/{id}`, SSE snapshot | Per-payment regressions. A handful is normal chain behavior. |
+| `reorg_count` | `GET /zpay/v1/payments/{id}`, SSE snapshot | Per-payment regressions. A handful is normal chain behavior. |
 | `zpay_reorg_downgrades_total{source}` | `/metrics` | Fleet-wide downgrade rate, split `poll` vs `chain_event`. A sustained spike signals a deep or repeated reorg. |
 | `zpay_chain_visible_tip_height`, `zpay_chain_settled_tip_height` | `/metrics` | The gap between them is the live reorg window. |
 | `zpay_chain_status_cache_age_seconds` | `/metrics`, `/readyz` | A climbing value means the poll loop or subscription stalled; downgrades may be delayed. |
@@ -100,5 +100,5 @@ WHERE broadcast_outcome_kind IN ('accepted', 'duplicate')
 ```
 
 Cross-check a single payment against the live status projection with
-`GET /x402/v2/payments/{payment_id}`: the `settled` flag and `reorg_count`
+`GET /zpay/v1/payments/{payment_id}`: the `settled` flag and `reorg_count`
 there reflect the current chain view, which the raw ledger row does not carry.

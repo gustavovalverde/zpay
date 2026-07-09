@@ -29,6 +29,7 @@ ARG SOURCE_DATE_EPOCH
 ARG GIT_SHA
 ARG BUILD_TIME
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \

@@ -21,11 +21,10 @@ ignore = [
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parser panic; libsql 0.9.30 path; no operator-controlled CRL ingestion in zpay" },
 
     # time 0.3.37 DoS on RFC 2822 parsing. Pinned through rusqlite 0.37,
-    # jsonwebtoken 9.3, and zcash_client_backend 0.23. zcash_client_backend
-    # has `time-core = "=0.1.2"`, so the patched time >=0.3.47 requires a
-    # zally rev that ships a newer zcash_client_backend. zpay does not parse
-    # RFC 2822 input; the only consumer surface is JWT iat/exp via jsonwebtoken.
-    { id = "RUSTSEC-2026-0009", reason = "time RFC 2822 DoS; no RFC 2822 parsing on zpay's wire; bump tracks zcash_client_backend upgrade" },
+    # jsonwebtoken 9.3, and the unreleased zcash_client_backend stack. zpay
+    # does not parse RFC 2822 input; the only consumer surface is JWT iat/exp
+    # via jsonwebtoken.
+    { id = "RUSTSEC-2026-0009", reason = "time RFC 2822 DoS; no RFC 2822 parsing on zpay's wire; clears when upstream dependency floor permits time >=0.3.47" },
 
     # Unmaintained crates with no safe upgrade path. All transitive.
     { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained; transitive through libsql replication; not on any external-input path" },
@@ -78,9 +77,12 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # librustzcash workspace fork carrying the Ironwood/NU6.3 dependency family
-    # and the target_expiry_height patch; consumed via [patch.crates-io].
-    "https://github.com/gustavovalverde/librustzcash.git",
+    # Upstream librustzcash commit carrying the unreleased Ironwood/NU6.3
+    # dependency family and target-expiry PCZT API; consumed via [patch.crates-io].
+    "https://github.com/zcash/librustzcash.git",
+    # Temporary Orchard patch required by the pinned librustzcash commit's
+    # bundle-type APIs.
+    "https://github.com/zcash/orchard",
     # shardtree/incrementalmerkletree fork carrying anchor-retention APIs used
     # by zally's Ironwood wallet sync stack.
     "https://github.com/gustavovalverde/incrementalmerkletree",

@@ -10,7 +10,7 @@
 #
 #   1. The bind-mounted file is loaded ("payee registry loaded" logs
 #      reflect the override payee count).
-#   2. GET /accepts for the overridden payee id returns the override's
+#   2. GET /zpay/v1/accepts for the overridden payee id returns the override's
 #      pay_to and amount_zat.
 #   3. The baked-in `aether-demo` payee is replaced (returns 404)
 #      because the override REPLACES the file, it does not merge.
@@ -85,27 +85,27 @@ fi
 echo "[test-payee-override] ok: registry path is /etc/zpay/payees.toml (the bind-mount target)"
 
 echo "[test-payee-override] querying overridden payee"
-RESPONSE="$(curl -fsS "$URL/x402/v2/accepts?payee_id=$OVERRIDE_PAYEE_ID")"
+RESPONSE="$(curl -fsS "$URL/zpay/v1/accepts?payee_id=$OVERRIDE_PAYEE_ID")"
 
 PAY_TO_FROM_RESPONSE="$(echo "$RESPONSE" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d[0]["pay_to"])')"
 AMOUNT_FROM_RESPONSE="$(echo "$RESPONSE" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d[0]["amount_zat"])')"
 
 if [[ "$PAY_TO_FROM_RESPONSE" != "$OVERRIDE_PAY_TO" ]]; then
-  echo "[test-payee-override] FAIL: /accepts pay_to does not match override"
+  echo "[test-payee-override] FAIL: /zpay/v1/accepts pay_to does not match override"
   echo "  expected: $OVERRIDE_PAY_TO"
   echo "  actual:   $PAY_TO_FROM_RESPONSE"
   exit 1
 fi
-echo "[test-payee-override] ok: /accepts pay_to reflects override"
+echo "[test-payee-override] ok: /zpay/v1/accepts pay_to reflects override"
 
 if [[ "$AMOUNT_FROM_RESPONSE" != "$OVERRIDE_AMOUNT" ]]; then
-  echo "[test-payee-override] FAIL: /accepts amount_zat=$AMOUNT_FROM_RESPONSE, expected $OVERRIDE_AMOUNT"
+  echo "[test-payee-override] FAIL: /zpay/v1/accepts amount_zat=$AMOUNT_FROM_RESPONSE, expected $OVERRIDE_AMOUNT"
   exit 1
 fi
-echo "[test-payee-override] ok: /accepts amount_zat reflects override"
+echo "[test-payee-override] ok: /zpay/v1/accepts amount_zat reflects override"
 
 echo "[test-payee-override] confirming baked-in aether-demo is REPLACED, not merged"
-BAKED_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$URL/x402/v2/accepts?payee_id=aether-demo")"
+BAKED_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$URL/zpay/v1/accepts?payee_id=aether-demo")"
 if [[ "$BAKED_STATUS" != "404" ]]; then
   echo "[test-payee-override] FAIL: baked-in aether-demo should 404 when override file is mounted (got $BAKED_STATUS)"
   exit 1

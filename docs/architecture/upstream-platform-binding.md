@@ -1,8 +1,8 @@
 # Upstream Platform Binding
 
-zpay depends on sibling Zcash-stack repositories and on a fork of the
-librustzcash workspace. This document specifies what zpay pins, why, and what
-each upstream is expected to provide.
+zpay depends on sibling Zcash-stack repositories and on unreleased Zcash
+workspace commits. This document specifies what zpay pins, why, and what each
+upstream is expected to provide.
 
 ## zally
 
@@ -22,7 +22,8 @@ zpay depends on:
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
 Pin: workspace `Cargo.toml` pins one git rev for every zally crate,
-currently `4ec16bd` (Ironwood sync hardening). Bumps land in their own PR.
+currently `8f6e536` (upstream Ironwood stack alignment). Bumps land in their
+own PR.
 
 ## zinder
 
@@ -37,7 +38,7 @@ zpay depends on:
 | `zinder-client` | `zpay-runtime` | `RemoteChainIndex::broadcast_transaction`, `ChainEvents`, tip reads, disclosure fetch. |
 | `zinder-proto` | `zpay-runtime` | the generated protobuf types. |
 
-Pin: `zinder-client` and `zinder-proto` at git rev `6d3d332`. Bumps land in
+Pin: `zinder-client` and `zinder-proto` at git rev `c604ac3`. Bumps land in
 their own PR.
 
 Wallet deployments that claim Ironwood subtree-root coverage must observe the
@@ -53,30 +54,29 @@ supported deployment (see [ADR-0003](../adrs/0003-zinder-as-chain-plane.md)).
 incompatible and must be wiped and resynced; follow zinder's own store-reset
 runbook.
 
-## librustzcash fork family
+## librustzcash family
 
-zpay pins the entire librustzcash workspace to a fork
-(`github.com/gustavovalverde/librustzcash`, rev `693338fe`) through
-`[patch.crates-io]`. Every librustzcash-internal crate is patched from the
-same commit so intra-workspace types stay coherent: `zcash_client_backend`,
-`zcash_client_sqlite`, `zcash_encoding`, `equihash`, `pczt`,
-`zcash_protocol`, `zcash_primitives`, `zcash_keys`, `zcash_address`,
-`zcash_transparent`, `zcash_proofs`, and `zip321`.
+zpay pins the unreleased upstream librustzcash workspace
+(`github.com/zcash/librustzcash`, rev `8e6864a`) through `[patch.crates-io]`.
+Every librustzcash-internal crate is patched from the same commit so
+intra-workspace types stay coherent: `zcash_client_backend`,
+`zcash_client_sqlite`, `zcash_encoding`, `equihash`, `pczt`, `zcash_protocol`,
+`zcash_primitives`, `zcash_keys`, `zcash_address`, `zcash_transparent`,
+`zcash_proofs`, and `zip321`.
 
-The fork tracks the unreleased Ironwood/NU6.3 dependency family and carries
-two patches on top of upstream `main`:
+The upstream commit carries the unreleased Ironwood/NU6.3 dependency family,
+target-expiry PCZT construction, and Ironwood wallet scanning and storage
+support.
 
-- the `target_expiry_height` argument on `create_pczt_from_proposal`
-  ([librustzcash PR 2412](https://github.com/zcash/librustzcash/pull/2412));
-- wallet scanning and storage for the Ironwood shielded pool
-  ([librustzcash PR 2539](https://github.com/zcash/librustzcash/pull/2539)).
+`orchard` is patched to `github.com/zcash/orchard` rev `475ef0f` because the
+pinned librustzcash commit depends on unreleased bundle-type APIs.
 
-Drop the patch set once upstream releases ship both. `deny.toml` allows these
-fork sources under `[sources] allow-git`, alongside the zally and zinder
+Drop the patch set once upstream releases ship these APIs. `deny.toml` allows
+these sources under `[sources] allow-git`, alongside the zally and zinder
 sources.
 
 `shardtree` and `incrementalmerkletree` are pinned to the
-`github.com/gustavovalverde/incrementalmerkletree` fork at `7e79e55`, matching
+`github.com/gustavovalverde/incrementalmerkletree` fork at `48b5297`, matching
 zally's anchor-retention APIs.
 
 **Validator requirement.** Ironwood/NU6.3 is served by Zebra only; it is the
@@ -108,8 +108,8 @@ runtime consumes zentity's JWKS and revocation delta endpoint; see
 
 - Sibling Rust workspaces (zally, zinder) pin by git rev in `Cargo.toml`.
   Bumps land in their own PR citing the upstream change and the reason.
-- The librustzcash fork pins by git rev under `[patch.crates-io]`; `deny.toml`
-  allows its source.
+- The unreleased librustzcash and Orchard pins live under `[patch.crates-io]`;
+  `deny.toml` allows their sources.
 - HTTP-only relationships (fauzec, zentity) carry no crate pin; they are
   configured by env var and asserted by integration tests.
 

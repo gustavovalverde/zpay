@@ -47,6 +47,10 @@ services:
       # (`docker compose -f /path/to/zinder/compose.yml up -d`) or
       # override with your own zinder/lightwalletd endpoint.
       ZPAY_CHAIN_SOURCE_URL: ${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9101}
+      # zpay extracts signed PCZTs for `/x402/v2/verify` and `/x402/v2/settle`.
+      # Sapling verification parameters must be available through the default
+      # zcash_proofs location, just like zspend's local prover.
+      HOME: /opt/zpay-home
       # Stable DPoP correlation seed so jti replay state and key
       # thumbprints survive a container restart in the demo stack.
       # Production deployments MUST override this with a per-instance
@@ -61,6 +65,8 @@ services:
       # `aether-demo` at a real parseable testnet unified address so
       # the end-to-end probe walks past zspend's ZIP-321 parse.
       - ./etc/aether-demo.local.toml:/etc/zpay/payees.toml:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/opt/zpay-home/.zcash-params:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/home/zpay/.zcash-params:ro
     restart: unless-stopped
     networks:
       - zcash-x402-demo

@@ -1,4 +1,4 @@
-//! Per-payment SSE event bus for `GET /x402/v2/payments/{payment_id}/events`.
+//! Per-payment SSE event bus for `GET /zpay/v1/payments/{payment_id}/events`.
 //!
 //! ## Topology
 //!
@@ -27,7 +27,7 @@
 //! field is a `PaymentStatusSnapshot` serialized as JSON in `snake_case`.
 //! The SSE payload deliberately does NOT wrap the snapshot in
 //! `{ "data": ... }`: the REST endpoint at
-//! `GET /x402/v2/payments/{payment_id}` uses that envelope because HTTP
+//! `GET /zpay/v1/payments/{payment_id}` uses that envelope because HTTP
 //! responses sometimes carry sibling fields, while every SSE event has
 //! a single canonical shape per event name. Bridge code reads
 //! `event.data` directly as a snapshot.
@@ -253,7 +253,7 @@ impl PaymentEventHub {
     }
 }
 
-/// `GET /x402/v2/payments/{payment_id}/events` handler.
+/// `GET /zpay/v1/payments/{payment_id}/events` handler.
 ///
 /// Flow:
 ///

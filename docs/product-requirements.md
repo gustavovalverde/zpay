@@ -81,10 +81,14 @@ Audiences, in priority order:
 
 ## ZIP-Driven and Spec-Driven Product Considerations
 
-**x402 v2** forces zpay to be HTTP-native and stateless across requests. The
-prepared-tx cache is the only state that bridges `prepare` and `settle`.
-`PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`, and `PAYMENT-RESPONSE` headers are
-the contract; nothing client-side may be `X-Zpay-*`.
+**x402 v2** forces zpay's standards boundary to be HTTP-native and explicit
+about what it supports. The official facilitator surface is only
+`/supported`, `/verify`, and `/settle`; `PAYMENT-REQUIRED`,
+`PAYMENT-SIGNATURE`, and `PAYMENT-RESPONSE` headers are the contract. zpay
+must not advertise a Zcash x402 payment kind until
+`x402-zcash-exact-v1` PCZT verification and settlement can prove network,
+asset, recipient, amount, resource, timeout, and replay semantics. zpay's
+prepare and status lifecycle remains product-owned under `/zpay/v1/*`.
 
 **MPP draft** is in motion and may reshape its surface during zpay's
 implementation. Phase 5 keeps `zpay-mpp` feature-gated off by default so the
@@ -172,56 +176,63 @@ mismatch.
 
 ### x402 facilitator (R-FAC-*)
 
-#### R-FAC-1. Advertise supported payment schemes
+#### R-FAC-1. Advertise supported x402 payment kinds
 
-Now: nothing exists.
-Why it belongs in zpay: agents need a single discovery surface to find out
-that a merchant accepts ZEC and which network.
-Proposed change: `GET /x402/v2/accepts?merchant={id}&resource={uri}` returns
-an `accepts[]` array containing one or more entries with shape
-`{ scheme: "zcash", network: "zcash:testnet" | "zcash:mainnet", pay_to: "u1...", amount_zat, max_validity_seconds, extensions: { zentity: { ... } } }`.
-Capability: `x402.v2.accepts`.
+Now: `/x402/v2/supported` returns the official response shape and advertises
+the configured Zcash `exact` kind.
+Why it belongs in zpay: agents need a standards-owned discovery surface they
+can trust without learning zpay's product lifecycle routes.
+Implemented behavior: advertise `x402-zcash-exact-v1` only for the configured
+chain network.
+Capability: `x402.v2.supported`.
 
-#### R-FAC-2. Prepare a payment
+#### R-FAC-2. Verify an x402 payment authorization
 
-Now: nothing exists.
-Why it belongs in zpay: the facilitator must compose the recipient URI and
-the protocol memo content for the agent to deliver to the user's wallet.
-Proposed change: `POST /x402/v2/prepare` accepts the agent's DPoP proof and
-the selected `accepts[]` entry, returns `{ payment_id, payment_uri,
-memo_b64, expiry_height }` for the agent's wallet to consume.
-Capability: `x402.v2.prepare`.
+Now: `/x402/v2/verify` accepts the official
+`{ x402Version, paymentPayload, paymentRequirements }` request and returns
+`isValid: true` for signed PCZTs whose labelled shielded payment effects match
+the Zcash exact requirements, or `isValid: false` with binding-specific
+rejection reasons.
+Why it belongs in zpay: x402 agents call facilitator verification before
+retrying a protected resource request with payment authorization.
+Implemented behavior: parse ZIP-374 PCZT bytes, verify recipient and amount,
+then extract transaction bytes to prove extractor readiness.
+Capability: `x402.v2.verify`.
 
-#### R-FAC-3. Settle a prepared payment
+#### R-FAC-3. Settle an x402 payment authorization
 
-Now: nothing exists.
-Why it belongs in zpay: the facilitator must validate the merchant's
-compliance attestation and broadcast the user-signed transaction.
-Proposed change: `POST /x402/v2/settle` accepts `{ payment_id, raw_tx_hex,
-poh_token, dpop_proof }`, validates the SD-JWT-VC PoH token against
-zentity's JWKS, calls zinder's `BroadcastTransaction`, returns
-`{ txid, broadcast_outcome, watch_id }`.
+Now: `/x402/v2/settle` accepts the official facilitator request shape and
+extracts and broadcasts valid signed PCZTs, returning the transaction id in the
+official settlement response. Invalid requests return `success: false` with
+binding-specific rejection reasons.
+Why it belongs in zpay: x402 resource servers expect one standards-owned
+settlement endpoint that returns the authorization result and settlement
+evidence.
+Implemented behavior: reuse the same PCZT verification path as `/verify`,
+submit extracted transaction bytes through the chain plane, and return the
+extracted txid.
 Capability: `x402.v2.settle`.
 
-#### R-FAC-4. Verify settlement
+#### R-FAC-4. Run zpay's Zcash payment lifecycle
 
-Now: nothing exists.
-Why it belongs in zpay: agents and merchants need a typed confirmation
-oracle that abstracts over zinder direct and zexplorer fallback.
-Proposed change: `GET /x402/v2/payments/{payment_id}` returns
-`{ status: prepared | settled | confirmed | expired | failed, confirmations,
-txid, block_height, evidence_pack_hash }`.
-Capability: `x402.v2.payments`.
+Now: `/zpay/v1/*` exposes `accepts`, `prepare`, `settle`, `verify`,
+`payments/{payment_id}`, and `payments/{payment_id}/events`.
+Why it belongs in zpay: the product still needs a Zcash-native lifecycle while
+the official x402 Zcash PCZT settlement path is incomplete.
+Proposed change: keep this lifecycle out of `/x402/v2/*` and treat it as
+zpay-owned orchestration for demos, harnesses, and future product APIs.
+Capability: `zpay.v1.accepts`, `zpay.v1.prepare`, `zpay.v1.settle`,
+`zpay.v1.verify`, `zpay.v1.payments`.
 
 #### R-FAC-5. Verify a payment disclosure
 
 Now: nothing exists.
 Why it belongs in zpay: shielded payments require ZIP-311 disclosure to
 prove a specific recipient received a specific amount.
-Proposed change: `POST /x402/v2/verify` accepts
+Proposed change: `POST /zpay/v1/verify` accepts
 `{ txid, expected_amount_zat, expected_pay_to, disclosure_payload }`,
 delegates to zinder's `VerifyPaymentDisclosure`, returns a typed verdict.
-Capability: `x402.v2.verify`.
+Capability: `zpay.v1.verify`.
 
 ### MPP facilitator (R-MPP-*)
 
@@ -254,7 +265,7 @@ Why it belongs in zpay: prepared transactions become stale (`expiry_height`
 overruns) and bytes in the cache leak memory.
 Proposed change: default TTL 5 minutes; configurable per merchant up to
 30 minutes. Cleanup runs every 60s. Expired entries are reported under
-`x402.v2.payments` as `status: expired`.
+`zpay.v1.payments` as `status: expired`.
 Capability: `cache.prepare.ttl`.
 
 #### R-CACHE-3. Settlement ledger
@@ -373,7 +384,7 @@ Every response carries a freshness envelope mirroring zinder's pattern (see
     "derive_lag_blocks": 1,
     "fetched_at_unix_seconds": 1748212814
   },
-  "capabilities": ["x402.v2.prepare", "x402.v2.settle", "x402.v2.payments"]
+  "capabilities": ["zpay.v1.prepare", "zpay.v1.settle", "zpay.v1.payments"]
 }
 ```
 
@@ -412,7 +423,7 @@ HTTP 503 with typed `Reason::ChainStale`.
 
 | As a | I want to | So that |
 |---|---|---|
-| Agent | call one `POST /x402/v2/prepare` and one `POST /x402/v2/settle` | I can pay any merchant's ZEC paywall with one header swap from my EVM x402 flow. |
+| Agent | call the official `/x402/v2/*` facilitator surface when a supported kind is advertised | I can reuse x402 integration patterns without relying on custom zpay routes. |
 | Merchant | advertise ZEC acceptance via my zpay deployment's `accepts[]` | my paywall accepts shielded ZEC without me writing wallet code. |
 | Merchant | enforce `min_verification_level: "full"` | only KYC-verified humans (via their agents) pay me. |
 | Operator | bring up zpay alongside an existing z3 + zinder stack | I deploy one Rust binary, one libSQL DB, and one ops port. |

@@ -3,7 +3,7 @@
 
 Used by the host probes (test-persistence.sh, test-cold-start.sh,
 test-sse.sh's prepare setup) to talk to the now-DPoP-bound
-`POST /x402/v2/prepare` and `POST /x402/v2/settle` endpoints.
+`POST /zpay/v1/prepare` and `POST /zpay/v1/settle` endpoints.
 
 Two modes:
 

@@ -10,16 +10,23 @@
 //!
 //! [1]: https://github.com/gustavovalverde/zpay/blob/main/docs/architecture/public-interfaces.md#capability-strings
 
-/// x402 v2 `accepts[]` advertisement.
-pub const X402_V2_ACCEPTS: &str = "x402.v2.accepts";
-/// x402 v2 `prepare` endpoint.
-pub const X402_V2_PREPARE: &str = "x402.v2.prepare";
+/// x402 v2 `supported` endpoint.
+pub const X402_V2_SUPPORTED: &str = "x402.v2.supported";
 /// x402 v2 `settle` endpoint.
 pub const X402_V2_SETTLE: &str = "x402.v2.settle";
 /// x402 v2 `verify` endpoint.
 pub const X402_V2_VERIFY: &str = "x402.v2.verify";
-/// x402 v2 `payments/{payment_id}` lookup endpoint.
-pub const X402_V2_PAYMENTS: &str = "x402.v2.payments";
+
+/// zpay v1 `accepts[]` advertisement.
+pub const ZPAY_V1_ACCEPTS: &str = "zpay.v1.accepts";
+/// zpay v1 `prepare` endpoint.
+pub const ZPAY_V1_PREPARE: &str = "zpay.v1.prepare";
+/// zpay v1 `settle` endpoint.
+pub const ZPAY_V1_SETTLE: &str = "zpay.v1.settle";
+/// zpay v1 `verify` endpoint.
+pub const ZPAY_V1_VERIFY: &str = "zpay.v1.verify";
+/// zpay v1 `payments/{payment_id}` lookup endpoint.
+pub const ZPAY_V1_PAYMENTS: &str = "zpay.v1.payments";
 
 /// MPP v1 `accepts[]` advertisement.
 pub const MPP_V1_ACCEPTS: &str = "mpp.v1.accepts";

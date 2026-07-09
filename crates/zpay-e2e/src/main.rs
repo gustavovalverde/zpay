@@ -3,10 +3,8 @@
 //! Drives a real zally wallet through the full lifecycle a payment
 //! agent would: `/prepare` against a running zpay-runtime, compose a
 //! [`Memo::Arbitrary`] from the prepared protocol memo, propose and
-//! sign the spend via zally, hand the raw transaction bytes to a custom
-//! [`Submitter`] that POSTs to `/x402/v2/settle`, then poll
-//! `/x402/v2/payments/{payment_id}` until the confirmation oracle
-//! observes the transaction mine.
+//! sign the spend via zally, or ask zspend for a signed PCZT and settle
+//! that PCZT through the official `/x402/v2/settle` facilitator route.
 //!
 //! The harness is intentionally synchronous from the operator's point
 //! of view: one binary, one terminal, one wallet directory on disk.
@@ -19,7 +17,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Parser, Subcommand};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::ecdsa::SigningKey;
@@ -61,7 +59,7 @@ struct Cli {
         default_value = "http://127.0.0.1:19101"
     )]
     zinder_url: String,
-    /// zpay-runtime base URL (the `/x402/v2/*` routes are appended).
+    /// zpay-runtime base URL (the `/zpay/v1/*` routes are appended).
     #[arg(
         long,
         env = "ZPAY_E2E_ZPAY_URL",
@@ -573,15 +571,28 @@ async fn run_agent_signed_flow(inputs: AgentRunInputs<'_>) -> Result<(), Harness
     })
     .await?;
 
-    submit_signed_bytes(
+    let facilitator_request = build_x402_facilitator_request(
+        inputs.network,
         inputs.zpay_url,
-        &prepared.payment_id,
-        &signed.raw_tx,
-        &zpay_dpop_key,
+        &prepared,
+        &signed.pczt_base64,
+    )?;
+    verify_x402_payment(inputs.zpay_url, &facilitator_request).await?;
+    let settled_tx_id = settle_x402_payment(inputs.zpay_url, &facilitator_request).await?;
+    if settled_tx_id != signed.tx_id {
+        return Err(HarnessError::SignedBytes(format!(
+            "x402 settle txid {settled_tx_id} did not match zspend txid {}",
+            signed.tx_id
+        )));
+    }
+    confirm_x402_lifecycle_record(inputs.zpay_url, &prepared.payment_id, &settled_tx_id).await?;
+    check_zexplorer(
+        inputs.network,
+        inputs.zexplorer_tx_url,
+        &settled_tx_id,
+        inputs.poll_seconds,
     )
     .await?;
-    poll_until_confirmed(inputs.zpay_url, &prepared.payment_id, inputs.poll_seconds).await?;
-    check_zexplorer(inputs.network, inputs.zexplorer_tx_url, &signed.tx_id).await?;
     Ok(())
 }
 
@@ -627,14 +638,14 @@ struct SignPaymentCall<'a> {
     network_label: &'a str,
 }
 
-struct AgentSignedTransaction {
+struct AgentSignedPczt {
     tx_id: String,
-    raw_tx: Vec<u8>,
+    pczt_base64: String,
 }
 
 async fn request_zspend_signature(
     call: SignPaymentCall<'_>,
-) -> Result<AgentSignedTransaction, HarnessError> {
+) -> Result<AgentSignedPczt, HarnessError> {
     let sign_body = SignPaymentRequestBody {
         payment_request: WirePaymentRequestBody {
             scheme: "zip321".to_owned(),
@@ -662,42 +673,115 @@ async fn request_zspend_signature(
         .json()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
-    if signed.signed.format != "raw-zcash-v5" {
+    if signed.signed.format != "pczt-v2-extractable" {
         return Err(HarnessError::SignedBytes(format!(
-            "expected raw-zcash-v5, got {}",
+            "expected pczt-v2-extractable, got {}",
             signed.signed.format
         )));
     }
-    let raw_tx = BASE64_STANDARD
+    let pczt_bytes = URL_SAFE_NO_PAD
         .decode(signed.signed.bytes.as_bytes())
         .map_err(|err| HarnessError::SignedBytes(err.to_string()))?;
     info!(
         tx_id = %signed.signed.tx_id,
-        raw_tx_bytes = raw_tx.len(),
-        "zspend returned signed raw transaction",
+        pczt_bytes = pczt_bytes.len(),
+        "zspend returned signed PCZT",
     );
-    Ok(AgentSignedTransaction {
+    Ok(AgentSignedPczt {
         tx_id: signed.signed.tx_id,
-        raw_tx,
+        pczt_base64: signed.signed.bytes,
     })
 }
 
-async fn submit_signed_bytes(
+fn build_x402_facilitator_request(
+    network: Network,
     zpay_url: &str,
-    payment_id: &str,
-    raw_tx: &[u8],
-    dpop_key: &DpopKey,
+    prepared: &PreparedPayment,
+    pczt_base64: &str,
+) -> Result<serde_json::Value, HarnessError> {
+    let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
+    let payment = parsed
+        .payments()
+        .first()
+        .ok_or(HarnessError::PaymentMissing)?;
+    let network_id = x402_network_id(network);
+    let requirements = serde_json::json!({
+        "scheme": "exact",
+        "network": network_id,
+        "amount": payment.amount.as_u64().to_string(),
+        "asset": "ZEC",
+        "payTo": payment.recipient.encoded(),
+        "maxTimeoutSeconds": 120,
+        "extra": {
+            "binding": "x402-zcash-exact-v1",
+            "amountUnit": "zat",
+            "authorizationFormat": "pczt-v2-extractable",
+            "zpayPaymentId": prepared.payment_id.as_str()
+        }
+    });
+    let resource = serde_json::json!({
+        "url": format!("{}/zpay-e2e/payments/{}", zpay_url.trim_end_matches('/'), prepared.payment_id),
+        "description": "zpay e2e x402 payment",
+        "mimeType": "application/json",
+        "serviceName": "zpay-e2e",
+        "tags": ["e2e", "zcash"],
+    });
+    Ok(serde_json::json!({
+        "x402Version": 2,
+        "paymentPayload": {
+            "x402Version": 2,
+            "resource": resource,
+            "accepted": requirements,
+            "payload": {
+                "format": "pczt-v2-extractable",
+                "pczt": pczt_base64,
+            },
+        },
+        "paymentRequirements": requirements,
+    }))
+}
+
+async fn verify_x402_payment(
+    zpay_url: &str,
+    facilitator_request: &serde_json::Value,
 ) -> Result<(), HarnessError> {
     let client = reqwest::Client::new();
+    let verify_url = format!("{}/x402/v2/verify", zpay_url.trim_end_matches('/'));
+    let response = client
+        .post(&verify_url)
+        .json(facilitator_request)
+        .send()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(HarnessError::VerifyFailed { status, body: text });
+    }
+    let verify: X402VerifyResponseBody = response
+        .json()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !verify.is_valid {
+        return Err(HarnessError::VerifyInvalid {
+            reason: verify
+                .invalid_reason
+                .unwrap_or_else(|| "unknown".to_owned()),
+        });
+    }
+    info!("x402 verify accepted signed PCZT");
+    Ok(())
+}
+
+async fn settle_x402_payment(
+    zpay_url: &str,
+    facilitator_request: &serde_json::Value,
+) -> Result<String, HarnessError> {
+    let client = reqwest::Client::new();
     let settle_url = format!("{}/x402/v2/settle", zpay_url.trim_end_matches('/'));
-    let dpop_proof = dpop_key.mint_proof("POST", &settle_url)?;
     let response = client
         .post(&settle_url)
-        .header("dpop", dpop_proof)
-        .json(&SettleRequestBody {
-            payment_id: payment_id.to_owned(),
-            raw_tx_hex: hex::encode(raw_tx),
-        })
+        .json(facilitator_request)
         .send()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
@@ -706,42 +790,66 @@ async fn submit_signed_bytes(
         let text = response.text().await.unwrap_or_default();
         return Err(HarnessError::SettleFailed { status, body: text });
     }
-    let outcome: SettlementResponseData = response
+    let settle: X402SettleResponseBody = response
         .json()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
+    if !settle.success {
+        return Err(HarnessError::SettleUnsuccessful {
+            reason: settle.error_reason.unwrap_or_else(|| "unknown".to_owned()),
+        });
+    }
+    let tx_id = settle.transaction.ok_or_else(|| {
+        HarnessError::SignedBytes("x402 settle succeeded without transaction id".to_owned())
+    })?;
     info!(
-        payment_id = %outcome.payment_id,
-        broadcast_kind = %outcome.broadcast_outcome.kind,
-        tx_id = ?outcome.broadcast_outcome.transaction_id,
-        "zpay settle accepted signed transaction",
+        tx_id = %tx_id,
+        network = %settle.network,
+        amount = %settle.amount,
+        "x402 settle accepted signed PCZT",
     );
-    Ok(())
+    Ok(tx_id)
+}
+
+fn x402_network_id(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "zcash:mainnet",
+        Network::Regtest(_) => "zcash:regtest",
+        Network::Testnet | _ => "zcash:testnet",
+    }
 }
 
 async fn check_zexplorer(
     network: Network,
     zexplorer_tx_url: &str,
     tx_id: &str,
+    poll_seconds: u64,
 ) -> Result<(), HarnessError> {
     if !matches!(network, Network::Testnet) {
         warn!("zexplorer check skipped outside testnet");
         return Ok(());
     }
     let url = format!("{}/{}", zexplorer_tx_url.trim_end_matches('/'), tx_id);
-    let response = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|err| HarnessError::Http(err.to_string()))?;
-    if !response.status().is_success() {
-        return Err(HarnessError::ZexplorerFailed {
-            url,
-            status: response.status(),
-        });
+    let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(poll_seconds);
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|err| HarnessError::Http(err.to_string()))?;
+        if response.status().is_success() {
+            info!(url = %url, "zexplorer returned a successful response for tx");
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(HarnessError::ZexplorerFailed {
+                url,
+                status: response.status(),
+            });
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    info!(url = %url, "zexplorer returned a successful response for tx");
-    Ok(())
 }
 
 fn load_issuer_encoding_key(path: &std::path::Path) -> Result<EncodingKey, HarnessError> {
@@ -886,7 +994,7 @@ async fn poll_until_confirmed(
     let deadline = std::time::Instant::now() + Duration::from_secs(poll_seconds);
     let client = reqwest::Client::new();
     let url = format!(
-        "{}/x402/v2/payments/{}",
+        "{}/zpay/v1/payments/{}",
         zpay_url.trim_end_matches('/'),
         payment_id
     );
@@ -920,6 +1028,45 @@ async fn poll_until_confirmed(
     }
 }
 
+async fn confirm_x402_lifecycle_record(
+    zpay_url: &str,
+    payment_id: &str,
+    settled_tx_id: &str,
+) -> Result<(), HarnessError> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/zpay/v1/payments/{}",
+        zpay_url.trim_end_matches('/'),
+        payment_id
+    );
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    let body: PaymentStatusData = response
+        .json()
+        .await
+        .map_err(|err| HarnessError::Http(err.to_string()))?;
+    let recorded_tx_id = body
+        .broadcast_outcome
+        .and_then(|outcome| outcome.transaction_id)
+        .unwrap_or_default();
+    if recorded_tx_id != settled_tx_id {
+        return Err(HarnessError::LifecycleStatus(format!(
+            "expected zpay status for {payment_id} to record txid {settled_tx_id}, got status={} txid={recorded_tx_id}",
+            body.status
+        )));
+    }
+    info!(
+        payment_id,
+        status = %body.status,
+        tx_id = %recorded_tx_id,
+        "zpay lifecycle status recorded x402 settlement",
+    );
+    Ok(())
+}
+
 async fn call_prepare(
     zpay_url: &str,
     payee_id: &str,
@@ -942,7 +1089,7 @@ async fn call_prepare(
         idempotency_key: Some(idempotency_key),
     };
     let client = reqwest::Client::new();
-    let prepare_url = format!("{}/x402/v2/prepare", zpay_url.trim_end_matches('/'));
+    let prepare_url = format!("{}/zpay/v1/prepare", zpay_url.trim_end_matches('/'));
     let dpop_proof = dpop_key.mint_proof("POST", &prepare_url)?;
     let response = client
         .post(&prepare_url)
@@ -983,7 +1130,7 @@ fn memo_from_protocol_prefix(memo_bytes: &[u8]) -> Result<Memo, HarnessError> {
 }
 
 /// Custom `Submitter` that hands the signed transaction bytes to zpay's
-/// `/x402/v2/settle` endpoint instead of broadcasting directly. The
+/// `/zpay/v1/settle` endpoint instead of broadcasting directly. The
 /// payment id was issued by the same zpay-runtime at prepare time.
 struct ZpaySettleSubmitter {
     zpay_url: String,
@@ -1016,7 +1163,7 @@ impl Submitter for ZpaySettleSubmitter {
             payment_id: self.payment_id.clone(),
             raw_tx_hex: hex::encode(raw_tx),
         };
-        let settle_url = format!("{}/x402/v2/settle", self.zpay_url.trim_end_matches('/'));
+        let settle_url = format!("{}/zpay/v1/settle", self.zpay_url.trim_end_matches('/'));
         let dpop_proof = self
             .dpop_key
             .mint_proof("POST", &settle_url)
@@ -1110,7 +1257,24 @@ struct SignedSpendWire {
     tx_id: String,
 }
 
-/// Wire types for `/x402/v2/prepare`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct X402VerifyResponseBody {
+    is_valid: bool,
+    invalid_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct X402SettleResponseBody {
+    success: bool,
+    error_reason: Option<String>,
+    transaction: Option<String>,
+    network: String,
+    amount: String,
+}
+
+/// Wire types for `/zpay/v1/prepare`.
 
 #[derive(Debug, Serialize)]
 struct PrepareRequestBody {
@@ -1143,7 +1307,7 @@ struct PreparedPayment {
     amount_zat: u64,
 }
 
-/// Wire types for `/x402/v2/settle`.
+/// Wire types for `/zpay/v1/settle`.
 
 #[derive(Debug, Serialize)]
 struct SettleRequestBody {
@@ -1179,7 +1343,7 @@ struct BroadcastOutcomeBody {
     upstream_message: Option<String>,
 }
 
-/// Wire types for `/x402/v2/payments/{payment_id}`.
+/// Wire types for `/zpay/v1/payments/{payment_id}`.
 
 #[derive(Debug, Deserialize)]
 struct PaymentStatusData {
@@ -1193,6 +1357,8 @@ struct PaymentStatusData {
     confirmation_count: Option<u32>,
     #[serde(default)]
     mined_block_height: Option<u64>,
+    #[serde(default)]
+    broadcast_outcome: Option<BroadcastOutcomeBody>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1214,11 +1380,20 @@ enum HarnessError {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error("zpay /x402/v2/verify returned {status}: {body}")]
+    VerifyFailed {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("zpay /x402/v2/verify rejected payment: {reason}")]
+    VerifyInvalid { reason: String },
     #[error("zpay /settle returned {status}: {body}")]
     SettleFailed {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error("zpay /x402/v2/settle did not settle payment: {reason}")]
+    SettleUnsuccessful { reason: String },
     #[error("http error: {0}")]
     Http(String),
     #[error("issuer key read failed at {path:?}: {source}")]
@@ -1231,6 +1406,8 @@ enum HarnessError {
     Jwt(String),
     #[error("signed bytes invalid: {0}")]
     SignedBytes(String),
+    #[error("x402 lifecycle status mismatch: {0}")]
+    LifecycleStatus(String),
     #[error("prepared payment URI carried no payment")]
     PaymentMissing,
     #[error("zexplorer check failed for {url}: {status}")]

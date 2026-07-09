@@ -37,7 +37,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
 use bootstrap::{BootstrapError, BootstrapInputs, ChainSourceFactory};
 use capture_submitter::CaptureSubmitter;
 use clap::{Parser, Subcommand};
@@ -48,10 +48,11 @@ use parking_lot::Mutex;
 use revocation::{RevocationOutcome, RevocationStore};
 use serde::{Deserialize, Serialize};
 use zally_chain::ChainSource;
-use zally_core::{AccountId, BlockHeight, IdempotencyKey, Network, PaymentRecipient};
+use zally_core::{AccountId, BlockHeight, Network, PaymentRecipient};
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions, SealingPosture, SeedSealing as _};
+use zally_pczt::PcztBytes;
 use zally_wallet::{
-    PaymentRequest, SendOutcome, SendPaymentPlan, SyncDriver, SyncDriverOptions, SyncDriverPhase,
+    PaymentRequest, ProposalPlan, SendOutcome, SyncDriver, SyncDriverOptions, SyncDriverPhase,
     SyncHandle, SyncSnapshot, SyncStatus, Wallet, WalletError,
 };
 use zspend_core::{
@@ -62,15 +63,9 @@ use zspend_core::{
 
 /// Wire format identifier returned on `/v1/payments/sign`.
 ///
-/// Phase 4 returns raw consensus-encoded Zcash v5 transaction bytes because
-/// the PCZT methods on `zally::Wallet` (Phase 2d) and the matching `/settle`
-/// extractor on `zpay-runtime` (Phase 2g) have not yet landed. The follow-on
-/// slice flips this to `"pczt-v1"` (matching
-/// `zally_core::SignedPayloadFormat::PcztV1`) once both ends ship the PCZT
-/// path. Until then the wire schema diverges from the locked envelope in
-/// `zally_core::SignedPayload` on this single field only; the surrounding
-/// shape (`bytes`, `tx_id`, `fee`, `expires_at`, `metadata`) is identical.
-const SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL: &str = "raw-zcash-v5";
+/// zspend returns a signed, proven, extractor-ready PCZT that can be placed in
+/// the Zcash exact x402 authorization object.
+const SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL: &str = "pczt-v2-extractable";
 
 /// `zspend-runtime` command-line entry point.
 ///
@@ -962,14 +957,8 @@ struct WalletAddressResponse {
 
 /// `signed_payload` envelope returned by `/v1/payments/sign`.
 ///
-/// Field shape mirrors `zally_core::SignedPayload`, but the runtime serializes
-/// this local struct rather than that type so the `format` field can carry
-/// `"raw-zcash-v5"` while the wallet returns raw consensus-encoded bytes. The
-/// mirror stays until the PCZT wire flip (PRD-43 D-B): `SignedPayloadFormat`
-/// is `#[non_exhaustive]` with only a `PcztV1` variant, so there is no
-/// `RawZcashV5` value to construct, and switching to the canonical type means
-/// flipping both ends to the `"pczt-v1"` format at once. See
-/// [`SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL`].
+/// Field shape mirrors `zally_core::SignedPayload`, while `format` names the
+/// Zcash exact x402 binding accepted by zpay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SignedPayloadWire {
     format: String,
@@ -999,16 +988,16 @@ struct SignPaymentResponse {
     signed_payload: SignedPayloadWire,
 }
 
-/// Renders the wallet's [`SendOutcome`] and the captured transaction bytes into
-/// the `/v1/payments/sign` wire envelope.
+/// Renders the wallet's [`SendOutcome`] and signed PCZT bytes into the
+/// `/v1/payments/sign` wire envelope.
 ///
 /// `tx_id` carries the wallet-computed ZIP-244 identifier in canonical RPC byte
 /// order, the form every block explorer and downstream lookup expects.
-fn signed_payload_response(outcome: &SendOutcome, captured: &[u8]) -> SignPaymentResponse {
+fn signed_payload_response(outcome: &SendOutcome, signed_pczt: &PcztBytes) -> SignPaymentResponse {
     SignPaymentResponse {
         signed_payload: SignedPayloadWire {
             format: SIGNED_PAYLOAD_FORMAT_WIRE_LITERAL.to_owned(),
-            bytes: BASE64_STANDARD.encode(captured),
+            bytes: BASE64_URL_SAFE_NO_PAD.encode(signed_pczt.as_bytes()),
             tx_id: outcome.signed.tx_id.to_rpc_hex(),
             fee: AmountWire {
                 currency: "ZEC".to_owned(),
@@ -1026,10 +1015,10 @@ fn signed_payload_response(outcome: &SendOutcome, captured: &[u8]) -> SignPaymen
 /// Runs the landed trust boundary, then signs: verify the DPoP-bound `at+jwt`
 /// and recompute the `intent_hash` from the parsed request, reserve the
 /// access-token `jti` in the single-use ledger BEFORE signing, parse the
-/// ZIP-321 URI, build a [`SendPaymentPlan`], call [`Wallet::send_payment`] with
-/// the [`CaptureSubmitter`] (which records the raw bytes without broadcasting),
-/// then commit the signed payload to the ledger so an identical replay returns
-/// the cached envelope.
+/// ZIP-321 URI, build a [`ProposalPlan`], run the PCZT prove and sign roles,
+/// extract the transaction through [`CaptureSubmitter`] so the wallet records
+/// the spend, then commit the signed PCZT to the ledger so an identical replay
+/// returns the cached envelope.
 async fn sign_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1262,37 +1251,53 @@ async fn sign_payment_inner(
         Err(err) => return Err(ledger_unavailable(&err)),
     }
 
-    let idempotency = match IdempotencyKey::try_from(body.payment_id.as_str()) {
-        Ok(key) => key,
+    let target_expiry_height = BlockHeight::from(body.target_expiry_height);
+    let plan = ProposalPlan::conventional(
+        state.account_id,
+        recipient_for_plan,
+        amount_for_plan,
+        payment.memo.clone(),
+    );
+
+    let unsigned_pczt = match state
+        .wallet
+        .propose_pczt(plan, Some(target_expiry_height))
+        .await
+    {
+        Ok(pczt) => pczt,
         Err(err) => {
             release_reservation(state, &claims.jti).await;
-            return Err(ProblemResponse::bad_request(ProblemDetail::not_retryable(
-                ProblemKind::PaymentRequestInvalid,
-                "invalid payment_id for idempotency",
-                err.to_string(),
-            )));
+            return Err(map_wallet_err(&err));
+        }
+    };
+
+    let proven_pczt = match state.wallet.prove_pczt(unsigned_pczt).await {
+        Ok(pczt) => pczt,
+        Err(err) => {
+            release_reservation(state, &claims.jti).await;
+            return Err(map_wallet_err(&err));
+        }
+    };
+
+    let signed_pczt = match state.wallet.sign_pczt(proven_pczt).await {
+        Ok(pczt) => pczt,
+        Err(err) => {
+            release_reservation(state, &claims.jti).await;
+            return Err(map_wallet_err(&err));
         }
     };
 
     let capture = CaptureSubmitter::new(requested_network);
-    let target_expiry_height = BlockHeight::from(body.target_expiry_height);
-    let plan = SendPaymentPlan::conventional(
-        state.account_id,
-        idempotency,
-        recipient_for_plan,
-        amount_for_plan,
-        &capture,
-    )
-    .with_target_expiry_height(target_expiry_height);
-
-    let send_outcome = match state.wallet.send_payment(plan).await {
+    let send_outcome = match state
+        .wallet
+        .extract_and_submit_pczt(signed_pczt.clone(), &capture)
+        .await
+    {
         Ok(outcome) => outcome,
         Err(err) => {
             if matches!(err, WalletError::ChainSource(_)) {
                 metrics::counter!("zspend_wallet_chain_source_errors_total").increment(1);
             }
-            // Signing failed: drop the reservation so a legitimate retry with
-            // the same jti can sign rather than waiting out the pending TTL.
             release_reservation(state, &claims.jti).await;
             return Err(map_wallet_err(&err));
         }
@@ -1303,19 +1308,20 @@ async fn sign_payment_inner(
         return Err(ProblemResponse::server_error(ProblemDetail::not_retryable(
             ProblemKind::NotReady,
             "submitter captured no bytes",
-            "internal: CaptureSubmitter::submit was not invoked by the wallet path",
+            "internal: CaptureSubmitter::submit was not invoked by PCZT extraction",
         )));
     };
+    drop(captured);
 
-    let response = signed_payload_response(&send_outcome, &captured);
+    let response = signed_payload_response(&send_outcome, &signed_pczt);
     if let Err(err) = state
         .spend_idempotency_cache
         .commit(&claims.jti, &auth.intent_hash.0, &response)
         .await
     {
         // The signature succeeded; a failed commit only loses this runtime's
-        // replay memory. The wallet's own payment_id idempotency still returns
-        // the same txid on a re-sign, so a lost commit cannot double-spend.
+        // replay memory. The pending ledger reservation still blocks an
+        // immediate second signing attempt for the same jti.
         tracing::error!(error = %err, "single-use ledger commit failed after signing");
     }
     Ok(Json(response))
@@ -1674,7 +1680,7 @@ fn map_wallet_err(err: &zally_wallet::WalletError) -> ProblemResponse {
         )),
         other => ProblemResponse::server_error(ProblemDetail::not_retryable(
             ProblemKind::NotReady,
-            "wallet send_payment failed",
+            "wallet signing failed",
             other.to_string(),
         )),
     }
@@ -2204,7 +2210,8 @@ mod tests {
 
     #[test]
     fn wire_tx_id_is_the_send_outcome_txid_in_rpc_byte_order() {
-        use zally_core::{BlockHeight, TxId, Zatoshis};
+        use zally_core::{BlockHeight, Network, TxId, Zatoshis};
+        use zally_pczt::PcztBytes;
         use zally_wallet::{BroadcastOutcome, SendOutcome, SignedPczt};
 
         // The two forms are byte-reversed views of one real testnet txid: the
@@ -2234,7 +2241,8 @@ mod tests {
             },
         };
 
-        let wire = super::signed_payload_response(&outcome, b"raw-signed-bytes");
+        let signed_pczt = PcztBytes::from_serialized(b"signed-pczt".to_vec(), Network::Testnet);
+        let wire = super::signed_payload_response(&outcome, &signed_pczt);
 
         assert_eq!(
             wire.signed_payload.tx_id,
@@ -2370,8 +2378,7 @@ mod tests {
             .audience("urn:zentity:wallet:test")
             .build()?;
 
-        let ledger_url = format!("file:{}", dir.path().join("usage-ledger.db").display());
-        let spend_idempotency_cache = UsageLedger::open(&ledger_url, None).await?;
+        let spend_idempotency_cache = UsageLedger::ephemeral_for_tests();
 
         // Hold `dir` for the wallet's lifetime by leaking it: the temp dir
         // lives as long as the test process so the sqlite handles stay valid.

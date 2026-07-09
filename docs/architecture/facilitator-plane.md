@@ -1,8 +1,12 @@
 # Facilitator Plane
 
-The facilitator plane is the single internal lifecycle behind the x402 v2
-wire adapter. Each step has typed inputs and typed outputs; no string-typed
-payloads cross the plane.
+The facilitator plane is zpay's Zcash payment lifecycle behind the
+`/zpay/v1/*` product surface. It is distinct from the official x402 v2
+facilitator surface, which is limited to `/supported`, `/verify`, and
+`/settle`. The Zcash x402 `exact` binding is `x402-zcash-exact-v1`; the
+official x402 surface advertises that binding and settles
+`pczt-v2-extractable` authorizations. Each zpay lifecycle step has typed
+inputs and typed outputs; no string-typed envelopes cross the plane.
 
 ## Lifecycle
 
@@ -39,7 +43,7 @@ amount_zat = 50000
 max_validity_seconds = 120
 ```
 
-`GET /x402/v2/accepts?payee_id=aether-ai-shop` returns the payee's
+`GET /zpay/v1/accepts?payee_id=aether-ai-shop` returns the payee's
 `accepts[]` entries. Each `AcceptsEntry` carries `scheme`, `network`,
 `pay_to`, `amount_zat`, `max_validity_seconds`, an optional
 `expiry_delta_blocks`, and `merchant_requires_verify` (a UI-affordance flag,
@@ -71,8 +75,13 @@ Steps:
 5. Return `Preparation { payment_id, payment_uri, memo_bytes, expiry_height,
    amount_zat }`.
 
-The agent hands `payment_uri` and `memo_bytes` to the payer's wallet, which
-signs and returns `raw_tx_hex`.
+The product lifecycle agent hands `payment_uri` and `memo_bytes` to the payer's
+wallet, which signs and returns `raw_tx_hex`. The official x402 path instead
+uses `PaymentPayload.payload.format: "pczt-v2-extractable"`. A generic x402
+request settles statelessly. A zpay-prepared x402 request may carry
+`PaymentRequirements.extra.zpayPaymentId`; in that case `/x402/v2/settle`
+records the broadcast outcome against the prepared row after proving the row
+matches the x402 requirements.
 
 ## Settle
 
@@ -104,7 +113,7 @@ agent-signed path lives in the identity issuer (see
 
 ## Confirm
 
-### Pull (`GET /x402/v2/payments/{payment_id}`)
+### Pull (`GET /zpay/v1/payments/{payment_id}`)
 
 Projects the prepared row, the ledger row, and the shared chain view into a
 `PaymentStatusSnapshot`: `{ payment_id, status, intent_posture,
@@ -130,7 +139,7 @@ drops a mined block, the ledger row downgrades (`mined_block_height` clears,
 stamps), and the status returns to `broadcast` or `expired`. See
 [ADR-0009](../adrs/0009-settlement-lifecycle-and-finality.md).
 
-### Stream (`GET /x402/v2/payments/{payment_id}/events`)
+### Stream (`GET /zpay/v1/payments/{payment_id}/events`)
 
 Server-Sent Events. The stream emits a snapshot on connect and on every
 change the background tasks publish (a confirmation, a reorg downgrade, an

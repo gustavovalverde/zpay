@@ -272,7 +272,14 @@ async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupEr
     // intra-cluster sidecars keep the existing path.
     let router = Router::new()
         .route("/healthz", get(healthz))
-        .nest("/x402/v2", zpay_x402::router(state, &config.cors_allowlist));
+        .nest(
+            "/x402/v2",
+            zpay_x402::router(state.clone(), &config.cors_allowlist),
+        )
+        .nest(
+            "/zpay/v1",
+            zpay_x402::lifecycle_router(state, &config.cors_allowlist),
+        );
 
     Ok(AppPlane {
         router: router.layer(tower_http::trace::TraceLayer::new_for_http()),
@@ -905,7 +912,7 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, Start
     let zally_network = zally_network_from_config_str(&config.network)?;
     let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_CHAIN_SOURCE_URL unset; /x402/v2/settle will return 502 until a chain plane is configured",
+            "ZPAY_CHAIN_SOURCE_URL unset; /zpay/v1/settle will return 502 until a chain plane is configured",
         );
         return Ok(AnySubmitter::Rejecting(zally_network));
     };

@@ -25,7 +25,7 @@ and this table in the same change.
 
 ## Wire envelope
 
-At the x402 boundary a typed error renders as an
+At the JSON wire boundary a typed error renders as an
 `application/problem+json` document with four fields: `title`, `kind`,
 `detail`, and `retryable`. The `kind` is the machine-readable code a
 consumer branches on.
@@ -49,7 +49,7 @@ its fixed-window budget (see
 
 ### `zpay_core::prepare::PrepareError`
 
-Produced by `propose`; rendered at `POST /x402/v2/prepare`.
+Produced by `propose`; rendered at `POST /zpay/v1/prepare`.
 
 | Variant | Retry | HTTP | `kind` | Operator hint |
 |---------|-------|------|--------|---------------|
@@ -61,7 +61,7 @@ Produced by `propose`; rendered at `POST /x402/v2/prepare`.
 
 ### `zpay_core::settle::SettleError`
 
-Produced by `submit_settlement`; rendered at `POST /x402/v2/settle`.
+Produced by `submit_settlement`; rendered at `POST /zpay/v1/settle`.
 
 | Variant | Retry | HTTP | `kind` | Operator hint |
 |---------|-------|------|--------|---------------|
@@ -76,7 +76,7 @@ Produced by `submit_settlement`; rendered at `POST /x402/v2/settle`.
 
 ### `zpay_core::verify::VerifyError`
 
-Produced by `verify`; rendered at `POST /x402/v2/verify`. In-band
+Produced by `verify`; rendered at `POST /zpay/v1/verify`. In-band
 verdicts (malformed, invalid signature, inconclusive) flow through the
 `VerifyResponse` body; only transport-class failures reach this enum.
 
@@ -86,13 +86,48 @@ verdicts (malformed, invalid signature, inconclusive) flow through the
 
 ### `zpay_core::tip::TipError`
 
-Produced by the chain-tip oracle; rendered at `GET /x402/v2/tip` and
+Produced by the chain-tip oracle; rendered at `GET /zpay/v1/tip` and
 wrapped by `PrepareError::TipOracle`.
 
 | Variant | Retry | HTTP | `kind` | Operator hint |
 |---------|-------|------|--------|---------------|
 | `Unavailable { reason }` | retryable | 502 | `tip_oracle_unavailable` | Chain-tip oracle unreachable; check the `/readyz` chain dependency. |
 | `NetworkUnsupported { network }` | not_retryable | 422 | `network_unsupported` | Oracle does not serve the requested network; check the runtime's configured network. |
+
+### `zpay_x402` official facilitator reasons
+
+Produced by unauthenticated `POST /x402/v2/verify` and
+`POST /x402/v2/settle`. These are official x402 response fields
+(`invalidReason` or `errorReason`), not RFC 7807 `kind` strings.
+
+| Reason | Retry | HTTP | Operator hint |
+|--------|-------|------|---------------|
+| `x402_version_unsupported` | not_retryable | 200 | Client and facilitator are using different x402 protocol versions. |
+| `payment_requirements_mismatch` | not_retryable | 200 | The selected payment requirements do not equal the requirements sent for verification. |
+| `scheme_network_not_supported` | not_retryable | 200 | The facilitator does not support this scheme and network pair. |
+| `zcash_exact_scheme_invalid` | not_retryable | 200 | Zcash exact requirements used a scheme other than `exact`. |
+| `zcash_exact_network_invalid` | not_retryable | 200 | Zcash exact requirements used an unknown Zcash network identifier. |
+| `zcash_exact_asset_unsupported` | not_retryable | 200 | Zcash exact requirements must use `asset: "ZEC"`. |
+| `zcash_exact_amount_invalid` | not_retryable | 200 | Zcash exact requirements must use a positive integer zatoshi amount. |
+| `zcash_exact_pay_to_invalid` | not_retryable | 200 | Zcash exact requirements must use a ZIP-316 Unified Address prefix matching the network. |
+| `zcash_exact_authorization_malformed` | not_retryable | 200 | Zcash exact authorization must be an object with `format` and base64url PCZT bytes. |
+| `zcash_exact_authorization_format_unsupported` | not_retryable | 200 | Zcash exact authorization must use `format: "pczt-v2-extractable"`. |
+| `zcash_exact_pczt_malformed` | not_retryable | 200 | PCZT bytes did not parse. |
+| `zcash_exact_network_mismatch` | not_retryable | 200 | Requested network does not match the PCZT or configured chain plane. |
+| `zcash_exact_pay_to_mismatch` | not_retryable | 200 | PCZT labelled payment recipient does not match `payTo`. |
+| `zcash_exact_amount_mismatch` | not_retryable | 200 | PCZT labelled payment amount does not match `amount`. |
+| `zcash_exact_pczt_not_verifiable` | not_retryable | 200 | PCZT omitted fields needed for safe effect verification, or used an unsupported labelled output form. |
+| `zcash_exact_pczt_not_extractable` | not_retryable | 200 | PCZT verification passed but transaction extraction failed. |
+| `zcash_exact_transaction_invalid_encoding` | not_retryable | 200 | Chain plane rejected the extracted transaction bytes as invalid encoding. |
+| `zcash_exact_transaction_rejected` | not_retryable | 200 | Chain plane rejected the extracted transaction under consensus or policy rules. |
+| `zcash_exact_settlement_unknown` | retryable | 200 | Chain plane did not return a determinate broadcast outcome. |
+| `zpay_payment_id_invalid` | not_retryable | 200 | `extra.zpayPaymentId` was present but not a valid zpay payment id. |
+| `zpay_payment_not_prepared` | not_retryable | 200 | `extra.zpayPaymentId` named no active prepared row. |
+| `zpay_payment_requirements_mismatch` | not_retryable | 200 | The prepared row's amount, recipient, or network did not match the x402 requirements. |
+| `zpay_payment_expiry_mismatch` | not_retryable | 200 | The extracted PCZT expiry height did not match the prepared row. |
+| `zpay_payment_store_unavailable` | retryable | 200 | The prepared-row store could not be read or updated while linking x402 settlement. |
+| `zpay_payment_ledger_unavailable` | retryable | 200 | The settlement ledger could not record a broadcast outcome after x402 settlement. |
+| `chain_unavailable` | retryable | 200 | Chain plane could not be reached during x402 settlement. |
 
 ### `zpay_x402::dpop::DpopError`
 

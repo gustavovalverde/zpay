@@ -1,7 +1,7 @@
 //! Settlement ledger and payment-status lookup.
 //!
 //! After a settle call broadcasts, the resulting outcome is inserted into
-//! the [`SettlementLedgerStore`] so a later `GET /x402/v2/payments/{payment_id}`
+//! the [`SettlementLedgerStore`] so a later `GET /zpay/v1/payments/{payment_id}`
 //! call can report what happened. The ledger holds every settle attempt
 //! (success or failure); a retried settle overwrites the previous entry,
 //! so callers see the latest known outcome rather than a stale one.

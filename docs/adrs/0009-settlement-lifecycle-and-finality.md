@@ -92,7 +92,7 @@ settled row whose wall-clock TTL passed also reads `Expired`.
 
 ### The SSE stream closes on immutable success or a terminal status, never on `Final`
 
-`GET /x402/v2/payments/{payment_id}/events` closes after emitting the first
+`GET /zpay/v1/payments/{payment_id}/events` closes after emitting the first
 snapshot for which `PaymentStatusSnapshot::stream_closed` holds: `settled` is
 true, or the status is terminal (`Failed`, `NeverIssued`, `Expired`). A
 `Final` snapshot that is not yet settled keeps the stream open so a later
@@ -100,7 +100,7 @@ reorg downgrade still reaches the subscriber.
 
 ### `reorg_count` and `settled` are wire-visible
 
-Both `GET /x402/v2/payments/{payment_id}` and the SSE snapshot carry
+Both `GET /zpay/v1/payments/{payment_id}` and the SSE snapshot carry
 `reorg_count` and `settled`. `reorg_count` lets a caller and an operator see
 how many times a payment regressed; `settled` is the immutability bit a
 caller keys the release decision on.

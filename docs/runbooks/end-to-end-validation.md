@@ -1,9 +1,9 @@
-# x402 local smoke test
+# zpay lifecycle local smoke test
 
-Use this runbook to prove a local zpay stack can complete the normal x402
-payment flow on Zcash testnet:
+Use this runbook to prove a local zpay stack can complete the normal zpay
+Zcash lifecycle on testnet:
 
-1. zpay prepares an x402 payment.
+1. zpay prepares a ZEC payment.
 2. a real zally wallet signs the transaction.
 3. zpay settles the signed bytes through zinder.
 4. zpay reports the payment as mined or final.
@@ -29,6 +29,9 @@ Local services:
 - zpay can reach that zinder endpoint from wherever zpay runs.
 - Sapling parameters exist at `${HOME}/.local/share/ZcashParams`, or
   `ZCASH_PARAMS_HOST_DIR` points to them.
+  Both zpay and zspend mount this directory. zpay needs the files for
+  `/x402/v2/verify` and `/x402/v2/settle` because PCZT extraction loads
+  Sapling verifying parameters before it accepts a signed PCZT.
 
 The examples below use these variables. The defaults match common localhost
 ports, but any machine can override them.
@@ -69,7 +72,10 @@ printf 'birthday_height=%s\n' "$BIRTHDAY_HEIGHT"
 
 ## Start zpay
 
-This smoke test uses the zpay x402 facilitator path.
+This smoke test uses the zpay lifecycle path under `/zpay/v1/*`. The official
+x402 path under `/x402/v2/*` is a separate facilitator boundary. Use
+`zpay-e2e agent-run` to exercise `x402-zcash-exact-v1` with zspend-signed
+`pczt-v2-extractable` bytes through `/x402/v2/verify` and `/x402/v2/settle`.
 
 Set the chain URL to the endpoint zpay can reach from its own runtime. This may
 be different from the host URL used by `grpcurl` and `zpay-e2e`.
@@ -144,7 +150,7 @@ curl -sS \
   -H 'content-type: application/json' \
   --data "$(jq -n \
     --arg address "$HARNESS_ADDRESS" \
-    --arg memo "zpay x402 smoke test $(date -u +%F)" \
+    --arg memo "zpay lifecycle smoke test $(date -u +%F)" \
     '{network:"testnet", address:$address, memo:$memo}')" \
   https://fauzec.com/api/v1/claim \
   | tee .tmp/zpay-e2e/fauzec-claim.json
@@ -211,9 +217,9 @@ done
 Expected output includes a non-zero shielded balance, usually
 `ironwood_zat=100000000` for a fresh fauzec claim.
 
-## Run the x402 flow
+## Run the zpay lifecycle flow
 
-Run the full x402 smoke test:
+Run the full zpay lifecycle smoke test:
 
 ```bash
 RUST_LOG=zpay_e2e=info \
@@ -231,6 +237,30 @@ cargo run -p zpay-e2e --locked -- \
 The command should print a `payment_id` and transaction id. It passes when
 zpay observes the transaction mined before `--poll-seconds` expires.
 
+For the official x402 path, run the agent-signed flow against zspend:
+
+```bash
+RUST_LOG=zpay_e2e=info \
+CARGO_INCREMENTAL=0 \
+cargo run -p zpay-e2e --locked -- \
+  --wallet-dir "$HARNESS_WALLET_DIR" \
+  --zpay-url "$ZPAY_URL" \
+  --zspend-url "${ZSPEND_URL:-http://127.0.0.1:8090}" \
+  --zinder-url "$ZINDER_GRPC_URL" \
+  --birthday "$BIRTHDAY_HEIGHT" \
+  agent-run \
+  --payee-id aether-demo \
+  --audience "${ZSPEND_AUDIENCE:-urn:zpay:zspend:local-dev}" \
+  --issuer-key-path "${ZPAY_E2E_ISSUER_KEY_PATH:-.tmp/zpay-e2e/dev-issuer-ed25519.pem}" \
+  --issuer-kid "${ZPAY_E2E_ISSUER_KID:-zpay-e2e-dev}" \
+  --poll-seconds 600
+```
+
+The x402 command passes when zspend returns `pczt-v2-extractable`, zpay
+accepts `/x402/v2/verify`, zpay accepts `/x402/v2/settle`, the zpay lifecycle
+status records the settled transaction id for the prepared payment, and
+zexplorer returns HTTP 200 for that transaction.
+
 ## Verify the payment
 
 Check zpay status:
@@ -238,7 +268,7 @@ Check zpay status:
 ```bash
 PAYMENT_ID='<paste payment_id here>'
 
-curl -fsS "$ZPAY_URL/x402/v2/payments/$PAYMENT_ID" | jq .
+curl -fsS "$ZPAY_URL/zpay/v1/payments/$PAYMENT_ID" | jq .
 ```
 
 Expected:
@@ -253,7 +283,7 @@ Check zexplorer:
 
 ```bash
 PAYMENT_TXID=$(
-  curl -fsS "$ZPAY_URL/x402/v2/payments/$PAYMENT_ID" \
+  curl -fsS "$ZPAY_URL/zpay/v1/payments/$PAYMENT_ID" \
     | jq -r '.broadcast_outcome.transaction_id'
 )
 
@@ -303,5 +333,5 @@ For a normal smoke-test report, capture:
 - zinder latest block height.
 - fauzec request id and faucet txid.
 - `zpay-e2e run` payment id and txid.
-- final `GET /x402/v2/payments/{payment_id}` response.
+- final `GET /zpay/v1/payments/{payment_id}` response.
 - zexplorer transaction URL.

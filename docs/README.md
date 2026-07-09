@@ -31,6 +31,8 @@ The docs are organised by lifecycle, not by topic:
 | [0007](adrs/0007-local-zip311-verifier.md) | Local ZIP-311 verifier | Accepted | Verify plane |
 | [0008](adrs/0008-compliance-authority-placement.md) | Compliance authority placement | Accepted | Compliance |
 | [0009](adrs/0009-settlement-lifecycle-and-finality.md) | Settlement lifecycle and finality semantics | Accepted | Settlement lifecycle |
+| [0010](adrs/0010-x402-public-boundary.md) | x402 public boundary | Accepted | Facilitator surface |
+| [0011](adrs/0011-zcash-x402-exact-binding.md) | Zcash x402 exact binding | Accepted | Facilitator surface |
 
 ## Architecture index
 
@@ -49,8 +51,10 @@ The docs are organised by lifecycle, not by topic:
 
 ## Runbook index
 
-- [end-to-end-validation.md](runbooks/end-to-end-validation.md): local x402
-  smoke test with zpay, zinder, fauzec, and zexplorer
+- [end-to-end-validation.md](runbooks/end-to-end-validation.md): local zpay
+  lifecycle smoke test with zpay, zinder, fauzec, and zexplorer
+- [demo-ui.md](runbooks/demo-ui.md): browser checkout demo for checkout and
+  autopay Zcash flows
 - [railway-deploy.md](runbooks/railway-deploy.md): Railway deployment
 - [reorg-recovery.md](runbooks/reorg-recovery.md): settlement reorg response
 - [zspend-seed.md](runbooks/zspend-seed.md): wallet seed lifecycle

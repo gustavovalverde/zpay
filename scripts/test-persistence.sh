@@ -79,9 +79,9 @@ start_runtime() {
   ZPAY_STORE__URL="$LIBSQL_URL" \
   "$BINARY" > "$TEMP_DIR/runtime-$label.log" 2>&1 &
   ZPAY_PID=$!
-  # Wait up to 10s for the /x402/v2/accepts endpoint to answer.
+  # Wait up to 10s for the /zpay/v1/accepts endpoint to answer.
   for _ in $(seq 1 50); do
-    if curl -fsS "$APP_URL/x402/v2/accepts?payee_id=durability-test" >/dev/null 2>&1; then
+    if curl -fsS "$APP_URL/zpay/v1/accepts?payee_id=durability-test" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.2
@@ -116,8 +116,8 @@ EOF
 call_prepare() {
   local key="$1"
   local proof
-  proof="$(mint_proof POST /x402/v2/prepare)"
-  curl -fsS -X POST "$APP_URL/x402/v2/prepare" \
+  proof="$(mint_proof POST /zpay/v1/prepare)"
+  curl -fsS -X POST "$APP_URL/zpay/v1/prepare" \
     -H 'content-type: application/json' \
     -H "DPoP: $proof" \
     -d "$(prepare_body "$key")"
@@ -125,7 +125,7 @@ call_prepare() {
 
 call_status() {
   local payment_id="$1"
-  curl -fsS "$APP_URL/x402/v2/payments/$payment_id"
+  curl -fsS "$APP_URL/zpay/v1/payments/$payment_id"
 }
 
 assert() {

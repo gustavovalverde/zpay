@@ -7,7 +7,7 @@
 #
 #   1. Schema migrations apply from version 0; `zpay_schema_migrations`
 #      ends at version 1.
-#   2. The /x402/v2/prepare endpoint accepts a request and returns a
+#   2. The /zpay/v1/prepare endpoint accepts a request and returns a
 #      ZIP-321 URI on a freshly migrated database.
 #   3. The container reports healthy.
 #
@@ -27,6 +27,12 @@ IMAGE="${ZPAY_TEST_IMAGE:-zpay-runtime:dev}"
 NAME="zpay-cold-start-test-$$"
 PORT="${ZPAY_TEST_PORT:-18100}"
 URL="http://127.0.0.1:$PORT"
+EXPECTED_SCHEMA_VERSION="$(
+  find "$REPO_ROOT/crates/zpay-store/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]_*.sql' \
+    | sed -E 's#.*/0*([0-9]+)_.*#\1#' \
+    | sort -n \
+    | tail -1
+)"
 
 TEMP_DIR="$(mktemp -d -t zpay-cold-start-XXXXXX)"
 cleanup() {
@@ -72,11 +78,16 @@ if ! echo "$LOGS" | grep -q '"message":"libsql schema migrations applied"'; then
 fi
 echo "[test-cold-start] ok: libsql migrations applied on first boot"
 
-if ! echo "$LOGS" | grep -q '"schema_version":1'; then
-  echo "[test-cold-start] FAIL: schema_version != 1 (the only migration shipped today is 0001_initial.sql)"
+if [[ -z "$EXPECTED_SCHEMA_VERSION" ]]; then
+  echo "[test-cold-start] FAIL: no zpay-store migrations found"
   exit 1
 fi
-echo "[test-cold-start] ok: schema_version=1 reached"
+
+if ! echo "$LOGS" | grep -q "\"schema_version\":$EXPECTED_SCHEMA_VERSION"; then
+  echo "[test-cold-start] FAIL: schema_version != $EXPECTED_SCHEMA_VERSION"
+  exit 1
+fi
+echo "[test-cold-start] ok: schema_version=$EXPECTED_SCHEMA_VERSION reached"
 
 if ! echo "$LOGS" | grep -q '"message":"zpay-runtime ready"'; then
   echo "[test-cold-start] FAIL: missing 'zpay-runtime ready' boot log line"
@@ -100,10 +111,10 @@ EOF
 PROOF="$(python3 "$SCRIPT_DIR/mint-dpop-proof.py" \
   --keyfile "$DPOP_KEYFILE" \
   --method POST \
-  --url "$URL/x402/v2/prepare" \
+  --url "$URL/zpay/v1/prepare" \
   --jti "cold-start-jti-$$")"
 
-RESPONSE="$(curl -fsS -X POST "$URL/x402/v2/prepare" \
+RESPONSE="$(curl -fsS -X POST "$URL/zpay/v1/prepare" \
   -H 'content-type: application/json' \
   -H "DPoP: $PROOF" \
   -d "$BODY")"
@@ -124,7 +135,7 @@ if [[ "${PAYMENT_URI#zcash:}" == "$PAYMENT_URI" ]]; then
 fi
 echo "[test-cold-start] ok: payment_uri starts with zcash:"
 
-STATUS="$(curl -fsS "$URL/x402/v2/payments/$PAYMENT_ID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')"
+STATUS="$(curl -fsS "$URL/zpay/v1/payments/$PAYMENT_ID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')"
 if [[ "$STATUS" != "awaiting" ]]; then
   echo "[test-cold-start] FAIL: GET /payments/{id} status is '$STATUS', expected 'awaiting'"
   exit 1

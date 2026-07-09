@@ -3,7 +3,7 @@
 //! Operators register payees in their zpay deployment's config. Each
 //! payee entry carries a list of [`AcceptsEntry`] templates describing
 //! the schemes, networks, recipient addresses, and amounts the payee
-//! is willing to receive on. `GET /x402/v2/accepts?payee_id=…` returns
+//! is willing to receive on. `GET /zpay/v1/accepts?payee_id=…` returns
 //! that list verbatim.
 //!
 //! Beyond advertisement, the registry is also the authoritative source

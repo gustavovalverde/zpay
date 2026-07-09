@@ -2,16 +2,16 @@
 //!
 //! Resolves a hex-encoded ZIP-244 transaction id back to a typed
 //! confirmation outcome by combining `transaction_by_id` (placement) with
-//! `chain_value_pools_at_tip` (current chain tip).
+//! `latest_block` (current chain tip).
 //!
-//! Mirrors the [`ZinderBroadcastClient`][super::zinder_broadcast] module:
+//! Mirrors the [`ZinderSubmitter`][super::zinder_submitter] module:
 //! the channel is opened lazily and HTTP/2 keepalive plus tonic 0.14's
 //! channel-self-heal pattern are inherited from `RemoteChainIndex`.
 
 use zally_core::TxId;
 use zinder_client::{
-    ChainIndex, EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex,
-    RemoteOpenOptions, TransactionId, TxStatus,
+    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
+    TransactionId, TxStatus,
 };
 use zpay_core::chain_status::ChainStatusView;
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome, OracleError};
@@ -68,12 +68,12 @@ impl ConfirmationOracle for ZinderConfirmationOracle {
         match status {
             TxStatus::Mined(mined) => {
                 let block_height: u64 = u64::from(mined.location.block_height.value());
-                let tip = self
+                let block = self
                     .chain
-                    .chain_value_pools_at_tip()
+                    .latest_block(None)
                     .await
                     .map_err(|err| map_indexer_error(&err))?;
-                let tip_height: u64 = u64::from(tip.chain_epoch.visible_tip_height.value());
+                let tip_height: u64 = u64::from(block.height.value());
                 // saturating_sub guards against the rare case where the
                 // reorg has retracted the tip below the tx height between
                 // our two reads.
@@ -94,14 +94,19 @@ impl ConfirmationOracle for ZinderConfirmationOracle {
     }
 
     async fn chain_status(&self) -> Result<ChainStatusView, OracleError> {
-        let tip = self
+        let visible_tip = self
             .chain
-            .chain_value_pools_at_tip()
+            .latest_block(None)
+            .await
+            .map_err(|err| map_indexer_error(&err))?;
+        let settled_tip = self
+            .chain
+            .latest_safe_block(None)
             .await
             .map_err(|err| map_indexer_error(&err))?;
         Ok(ChainStatusView {
-            visible_tip_height: Some(u64::from(tip.chain_epoch.visible_tip_height.value())),
-            settled_tip_height: Some(u64::from(tip.chain_epoch.settled_tip_height.value())),
+            visible_tip_height: Some(u64::from(visible_tip.height.value())),
+            settled_tip_height: Some(u64::from(settled_tip.height.value())),
         })
     }
 }

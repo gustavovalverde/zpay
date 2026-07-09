@@ -2,6 +2,14 @@
 /target/
 **/*.rs.bk
 
+# Demo frontend artifacts
+/demo/node_modules/
+/demo/dist/
+/demo/coverage/
+/demo/.tmp/
+/demo/playwright-report/
+/demo/test-results/
+
 # IDE
 .idea/
 .vscode/

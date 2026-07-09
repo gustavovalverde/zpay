@@ -100,7 +100,7 @@ Walk this in order. Each step is independent and can be reverted.
    stage tree and the `railway.toml` schema without pushing.
 6. Run `./scripts/deploy-to-railway.sh` (or `--detach`) to push.
 7. After the deploy completes, hit `https://zpay.up.railway.app/healthz`
-   to confirm liveness, then `https://zpay.up.railway.app/x402/v2/accepts?payee_id=<id>`
+   to confirm liveness, then `https://zpay.up.railway.app/zpay/v1/accepts?payee_id=<id>`
    from outside Railway and confirm the listener responds.
 
 ## Rollback
@@ -135,6 +135,19 @@ itself is the platform-restart signal, not the on-call alarm.
 
 The Dockerfile's container-level `HEALTHCHECK` uses the same path so
 both layers agree.
+
+## Sapling parameters
+
+`/x402/v2/verify` and `/x402/v2/settle` extract signed
+`pczt-v2-extractable` bytes before accepting or broadcasting a payment.
+Extraction loads Sapling verifying parameters through `zcash_proofs`, so
+the runtime must have `sapling-spend.params` and `sapling-output.params`
+under the default ZcashParams directory.
+
+The container image sets `HOME=/opt/zpay-home`. Mount the parameter
+directory at `/opt/zpay-home/.zcash-params` for Railway services. Local
+compose stacks also mount the same host directory at `/home/zpay/.zcash-params`
+to cover platform home-directory fallback behavior.
 
 ## Operational warnings
 

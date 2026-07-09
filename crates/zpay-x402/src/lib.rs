@@ -1,21 +1,19 @@
 //! x402 v2 wire adapter for zpay.
 //!
-//! Translates between the x402 v2 HTTP wire shape and `zpay-core`'s
-//! protocol-neutral payment lifecycle. The router stays generic over the
-//! [`zpay_core::broadcast::BroadcastClient`] implementation so the runtime
-//! can swap a production zinder-backed client for a test fake without
-//! touching the adapter's public shape.
+//! The public [`router`] exposes the official x402 facilitator surface:
+//! `GET /supported`, `POST /verify`, and `POST /settle`. The zpay-specific
+//! prepare, broadcast, status, and event lifecycle lives behind
+//! [`lifecycle_router`] so internal demos can keep exercising Zcash settlement
+//! without claiming that custom lifecycle is the x402 standard.
 //!
-//! Routes mapped to real handlers:
+//! Official x402 v2 route shape:
 //!
-//! - `GET /accepts` advertises the payee `accepts[]` template.
-//! - `GET /tip` reports the chain plane's current tip height (diagnostic).
-//! - `POST /prepare` calls [`zpay_core::prepare::propose`].
-//! - `POST /settle` calls [`zpay_core::settle::submit_settlement`].
-//! - `POST /verify` verifies a ZIP-311 payment disclosure (delegates to
-//!   zinder's `VerifyPaymentDisclosure`).
-//! - `GET /payments/{payment_id}` returns the lifecycle snapshot.
-//! - `GET /payments/{payment_id}/events` streams snapshots over SSE.
+//! - `GET /supported` returns the scheme and network pairs the facilitator
+//!   can verify and settle.
+//! - `POST /verify` accepts the official
+//!   `{ x402Version, paymentPayload, paymentRequirements }` request.
+//! - `POST /settle` accepts the same request shape and returns the official
+//!   settlement response.
 //!
 //! Every JSON success body is the bare inner type: no `{ data: ... }`
 //! envelope. RFC 7807 `application/problem+json` documents stay
@@ -30,6 +28,8 @@
 pub mod dpop;
 mod events;
 mod rate_limit;
+pub mod wire;
+mod zcash_exact;
 
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -49,8 +49,11 @@ use zpay_core::accepts::PayeeRegistry;
 use zpay_core::chain_status::ChainStatusCache;
 use zpay_core::disclosure_fetcher::DisclosureFetcher;
 use zpay_core::prepare::{PrepareError, PrepareRequest, PreparedTxStore, propose};
-use zpay_core::settle::{SettleError, SettleRequest, submit_settlement};
-use zpay_core::status::{SettlementLedgerStore, lookup_payment_status};
+use zpay_core::settle::{
+    PcztSettlementOutcome, PcztSettlementRequest, SettleError, SettleRequest,
+    broadcast_verified_pczt_settlement, submit_settlement, verify_pczt_settlement,
+};
+use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status};
 use zpay_core::tip::{ChainTip, ChainTipOracle, TipError};
 use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
 use zpay_core::verify::{PaymentDisclosureVerifier, VerifyError, VerifyRequest, verify};
@@ -61,6 +64,12 @@ pub use dpop::{
 };
 pub use events::PaymentEventHub;
 pub use rate_limit::{RateLimitDecision, RateLimiter};
+pub use wire::{
+    FacilitatorRequest, PAYMENT_REQUIRED_HEADER, PAYMENT_RESPONSE_HEADER, PAYMENT_SIGNATURE_HEADER,
+    PaymentPayload, PaymentRequired, PaymentRequirements, ResourceInfo,
+    SettleResponse as X402SettleResponse, SupportedKind, SupportedResponse,
+    VerifyResponse as X402VerifyResponse, X402_VERSION,
+};
 
 /// Shared application state injected into every x402 v2 handler.
 pub struct AppState<C, V, P, L, T, F> {
@@ -201,7 +210,7 @@ impl<C, V, P, L, T, F> AppState<C, V, P, L, T, F> {
     }
 }
 
-/// Compose the x402 v2 router mountable under `/x402/v2`.
+/// Compose the official x402 v2 facilitator router mountable under `/x402/v2`.
 ///
 /// Returns a fully-configured `Router<()>` after binding the supplied
 /// [`AppState`] via `with_state`. Callers do not see the state type at
@@ -211,6 +220,34 @@ impl<C, V, P, L, T, F> AppState<C, V, P, L, T, F> {
 /// attaches no CORS layer, so cross-origin browser requests stay blocked;
 /// a non-empty slice permits those exact origins with no wildcard support.
 pub fn router<C, V, P, L, T, F>(
+    state: AppState<C, V, P, L, T, F>,
+    cors_allowlist: &[String],
+) -> Router
+where
+    C: Submitter + 'static,
+    V: PaymentDisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+    T: ChainTipOracle + 'static,
+    F: DisclosureFetcher + 'static,
+{
+    let router = Router::new()
+        .route("/supported", get(supported_handler::<C, V, P, L, T, F>))
+        .route("/verify", post(x402_verify_handler::<C, V, P, L, T, F>))
+        .route("/settle", post(x402_settle_handler::<C, V, P, L, T, F>))
+        .with_state(state);
+    match build_cors_layer(cors_allowlist) {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
+}
+
+/// Compose zpay's Zcash payment lifecycle router mountable under `/zpay/v1`.
+///
+/// This is not an x402 surface. It exists for local demos, test harnesses, and
+/// zpay-owned orchestration while the official x402 Zcash scheme binding is
+/// specified and implemented.
+pub fn lifecycle_router<C, V, P, L, T, F>(
     state: AppState<C, V, P, L, T, F>,
     cors_allowlist: &[String],
 ) -> Router
@@ -268,6 +305,11 @@ fn build_cors_layer(allowlist: &[String]) -> Option<CorsLayer> {
                 axum::http::header::AUTHORIZATION,
                 HeaderName::from_static("dpop"),
                 HeaderName::from_static("idempotency-key"),
+                HeaderName::from_static("payment-signature"),
+            ])
+            .expose_headers([
+                HeaderName::from_static("payment-required"),
+                HeaderName::from_static("payment-response"),
             ]),
     )
 }
@@ -309,6 +351,31 @@ fn broadcast_kind_label(outcome: &zpay_core::broadcast::BroadcastOutcome) -> &'s
         BroadcastOutcome::Rejected { .. } => "rejected",
         _ => "unknown",
     }
+}
+
+/// Machine-readable x402 error reason for a non-success broadcast outcome.
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "BroadcastOutcome is #[non_exhaustive]; future variants must fail closed as unknown settlement outcomes"
+)]
+fn broadcast_failure_reason(outcome: &zpay_core::broadcast::BroadcastOutcome) -> &'static str {
+    use zpay_core::broadcast::BroadcastOutcome;
+    match outcome {
+        BroadcastOutcome::InvalidEncoding { .. } => "zcash_exact_transaction_invalid_encoding",
+        BroadcastOutcome::Rejected { .. } => "zcash_exact_transaction_rejected",
+        BroadcastOutcome::Accepted { .. } | BroadcastOutcome::Duplicate { .. } => {
+            "zcash_exact_settlement_succeeded"
+        }
+        _ => "zcash_exact_settlement_unknown",
+    }
+}
+
+fn unix_now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Optional peer socket address, populated only when the router is served
@@ -402,6 +469,362 @@ pub(crate) fn rate_limited_response(retry_after_seconds: u64) -> Response {
         headers.insert(RETRY_AFTER, retry_after);
     }
     response
+}
+
+async fn supported_handler<C, V, P, L, T, F>(
+    State(state): State<AppState<C, V, P, L, T, F>>,
+) -> Response
+where
+    C: Submitter + 'static,
+    V: PaymentDisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+    T: ChainTipOracle + 'static,
+    F: DisclosureFetcher + 'static,
+{
+    let response = json_ok(&zcash_exact::supported_response(state.chain.network()));
+    record_request_metric("x402_supported", &response);
+    response
+}
+
+async fn x402_verify_handler<C, V, P, L, T, F>(
+    State(state): State<AppState<C, V, P, L, T, F>>,
+    headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
+    Json(request): Json<FacilitatorRequest>,
+) -> Response
+where
+    C: Submitter + 'static,
+    V: PaymentDisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+    T: ChainTipOracle + 'static,
+    F: DisclosureFetcher + 'static,
+{
+    let response = 'response: {
+        if let Some(limited) = ip_rate_limit(
+            &state.rate_limiter,
+            &headers,
+            peer,
+            state.trust_forwarded_headers,
+        ) {
+            break 'response limited;
+        }
+        if let Some(invalid_reason) = x402_request_invalid_reason(&request) {
+            break 'response json_ok(&X402VerifyResponse {
+                is_valid: false,
+                invalid_reason: Some(invalid_reason.to_owned()),
+                payer: None,
+                extra: zcash_exact::response_extensions(&request),
+            });
+        }
+        let settlement_request = match zcash_exact::settlement_request(&request) {
+            Ok(settlement_request) => settlement_request,
+            Err(invalid_reason) => {
+                break 'response json_ok(&X402VerifyResponse {
+                    is_valid: false,
+                    invalid_reason: Some(invalid_reason.to_owned()),
+                    payer: None,
+                    extra: zcash_exact::response_extensions(&request),
+                });
+            }
+        };
+        match verify_pczt_settlement(&settlement_request) {
+            Ok(verified) => {
+                let mut extra = zcash_exact::response_extensions(&request);
+                extra.insert(
+                    "transaction".to_owned(),
+                    serde_json::json!(verified.transaction_id),
+                );
+                extra.insert(
+                    "expiryHeight".to_owned(),
+                    serde_json::json!(verified.expiry_height),
+                );
+                json_ok(&X402VerifyResponse {
+                    is_valid: true,
+                    invalid_reason: None,
+                    payer: None,
+                    extra,
+                })
+            }
+            Err(err) => json_ok(&X402VerifyResponse {
+                is_valid: false,
+                invalid_reason: Some(err.reason_code().to_owned()),
+                payer: None,
+                extra: zcash_exact::response_extensions(&request),
+            }),
+        }
+    };
+    record_request_metric("x402_verify", &response);
+    response
+}
+
+async fn x402_settle_handler<C, V, P, L, T, F>(
+    State(state): State<AppState<C, V, P, L, T, F>>,
+    headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
+    Json(request): Json<FacilitatorRequest>,
+) -> Response
+where
+    C: Submitter + 'static,
+    V: PaymentDisclosureVerifier + 'static,
+    P: PreparedTxStore + 'static,
+    L: SettlementLedgerStore + 'static,
+    T: ChainTipOracle + 'static,
+    F: DisclosureFetcher + 'static,
+{
+    let response = 'response: {
+        if let Some(limited) = ip_rate_limit(
+            &state.rate_limiter,
+            &headers,
+            peer,
+            state.trust_forwarded_headers,
+        ) {
+            break 'response limited;
+        }
+        if let Some(error_reason) = x402_request_invalid_reason(&request) {
+            break 'response x402_settle_failure_response(&request, error_reason);
+        }
+        let settlement_request = match zcash_exact::settlement_request(&request) {
+            Ok(settlement_request) => settlement_request,
+            Err(error_reason) => {
+                break 'response x402_settle_failure_response(&request, error_reason);
+            }
+        };
+        let prepared_settlement = match find_prepared_x402_settlement(
+            &request,
+            &settlement_request,
+            state.prepared_store.as_ref(),
+        )
+        .await
+        {
+            Ok(prepared_settlement) => prepared_settlement,
+            Err(error_reason) => {
+                break 'response x402_settle_failure_response(&request, error_reason);
+            }
+        };
+        let verified = match verify_pczt_settlement(&settlement_request) {
+            Ok(verified) => verified,
+            Err(err) => break 'response x402_settle_failure_response(&request, err.reason_code()),
+        };
+        if let Some(prepared) = &prepared_settlement
+            && verified.expiry_height != prepared.expiry_height
+        {
+            break 'response x402_settle_failure_response(&request, "zpay_payment_expiry_mismatch");
+        }
+        match broadcast_verified_pczt_settlement(
+            &settlement_request,
+            verified,
+            state.chain.as_ref(),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                metrics::counter!(
+                    "zpay_broadcast_outcomes_total",
+                    "kind" => broadcast_kind_label(&outcome.broadcast_outcome),
+                )
+                .increment(1);
+                let extensions = x402_settle_response_extensions(
+                    &request,
+                    prepared_settlement,
+                    &outcome,
+                    LifecycleSinks {
+                        prepared_store: state.prepared_store.as_ref(),
+                        ledger: state.ledger.as_ref(),
+                        events: state.events.as_ref(),
+                        finality_depth: state.finality_depth,
+                        chain_status: state.chain_status.as_ref(),
+                    },
+                )
+                .await;
+                x402_settle_success_response(&request, outcome, extensions)
+            }
+            Err(err) => x402_settle_failure_response(&request, err.reason_code()),
+        }
+    };
+    record_request_metric("x402_settle", &response);
+    response
+}
+
+fn x402_settle_failure_response(request: &FacilitatorRequest, error_reason: &str) -> Response {
+    json_ok(&X402SettleResponse {
+        success: false,
+        error_reason: Some(error_reason.to_owned()),
+        payer: None,
+        transaction: None,
+        network: request.payment_requirements.network.clone(),
+        amount: request.payment_requirements.amount.clone(),
+        extensions: zcash_exact::response_extensions(request),
+    })
+}
+
+fn x402_settle_success_response(
+    request: &FacilitatorRequest,
+    outcome: PcztSettlementOutcome,
+    extensions: std::collections::BTreeMap<String, serde_json::Value>,
+) -> Response {
+    json_ok(&X402SettleResponse {
+        success: outcome.broadcast_outcome.is_success(),
+        error_reason: if outcome.broadcast_outcome.is_success() {
+            None
+        } else {
+            Some(broadcast_failure_reason(&outcome.broadcast_outcome).to_owned())
+        },
+        payer: None,
+        transaction: Some(outcome.transaction_id),
+        network: request.payment_requirements.network.clone(),
+        amount: request.payment_requirements.amount.clone(),
+        extensions,
+    })
+}
+
+fn x402_request_invalid_reason(request: &FacilitatorRequest) -> Option<&'static str> {
+    if request.x402_version != X402_VERSION || request.payment_payload.x402_version != X402_VERSION
+    {
+        return Some("x402_version_unsupported");
+    }
+    if request.payment_payload.accepted != request.payment_requirements {
+        return Some("payment_requirements_mismatch");
+    }
+    if !zcash_exact::is_zcash_exact_request(request) {
+        return Some("scheme_network_not_supported");
+    }
+    if let Err(reason) = zcash_exact::zpay_payment_id(&request.payment_requirements) {
+        return Some(reason);
+    }
+    zcash_exact::request_invalid_reason(request)
+}
+
+struct PreparedX402Settlement {
+    payment_id: PaymentId,
+    expiry_height: u32,
+}
+
+struct LifecycleSinks<'a, P, L>
+where
+    P: PreparedTxStore + ?Sized,
+    L: SettlementLedgerStore + ?Sized,
+{
+    prepared_store: &'a P,
+    ledger: &'a L,
+    events: &'a PaymentEventHub,
+    finality_depth: u32,
+    chain_status: &'a ChainStatusCache,
+}
+
+async fn x402_settle_response_extensions<P, L>(
+    request: &FacilitatorRequest,
+    prepared_settlement: Option<PreparedX402Settlement>,
+    outcome: &PcztSettlementOutcome,
+    sinks: LifecycleSinks<'_, P, L>,
+) -> std::collections::BTreeMap<String, serde_json::Value>
+where
+    P: PreparedTxStore + ?Sized,
+    L: SettlementLedgerStore + ?Sized,
+{
+    let mut extensions = zcash_exact::response_extensions(request);
+    extensions.insert(
+        "expiryHeight".to_owned(),
+        serde_json::json!(outcome.expiry_height),
+    );
+    if let Some(prepared) = prepared_settlement {
+        extensions.insert(
+            zcash_exact::ZPAY_PAYMENT_ID_EXTENSION.to_owned(),
+            serde_json::json!(prepared.payment_id.to_string()),
+        );
+        if let Err(reason) =
+            record_prepared_x402_settlement(&prepared, outcome, sinks.prepared_store, sinks.ledger)
+                .await
+        {
+            tracing::warn!(
+                payment_id = %prepared.payment_id,
+                reason,
+                "x402 settlement broadcast but lifecycle record failed"
+            );
+            extensions.insert(
+                "zpayLifecycleRecord".to_owned(),
+                serde_json::json!({
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            );
+        } else if let Ok(snapshot) = lookup_payment_status(
+            &prepared.payment_id,
+            sinks.prepared_store,
+            sinks.ledger,
+            sinks.finality_depth,
+            sinks.chain_status.load(),
+        )
+        .await
+        {
+            sinks.events.publish(&prepared.payment_id, snapshot);
+        }
+    }
+    extensions
+}
+
+async fn find_prepared_x402_settlement<P>(
+    request: &FacilitatorRequest,
+    settlement_request: &PcztSettlementRequest,
+    prepared_store: &P,
+) -> Result<Option<PreparedX402Settlement>, &'static str>
+where
+    P: PreparedTxStore + ?Sized,
+{
+    let Some(payment_id) = zcash_exact::zpay_payment_id(&request.payment_requirements)? else {
+        return Ok(None);
+    };
+    let prepared = prepared_store
+        .find_by_payment_id(&payment_id)
+        .await
+        .map_err(|_| "zpay_payment_store_unavailable")?
+        .ok_or("zpay_payment_not_prepared")?;
+    let has_matching_network = prepared.network == settlement_request.network;
+    let has_matching_amount = prepared.amount_zat == settlement_request.amount_zat;
+    let has_matching_recipient = prepared.recipient_unified_address == settlement_request.pay_to;
+    if !(has_matching_network && has_matching_amount && has_matching_recipient) {
+        return Err("zpay_payment_requirements_mismatch");
+    }
+    Ok(Some(PreparedX402Settlement {
+        payment_id,
+        expiry_height: prepared.preparation.expiry_height,
+    }))
+}
+
+async fn record_prepared_x402_settlement<P, L>(
+    prepared: &PreparedX402Settlement,
+    outcome: &PcztSettlementOutcome,
+    prepared_store: &P,
+    ledger: &L,
+) -> Result<(), &'static str>
+where
+    P: PreparedTxStore + ?Sized,
+    L: SettlementLedgerStore + ?Sized,
+{
+    ledger
+        .record(
+            prepared.payment_id.clone(),
+            SettlementLedgerEntry {
+                broadcast_outcome: outcome.broadcast_outcome.clone(),
+                settled_at_unix_seconds: unix_now_seconds(),
+                confirmation_count: None,
+                mined_block_height: None,
+                reorg_count: 0,
+                last_reorged_at: None,
+                expiry_height: Some(prepared.expiry_height),
+            },
+        )
+        .await
+        .map_err(|_| "zpay_payment_ledger_unavailable")?;
+
+    if outcome.broadcast_outcome.is_success() {
+        prepared_store
+            .remove(&prepared.payment_id)
+            .await
+            .map_err(|_| "zpay_payment_store_unavailable")?;
+    }
+    Ok(())
 }
 
 async fn prepare_handler<C, V, P, L, T, F>(
@@ -1123,6 +1546,317 @@ mod ops_tests {
 }
 
 #[cfg(test)]
+mod router_tests {
+    use super::{
+        AppState, DpopExpectations, PaymentEventHub, RateLimiter, lifecycle_router, router,
+    };
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+    use zally_chain::{SubmitOutcome, Submitter, SubmitterError};
+    use zally_core::Network;
+    use zpay_core::accepts::PayeeRegistry;
+    use zpay_core::chain_status::ChainStatusCache;
+    use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
+    use zpay_core::prepare::PreparedTxCache;
+    use zpay_core::status::{DEFAULT_FINALITY_DEPTH, SettlementLedger};
+    use zpay_core::tip::{ChainTipOracle, TipError};
+    use zpay_core::types::PaymentNetwork;
+    use zpay_core::verify::{
+        AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
+        VerifyError, VerifyResponse,
+    };
+
+    type TestState = AppState<
+        UnusedChain,
+        UnusedVerifier,
+        PreparedTxCache,
+        SettlementLedger,
+        FixedTipOracle,
+        UnusedFetcher,
+    >;
+
+    struct UnusedChain;
+
+    #[async_trait]
+    impl Submitter for UnusedChain {
+        fn network(&self) -> Network {
+            Network::Testnet
+        }
+
+        async fn submit(&self, _raw_tx: &[u8]) -> Result<SubmitOutcome, SubmitterError> {
+            Err(SubmitterError::Unavailable {
+                reason: "test fixture: submit must not be called".to_owned(),
+            })
+        }
+    }
+
+    struct UnusedVerifier;
+
+    impl PaymentDisclosureVerifier for UnusedVerifier {
+        async fn verify_disclosure<F>(
+            &self,
+            _disclosure_bytes: &[u8],
+            _fetcher: &F,
+        ) -> Result<VerifyResponse, VerifyError>
+        where
+            F: DisclosureFetcher + ?Sized,
+        {
+            Ok(VerifyResponse {
+                cryptographic_verdict: CryptographicVerdict::Inconclusive,
+                inconclusive_reason: None,
+                chain_presence: ChainPresence::OracleUnavailable,
+                amount_reconciliation: AmountReconciliation::NotChecked,
+                transaction_id: None,
+                payment_id: None,
+                disclosed_value_zat: None,
+            })
+        }
+    }
+
+    struct UnusedFetcher;
+
+    impl DisclosureFetcher for UnusedFetcher {
+        async fn fetch_transaction(
+            &self,
+            _txid: [u8; 32],
+        ) -> Result<DisclosedTransaction, FetchError> {
+            Err(FetchError::Unavailable {
+                reason: "test fixture: fetcher must not be called".to_owned(),
+            })
+        }
+    }
+
+    struct FixedTipOracle;
+
+    impl ChainTipOracle for FixedTipOracle {
+        async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
+            Ok(3_217_900)
+        }
+    }
+
+    fn build_state() -> TestState {
+        AppState::new(
+            Arc::new(PreparedTxCache::new()),
+            Arc::new(SettlementLedger::new()),
+            Arc::new(PayeeRegistry::new()),
+            Arc::new(UnusedChain),
+            Arc::new(UnusedVerifier),
+            Arc::new(PaymentEventHub::default()),
+            Arc::new(FixedTipOracle),
+            Arc::new(UnusedFetcher),
+            Arc::new(super::dpop::InMemoryReplayStore::new()),
+            DpopExpectations::unbound("http"),
+            DEFAULT_FINALITY_DEPTH,
+            Arc::new(ChainStatusCache::new()),
+            Arc::new(RateLimiter::new(0, 0)),
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn official_router_exposes_supported_not_accepts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let supported_response = router(build_state(), &[])
+            .oneshot(Request::builder().uri("/supported").body(Body::empty())?)
+            .await?;
+        assert_eq!(supported_response.status(), StatusCode::OK);
+        let response_bytes = to_bytes(supported_response.into_body(), usize::MAX).await?;
+        let response_json: Value = serde_json::from_slice(&response_bytes)?;
+        assert_eq!(response_json["kinds"][0]["scheme"], "exact");
+        assert_eq!(response_json["kinds"][0]["network"], "zcash:testnet");
+        assert_eq!(
+            response_json["kinds"][0]["extra"]["authorizationFormat"],
+            "pczt-v2-extractable",
+        );
+
+        let accepts_response = router(build_state(), &[])
+            .oneshot(Request::builder().uri("/accepts").body(Body::empty())?)
+            .await?;
+        assert_eq!(accepts_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn official_verify_rejects_malformed_zcash_exact_pczt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body = serde_json::json!({
+            "x402Version": 2,
+            "paymentPayload": {
+                "x402Version": 2,
+                "resource": {
+                    "url": "https://merchant.example/resource"
+                },
+                "accepted": {
+                    "scheme": "exact",
+                    "network": "zcash:testnet",
+                    "amount": "10000",
+                    "asset": "ZEC",
+                    "payTo": "utest1recipientaddress",
+                    "maxTimeoutSeconds": 60
+                },
+                "payload": {
+                    "format": "pczt-v2-extractable",
+                    "pczt": "UENaVAIAAAAA"
+                }
+            },
+            "paymentRequirements": {
+                "scheme": "exact",
+                "network": "zcash:testnet",
+                "amount": "10000",
+                "asset": "ZEC",
+                "payTo": "utest1recipientaddress",
+                "maxTimeoutSeconds": 60
+            }
+        });
+        let response = router(build_state(), &[])
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let response_json: Value = serde_json::from_slice(&response_bytes)?;
+        assert_eq!(response_json["isValid"], false);
+        assert_eq!(response_json["invalidReason"], "zcash_exact_pczt_malformed",);
+        assert_eq!(response_json["extra"]["binding"], "x402-zcash-exact-v1");
+        assert_eq!(response_json["extra"]["bindingStatus"], "implemented");
+        assert_eq!(
+            response_json["extra"]["authorizationFormat"],
+            "pczt-v2-extractable",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn official_settle_rejects_malformed_zcash_exact_authorization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body = serde_json::json!({
+            "x402Version": 2,
+            "paymentPayload": {
+                "x402Version": 2,
+                "resource": {
+                    "url": "https://merchant.example/resource"
+                },
+                "accepted": {
+                    "scheme": "exact",
+                    "network": "zcash:testnet",
+                    "amount": "10000",
+                    "asset": "ZEC",
+                    "payTo": "utest1recipientaddress",
+                    "maxTimeoutSeconds": 60
+                },
+                "payload": {
+                    "format": "raw-zcash-transaction-v5",
+                    "rawTxHex": "00"
+                }
+            },
+            "paymentRequirements": {
+                "scheme": "exact",
+                "network": "zcash:testnet",
+                "amount": "10000",
+                "asset": "ZEC",
+                "payTo": "utest1recipientaddress",
+                "maxTimeoutSeconds": 60
+            }
+        });
+        let response = router(build_state(), &[])
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settle")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let response_json: Value = serde_json::from_slice(&response_bytes)?;
+        assert_eq!(response_json["success"], false);
+        assert_eq!(
+            response_json["errorReason"],
+            "zcash_exact_authorization_format_unsupported",
+        );
+        assert_eq!(response_json["network"], "zcash:testnet");
+        assert_eq!(response_json["amount"], "10000");
+        assert_eq!(
+            response_json["extensions"]["authorizationFormat"],
+            "pczt-v2-extractable",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn official_settle_rejects_invalid_zpay_payment_id_extension()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let requirements = serde_json::json!({
+            "scheme": "exact",
+            "network": "zcash:testnet",
+            "amount": "10000",
+            "asset": "ZEC",
+            "payTo": "utest1recipientaddress",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+                "binding": "x402-zcash-exact-v1",
+                "amountUnit": "zat",
+                "authorizationFormat": "pczt-v2-extractable",
+                "zpayPaymentId": "   "
+            }
+        });
+        let body = serde_json::json!({
+            "x402Version": 2,
+            "paymentPayload": {
+                "x402Version": 2,
+                "resource": {
+                    "url": "https://merchant.example/resource"
+                },
+                "accepted": requirements,
+                "payload": {
+                    "format": "pczt-v2-extractable",
+                    "pczt": "UENaVAIAAAAA"
+                }
+            },
+            "paymentRequirements": requirements
+        });
+        let response = router(build_state(), &[])
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settle")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let response_json: Value = serde_json::from_slice(&response_bytes)?;
+        assert_eq!(response_json["success"], false);
+        assert_eq!(response_json["errorReason"], "zpay_payment_id_invalid",);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_router_does_not_expose_supported() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let response = lifecycle_router(build_state(), &[])
+            .oneshot(Request::builder().uri("/supported").body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod host_pinning_tests {
     //! Adversarial coverage for `verify_request_dpop`'s host-pinning gate.
     //!
@@ -1197,8 +1931,8 @@ mod host_pinning_tests {
             expected_host: Some("zpay.example.com".to_owned()),
         };
         let replay = dpop::InMemoryReplayStore::new();
-        let proof = mint_proof_with_htu("https://attacker.com/x402/v2/prepare")?;
-        let uri: Uri = "/x402/v2/prepare".parse()?;
+        let proof = mint_proof_with_htu("https://attacker.com/zpay/v1/prepare")?;
+        let uri: Uri = "/zpay/v1/prepare".parse()?;
         let headers = headers_with("attacker.com", &proof)?;
         let outcome = verify_request_dpop("POST", &uri, &headers, &replay, &expectations).await;
         let Err(err) = outcome else {
@@ -1218,8 +1952,8 @@ mod host_pinning_tests {
             expected_host: Some("zpay.example.com".to_owned()),
         };
         let replay = dpop::InMemoryReplayStore::new();
-        let proof = mint_proof_with_htu("https://zpay.example.com/x402/v2/prepare")?;
-        let uri: Uri = "/x402/v2/prepare".parse()?;
+        let proof = mint_proof_with_htu("https://zpay.example.com/zpay/v1/prepare")?;
+        let uri: Uri = "/zpay/v1/prepare".parse()?;
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("dpop"),

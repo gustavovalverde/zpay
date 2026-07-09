@@ -3,7 +3,7 @@
 //! Reads `WalletQuery.TransactionById` (placement, raw transaction)
 //! plus `WalletQuery.TransparentOutputsByOutpoint` (prevout
 //! resolution). Mirrors the connection-management pattern from
-//! [`super::zinder_oracle`] and [`super::zinder_broadcast`]: lazy
+//! [`super::zinder_oracle`] and [`super::zinder_submitter`]: lazy
 //! channel construction, HTTP/2 keepalive, and channel-self-heal on
 //! transport-class failures.
 //!

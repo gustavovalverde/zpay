@@ -38,15 +38,12 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-ulid.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
 zally-core = { workspace = true, features = ["serde"] }
 zally-keys.workspace = true
+zally-pczt.workspace = true
 zally-storage.workspace = true
 zally-wallet = { workspace = true, features = ["zinder"] }
-zinder-client.workspace = true
-zinder-proto.workspace = true
-zpay-core.workspace = true
 zpay-store.workspace = true
 zspend-core.workspace = true
 

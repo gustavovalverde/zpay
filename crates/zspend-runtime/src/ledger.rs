@@ -33,6 +33,8 @@
 //! `StoreConnection` is the connection path already exercised in
 //! `zpay-runtime` under that same constraint.
 
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -93,7 +95,7 @@ pub(crate) enum LedgerError {
 /// Cloning is cheap; clones share the same connection and serialization lock.
 #[derive(Clone)]
 pub(crate) struct UsageLedger {
-    connection: StoreConnection,
+    backend: UsageLedgerBackend,
     /// Serializes every ledger operation against the shared connection.
     /// `reserve_at` holds an open multi-statement `BEGIN IMMEDIATE ..
     /// COMMIT` span; a `commit` or `release` issued on the same connection
@@ -101,6 +103,29 @@ pub(crate) struct UsageLedger {
     /// into it, so every operation (not just the transaction) takes this
     /// lock for its whole body.
     lock: Arc<Mutex<()>>,
+}
+
+#[derive(Clone)]
+enum UsageLedgerBackend {
+    Libsql(StoreConnection),
+    #[cfg(test)]
+    Ephemeral(Arc<Mutex<BTreeMap<String, EphemeralLedgerEntry>>>),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct EphemeralLedgerEntry {
+    intent_hash: String,
+    state: EphemeralLedgerState,
+    response: Option<SignPaymentResponse>,
+    reserved_at_ms: i64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EphemeralLedgerState {
+    Pending,
+    Completed,
 }
 
 impl UsageLedger {
@@ -124,9 +149,17 @@ impl UsageLedger {
             })?;
         run_migrations(&connection).await?;
         Ok(Self {
-            connection,
+            backend: UsageLedgerBackend::Libsql(connection),
             lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ephemeral_for_tests() -> Self {
+        Self {
+            backend: UsageLedgerBackend::Ephemeral(Arc::new(Mutex::new(BTreeMap::new()))),
+            lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Reserves `jti` against `intent_hash` before signing.
@@ -148,9 +181,27 @@ impl UsageLedger {
         intent_hash: &str,
         now_ms: i64,
     ) -> Result<Reservation, LedgerError> {
+        match &self.backend {
+            UsageLedgerBackend::Libsql(connection) => {
+                self.reserve_libsql_at(connection, jti, intent_hash, now_ms)
+                    .await
+            }
+            #[cfg(test)]
+            UsageLedgerBackend::Ephemeral(entries) => {
+                reserve_ephemeral_at(entries, jti, intent_hash, now_ms).await
+            }
+        }
+    }
+
+    async fn reserve_libsql_at(
+        &self,
+        connection: &StoreConnection,
+        jti: &str,
+        intent_hash: &str,
+        now_ms: i64,
+    ) -> Result<Reservation, LedgerError> {
         let guard = self.lock.lock().await;
-        let transaction = self
-            .connection
+        let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(statement)?;
@@ -190,11 +241,42 @@ impl UsageLedger {
         intent_hash: &str,
         response: &SignPaymentResponse,
     ) -> Result<(), LedgerError> {
+        match &self.backend {
+            UsageLedgerBackend::Libsql(connection) => {
+                self.commit_libsql(connection, jti, intent_hash, response)
+                    .await
+            }
+            #[cfg(test)]
+            UsageLedgerBackend::Ephemeral(entries) => {
+                {
+                    let mut entries = entries.lock().await;
+                    entries.insert(
+                        jti.to_owned(),
+                        EphemeralLedgerEntry {
+                            intent_hash: intent_hash.to_owned(),
+                            state: EphemeralLedgerState::Completed,
+                            response: Some(response.clone()),
+                            reserved_at_ms: now_ms(),
+                        },
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn commit_libsql(
+        &self,
+        connection: &StoreConnection,
+        jti: &str,
+        intent_hash: &str,
+        response: &SignPaymentResponse,
+    ) -> Result<(), LedgerError> {
         let json = serde_json::to_string(response).map_err(|err| LedgerError::Statement {
             reason: format!("signed payload did not serialize: {err}"),
         })?;
         let guard = self.lock.lock().await;
-        self.connection
+        connection
             .execute(
                 "INSERT INTO usage_ledger (jti, intent_hash, state, response_json, reserved_at_ms) \
                  VALUES (?1, ?2, 'completed', ?3, ?4) \
@@ -214,8 +296,31 @@ impl UsageLedger {
     /// retry with the same `jti` sees [`Reservation::Fresh`]. A committed row is
     /// the single-use record and is left untouched.
     pub(crate) async fn release(&self, jti: &str) -> Result<(), LedgerError> {
+        match &self.backend {
+            UsageLedgerBackend::Libsql(connection) => self.release_libsql(connection, jti).await,
+            #[cfg(test)]
+            UsageLedgerBackend::Ephemeral(entries) => {
+                {
+                    let mut entries = entries.lock().await;
+                    if entries
+                        .get(jti)
+                        .is_some_and(|entry| entry.state == EphemeralLedgerState::Pending)
+                    {
+                        entries.remove(jti);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn release_libsql(
+        &self,
+        connection: &StoreConnection,
+        jti: &str,
+    ) -> Result<(), LedgerError> {
         let guard = self.lock.lock().await;
-        self.connection
+        connection
             .execute(
                 "DELETE FROM usage_ledger WHERE jti = ?1 AND state = 'pending'",
                 params![jti],
@@ -225,6 +330,61 @@ impl UsageLedger {
         drop(guard);
         Ok(())
     }
+}
+
+#[cfg(test)]
+async fn reserve_ephemeral_at(
+    entries: &Mutex<BTreeMap<String, EphemeralLedgerEntry>>,
+    jti: &str,
+    intent_hash: &str,
+    now_ms: i64,
+) -> Result<Reservation, LedgerError> {
+    let mut entries = entries.lock().await;
+    let reservation = if let Some(entry) = entries.get_mut(jti) {
+        match entry.state {
+            EphemeralLedgerState::Completed => {
+                if entry.intent_hash == intent_hash {
+                    entry.response.clone().map_or_else(
+                        || {
+                            Err(LedgerError::RowMalformed {
+                                reason: format!("completed jti {jti} has no stored response"),
+                            })
+                        },
+                        |response| Ok(Reservation::Completed(response)),
+                    )
+                } else {
+                    Ok(Reservation::IntentConflict)
+                }
+            }
+            EphemeralLedgerState::Pending => {
+                if entry.intent_hash == intent_hash {
+                    let ttl_ms =
+                        i64::try_from(PENDING_RESERVATION_TTL.as_millis()).unwrap_or(i64::MAX);
+                    if now_ms.saturating_sub(entry.reserved_at_ms) >= ttl_ms {
+                        entry.reserved_at_ms = now_ms;
+                        Ok(Reservation::Fresh)
+                    } else {
+                        Ok(Reservation::Pending)
+                    }
+                } else {
+                    Ok(Reservation::IntentConflict)
+                }
+            }
+        }
+    } else {
+        entries.insert(
+            jti.to_owned(),
+            EphemeralLedgerEntry {
+                intent_hash: intent_hash.to_owned(),
+                state: EphemeralLedgerState::Pending,
+                response: None,
+                reserved_at_ms: now_ms,
+            },
+        );
+        Ok(Reservation::Fresh)
+    };
+    drop(entries);
+    reservation
 }
 
 /// One `usage_ledger` row read back during a reserve.
@@ -370,7 +530,7 @@ mod tests {
     fn fixture_response(tx_id: &str) -> SignPaymentResponse {
         SignPaymentResponse {
             signed_payload: SignedPayloadWire {
-                format: "raw-zcash-v5".to_owned(),
+                format: "pczt-v2-extractable".to_owned(),
                 bytes: "AAAA".to_owned(),
                 tx_id: tx_id.to_owned(),
                 fee: AmountWire {

@@ -28,6 +28,7 @@ ARG SOURCE_DATE_EPOCH
 ARG GIT_SHA
 ARG BUILD_TIME
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -77,12 +78,13 @@ COPY --link docker/start.sh ./start.sh
 
 RUN groupadd --gid ${APP_GID} ${APP_USER} && \
     useradd --uid ${APP_UID} --gid ${APP_USER} --shell /sbin/nologin ${APP_USER} && \
-    mkdir -p /var/lib/zpay && \
+    mkdir -p /var/lib/zpay /opt/zpay-home/.zcash-params /home/zpay/.zcash-params && \
     touch /var/lib/zpay/.keep && \
     chmod +x start.sh && \
-    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zpay
+    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zpay /opt/zpay-home /home/zpay
 
 ENV RUST_LOG=info \
+    HOME=/opt/zpay-home \
     ZPAY_SERVER__BIND_ADDR=0.0.0.0:8080 \
     ZPAY_OPS__BIND_ADDR=0.0.0.0:9295 \
     ZPAY_NETWORK=testnet \

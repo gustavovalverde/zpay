@@ -34,7 +34,7 @@ async function handlePurchase(input: PurchaseInput, ctx: McpCtx) {
 }
 ```
 
-`purchaseViaZpay` calls zpay's `/x402/v2/prepare` and `/x402/v2/settle` with the same agent assertion + DPoP envelope already used for the Base flow.
+`purchaseViaZpay` calls zpay's `/zpay/v1/prepare` and `/zpay/v1/settle` with the same agent assertion + DPoP envelope already used for the Base flow.
 
 zentity registers `zcash_testnet` in `apps/web/src/lib/blockchain/networks.ts` with `paymentScheme: "zcash"`. The CIBA `authorization_details` propagation in `customGrantTypeHandlers/ciba.ts` handles `scheme: "zcash"`, `amount.currency: "ZEC"`, `payTo: "u1..."`, `challengeId`, `memoChallengeHash`, and `minComplianceLevel`.
 

@@ -212,7 +212,7 @@ NULL`; the partial UNIQUE INDEX `prepared_tx_idempotency_idx` switches
 from `(payee_id, idempotency_key)` to `(agent_dpop_jkt,
 idempotency_key) WHERE idempotency_key IS NOT NULL`. A new DPoP
 middleware in `zpay-x402::dpop` verifies an ES256 proof on every
-`POST /x402/v2/prepare` and `POST /x402/v2/settle` request, extracts
+`POST /zpay/v1/prepare` and `POST /zpay/v1/settle` request, extracts
 the RFC 7638 JWK thumbprint, and threads it through `propose` and
 `submit_settlement`. Settle compares the verified jkt against the
 prepared row and refuses any mismatch with 403 `dpop_mismatch`. The

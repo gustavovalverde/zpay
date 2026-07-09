@@ -33,7 +33,7 @@ pub enum TipError {
 }
 
 /// Snapshot returned by [`ChainTipOracle::current_tip`] and surfaced
-/// verbatim via `GET /x402/v2/tip`.
+/// verbatim via `GET /zpay/v1/tip`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainTip {
     /// The network the tip belongs to.

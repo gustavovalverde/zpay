@@ -1,0 +1,42 @@
+[package]
+name = "zpay-demo"
+description = "Local demo gateway for the zpay Zcash x402 checkout UI."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "x402", "demo", "testnet", "zpay"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zpay-demo"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+futures.workspace = true
+hex.workspace = true
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+p256 = { workspace = true, features = ["pkcs8", "pem"] }
+parking_lot.workspace = true
+rand_core = { version = "0.6", features = ["std"] }
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zally-chain.workspace = true
+zally-core.workspace = true
+zally-keys.workspace = true
+zally-storage.workspace = true
+zally-wallet.workspace = true
+zpay-core.workspace = true
+zspend-core.workspace = true
