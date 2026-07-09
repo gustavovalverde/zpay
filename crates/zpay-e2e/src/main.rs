@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
@@ -121,8 +121,10 @@ enum Command {
         /// authoritative value that flows through the URI.
         #[arg(long, default_value_t = 10_000)]
         amount_zat: u64,
-        /// Maximum seconds to wait for the oracle to observe a
-        /// confirmation before exiting.
+        /// Lifecycle state zpay must observe before the command exits.
+        #[arg(long, value_enum, default_value_t = SettlementCompletion::Mined)]
+        settlement_completion: SettlementCompletion,
+        /// Maximum seconds to wait for the requested lifecycle state.
         #[arg(long, default_value_t = 600)]
         poll_seconds: u64,
     },
@@ -150,8 +152,10 @@ enum Command {
         /// Maximum seconds the minted authorization remains valid.
         #[arg(long, default_value_t = 120)]
         token_ttl_seconds: u64,
-        /// Maximum seconds to wait for the oracle to observe a
-        /// confirmation before exiting.
+        /// Lifecycle state zpay must observe before the command exits.
+        #[arg(long, value_enum, default_value_t = SettlementCompletion::Mined)]
+        settlement_completion: SettlementCompletion,
+        /// Maximum seconds to wait for the requested lifecycle state.
         #[arg(long, default_value_t = 600)]
         poll_seconds: u64,
         /// Base URL for the external transaction visibility check.
@@ -162,6 +166,34 @@ enum Command {
         )]
         zexplorer_tx_url: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SettlementCompletion {
+    /// A mined transaction with at least one confirmation.
+    Mined,
+    /// The configured finality depth is reached.
+    Final,
+    /// Zinder's settled tip has passed the mined transaction block.
+    Settled,
+}
+
+impl SettlementCompletion {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Mined => "mined",
+            Self::Final => "final",
+            Self::Settled => "settled",
+        }
+    }
+
+    fn is_observed(self, payment_status: &PaymentStatusData) -> bool {
+        match self {
+            Self::Mined => payment_status.confirmation_count.unwrap_or(0) >= 1,
+            Self::Final => payment_status.status == "final",
+            Self::Settled => payment_status.settled,
+        }
+    }
 }
 
 struct HarnessContext {
@@ -244,6 +276,7 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
             payee_id,
             recipient_address,
             amount_zat,
+            settlement_completion,
             poll_seconds,
         } => {
             run_flow(
@@ -254,6 +287,7 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
                 payee_id,
                 recipient_address,
                 amount_zat,
+                settlement_completion,
                 poll_seconds,
                 network,
                 &network_label,
@@ -267,6 +301,7 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
             issuer_kid,
             zspend_public_url,
             token_ttl_seconds,
+            settlement_completion,
             poll_seconds,
             zexplorer_tx_url,
         } => {
@@ -279,6 +314,7 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
                 issuer_key_path: &issuer_key_path,
                 issuer_kid: &issuer_kid,
                 token_ttl_seconds,
+                settlement_completion,
                 poll_seconds,
                 zexplorer_tx_url: &zexplorer_tx_url,
                 network,
@@ -404,6 +440,7 @@ async fn open_or_bootstrap_wallet(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "one-shot harness; splitting would obscure the linear flow"
 )]
 async fn run_flow(
@@ -414,6 +451,7 @@ async fn run_flow(
     payee_id: String,
     recipient_address: Option<String>,
     amount_zat: u64,
+    settlement_completion: SettlementCompletion,
     poll_seconds: u64,
     network: Network,
     network_label: &str,
@@ -504,7 +542,13 @@ async fn run_flow(
         "send_payment returned",
     );
 
-    poll_until_confirmed(zpay_url, &prepared.payment_id, poll_seconds).await?;
+    wait_for_settlement_completion(
+        zpay_url,
+        &prepared.payment_id,
+        settlement_completion,
+        poll_seconds,
+    )
+    .await?;
     Ok(())
 }
 
@@ -517,6 +561,7 @@ struct AgentRunInputs<'a> {
     issuer_key_path: &'a std::path::Path,
     issuer_kid: &'a str,
     token_ttl_seconds: u64,
+    settlement_completion: SettlementCompletion,
     poll_seconds: u64,
     zexplorer_tx_url: &'a str,
     network: Network,
@@ -586,6 +631,13 @@ async fn run_agent_signed_flow(inputs: AgentRunInputs<'_>) -> Result<(), Harness
         )));
     }
     confirm_x402_lifecycle_record(inputs.zpay_url, &prepared.payment_id, &settled_tx_id).await?;
+    wait_for_settlement_completion(
+        inputs.zpay_url,
+        &prepared.payment_id,
+        inputs.settlement_completion,
+        inputs.poll_seconds,
+    )
+    .await?;
     check_zexplorer(
         inputs.network,
         inputs.zexplorer_tx_url,
@@ -986,9 +1038,10 @@ fn chain_reference(network: Network) -> &'static str {
     }
 }
 
-async fn poll_until_confirmed(
+async fn wait_for_settlement_completion(
     zpay_url: &str,
     payment_id: &str,
+    settlement_completion: SettlementCompletion,
     poll_seconds: u64,
 ) -> Result<(), HarnessError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(poll_seconds);
@@ -1010,19 +1063,24 @@ async fn poll_until_confirmed(
             .await
             .map_err(|err| HarnessError::Http(err.to_string()))?;
         let summary = format!(
-            "status={} confirmation_count={:?} mined_height={:?}",
-            body.status, body.confirmation_count, body.mined_block_height,
+            "status={} confirmation_count={:?} mined_height={:?} settled={}",
+            body.status, body.confirmation_count, body.mined_block_height, body.settled,
         );
         if summary != last_status {
             info!(?summary, "payment status");
             last_status = summary;
         }
-        if body.confirmation_count.unwrap_or(0) >= 1 {
-            info!("first confirmation observed; harness exiting");
+        if settlement_completion.is_observed(&body) {
+            info!(
+                settlement_completion = settlement_completion.label(),
+                "requested lifecycle completion observed"
+            );
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            return Err(HarnessError::PollTimedOut);
+            return Err(HarnessError::SettlementCompletionTimedOut {
+                settlement_completion: settlement_completion.label(),
+            });
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
@@ -1358,6 +1416,8 @@ struct PaymentStatusData {
     #[serde(default)]
     mined_block_height: Option<u64>,
     #[serde(default)]
+    settled: bool,
+    #[serde(default)]
     broadcast_outcome: Option<BroadcastOutcomeBody>,
 }
 
@@ -1432,8 +1492,47 @@ enum HarnessError {
     Idempotency(String),
     #[error("zatoshi amount invalid: {0}")]
     Zat(String),
-    #[error("polling /payments/{{payment_id}} timed out before a confirmation was observed")]
-    PollTimedOut,
+    #[error("polling /payments/{{payment_id}} timed out before {settlement_completion} completion")]
+    SettlementCompletionTimedOut { settlement_completion: &'static str },
     #[error("unsupported --network value: {0} (expected 'testnet' or 'regtest')")]
     NetworkInvalid(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PaymentStatusData, SettlementCompletion};
+
+    fn payment_status(
+        status: &str,
+        confirmation_count: Option<u32>,
+        settled: bool,
+    ) -> PaymentStatusData {
+        PaymentStatusData {
+            payment_id: "payment-id".to_owned(),
+            status: status.to_owned(),
+            confirmation_count,
+            mined_block_height: Some(4_156_026),
+            settled,
+            broadcast_outcome: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_completion_distinguishes_mined_final_and_settled() {
+        let mined = payment_status("mined", Some(1), false);
+        let final_payment = payment_status("final", Some(3), false);
+        let settled_payment = payment_status("final", Some(100), true);
+
+        assert!(SettlementCompletion::Mined.is_observed(&mined));
+        assert!(!SettlementCompletion::Final.is_observed(&mined));
+        assert!(!SettlementCompletion::Settled.is_observed(&mined));
+
+        assert!(SettlementCompletion::Mined.is_observed(&final_payment));
+        assert!(SettlementCompletion::Final.is_observed(&final_payment));
+        assert!(!SettlementCompletion::Settled.is_observed(&final_payment));
+
+        assert!(SettlementCompletion::Mined.is_observed(&settled_payment));
+        assert!(SettlementCompletion::Final.is_observed(&settled_payment));
+        assert!(SettlementCompletion::Settled.is_observed(&settled_payment));
+    }
 }

@@ -6,7 +6,7 @@ Zcash lifecycle on testnet:
 1. zpay prepares a ZEC payment.
 2. a real zally wallet signs the transaction.
 3. zpay settles the signed bytes through zinder.
-4. zpay reports the payment as mined or final.
+4. zpay reports the payment as settled by zinder's chain authority.
 5. zexplorer shows the transaction.
 
 ## Prerequisites
@@ -231,11 +231,12 @@ cargo run -p zpay-e2e --locked -- \
   --birthday "$BIRTHDAY_HEIGHT" \
   run \
   --payee-id aether-demo \
-  --poll-seconds 600
+  --settlement-completion settled \
+  --poll-seconds 7200
 ```
 
 The command should print a `payment_id` and transaction id. It passes when
-zpay observes the transaction mined before `--poll-seconds` expires.
+zpay reports `settled: true` before `--poll-seconds` expires.
 
 For the official x402 path, run the agent-signed flow against zspend:
 
@@ -253,13 +254,21 @@ cargo run -p zpay-e2e --locked -- \
   --audience "${ZSPEND_AUDIENCE:-urn:zpay:zspend:local-dev}" \
   --issuer-key-path "${ZPAY_E2E_ISSUER_KEY_PATH:-.tmp/zpay-e2e/dev-issuer-ed25519.pem}" \
   --issuer-kid "${ZPAY_E2E_ISSUER_KID:-zpay-e2e-dev}" \
-  --poll-seconds 600
+  --settlement-completion settled \
+  --poll-seconds 7200
 ```
 
 The x402 command passes when zspend returns `pczt-v2-extractable`, zpay
 accepts `/x402/v2/verify`, zpay accepts `/x402/v2/settle`, the zpay lifecycle
 status records the settled transaction id for the prepared payment, and
-zexplorer returns HTTP 200 for that transaction.
+zpay reports `settled: true` and zexplorer returns HTTP 200 for that
+transaction.
+
+`zpay-e2e` defaults to `--settlement-completion mined` for short diagnostic
+runs. Use `final` when the configured zpay finality depth is sufficient. Use
+`settled` for an end-to-end acceptance gate: it waits until zinder's settled
+tip has passed the transaction's mined block. This can take substantially
+longer than the normal finality depth.
 
 ## Verify the payment
 
@@ -273,11 +282,12 @@ curl -fsS "$ZPAY_URL/zpay/v1/payments/$PAYMENT_ID" | jq .
 
 Expected:
 
-- `status` is `mined` or `final`.
+- `status` is `final`.
 - `broadcast_outcome.kind` is `accepted` or `duplicate`.
 - `broadcast_outcome.transaction_id` is present.
 - `mined_block_height` is present.
 - `confirmation_count` is at least `1`.
+- `settled` is `true`.
 
 Check zexplorer:
 
@@ -293,7 +303,7 @@ curl -fsSI "https://zexplorer.app/testnet/tx/$PAYMENT_TXID" | sed -n '1,12p'
 Expected: HTTP 200.
 
 `status: "final"` means the transaction reached the configured finality depth.
-It is not the same as `settled: true`; `settled` becomes true only after the
+It is not the same as `settled: true`; the strict e2e command waits until the
 mined block is at or below zinder's settled tip.
 
 ## Useful troubleshooting
