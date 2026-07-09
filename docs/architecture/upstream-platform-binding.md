@@ -15,14 +15,14 @@ zpay depends on:
 | Crate | Used by | For |
 |-------|---------|-----|
 | `zally-core` | `zpay-core`, `zspend-*` | `Zatoshis`, `TxId`, `Memo`, `Network`, `SignedPayload` newtypes. |
-| `zally-chain` | `zpay-core`, `zpay-runtime`, `zspend-runtime` | `Submitter`, `ChainSource`, `ZinderChainSource`. |
+| `zally-chain` | `zpay-core`, `zpay-runtime`, `zspend-runtime` | `Submitter`, `ChainSource`, `ZinderChainSource`, `parse_transaction_expiry_height`. |
 | `zally-keys` | `zspend-runtime` | `SeedSealing` trait, `AgeFileSealing`, `SealingPosture`. |
-| `zally-storage` | `zpay-core` | `parse_v5_expiry_height` (the settle expiry gate). |
+| `zally-storage` | `zpay-demo`, `zpay-e2e`, `zspend-runtime` | `Sqlite` wallet database adapter. |
 | `zally-wallet` | `zspend-runtime` | `Wallet`, `SyncDriver`, transaction proposal and signing. |
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
 Pin: workspace `Cargo.toml` pins one git rev for every zally crate,
-currently `8f6e536` (upstream Ironwood stack alignment). Bumps land in their
+currently `3d2b823` (chain-plane transaction expiry parser). Bumps land in their
 own PR.
 
 ## zinder

@@ -214,7 +214,7 @@ Revisit only if a concrete consumer asks for the collapse.
 The `/settle` well-formedness gate parses the signed transaction bytes
 through zally (`parse_signed_expiry_height` in
 `crates/zpay-core/src/settle.rs` delegates to
-`zally_storage::parse_v5_expiry_height`), which calls
+`zally_chain::parse_transaction_expiry_height`), which calls
 `zcash_primitives::transaction::Transaction::read`. That reader dispatches
 on the version header it reads from the wire: a v5 transaction and a v6
 (NU6.3/Ironwood) transaction both carry the consensus branch id and the

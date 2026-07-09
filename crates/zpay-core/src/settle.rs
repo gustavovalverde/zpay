@@ -37,8 +37,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zally_chain::parse_transaction_expiry_height;
 use zally_pczt::{Extractor, PcztBytes};
-use zally_storage::parse_v5_expiry_height;
 use zcash_keys::address::{Address as ParsedZcashAddress, Receiver};
 
 use crate::broadcast::BroadcastOutcome;
@@ -597,19 +597,19 @@ fn validate_raw_tx_hex(raw_tx_hex: &str) -> Result<(), SettleError> {
     Ok(())
 }
 
-/// Parse `raw_tx_hex` as a v5 Zcash transaction and return its
+/// Parse `raw_tx_hex` as a Zcash transaction and return its
 /// `expiry_height`.
 ///
-/// Delegates to [`zally_storage::parse_v5_expiry_height`] so the read
-/// path shares a `zcash_primitives` version with the write path. The
-/// previous local implementation pinned a different `zcash_primitives`
-/// release than zally's writer, opening a version-skew window where a
-/// ZIP-225-valid transaction zally emitted could fail to re-parse here.
+/// Delegates to [`zally_chain::parse_transaction_expiry_height`], which
+/// shares the librustzcash parser family with zally's transaction writer
+/// without pulling the wallet `SQLite` backend into the facilitator core.
 fn parse_signed_expiry_height(raw_tx_hex: &str) -> Result<u32, SettleError> {
     let raw_bytes = hex::decode(raw_tx_hex).map_err(|_| SettleError::RawTxHexInvalid)?;
-    parse_v5_expiry_height(&raw_bytes).map_err(|err| SettleError::TransactionMalformed {
-        reason: err.to_string(),
-    })
+    parse_transaction_expiry_height(&raw_bytes)
+        .map(zally_core::BlockHeight::as_u32)
+        .map_err(|err| SettleError::TransactionMalformed {
+            reason: err.to_string(),
+        })
 }
 
 #[cfg(test)]

@@ -78,13 +78,13 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
-zally-pczt = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "8f6e53610e7ad9c6bee021ad51f7057b62ef6847", features = ["zinder"] }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f" }
+zally-pczt = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "3d2b8234e068fb81c4729f54ca4b13b34e763e1f", features = ["zinder"] }
 zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
 zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
 

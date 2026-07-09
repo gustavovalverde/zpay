@@ -73,6 +73,13 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2.9.1
 
+      - name: Guard facilitator store linkage
+        run: |
+          if cargo tree -p zpay-store --all-features -e normal | rg --quiet 'libsqlite3-sys'; then
+            printf '%s\n' 'zpay-store must not link zally wallet SQLite'
+            exit 1
+          fi
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version "${CARGO_DENY_VERSION}"
 

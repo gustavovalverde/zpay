@@ -34,7 +34,6 @@ async-trait.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
 zally-core = { workspace = true }
 zally-pczt = { workspace = true }
-zally-storage = { workspace = true }
 parking_lot = { workspace = true, optional = true }
 orchard.workspace = true
 pczt.workspace = true
