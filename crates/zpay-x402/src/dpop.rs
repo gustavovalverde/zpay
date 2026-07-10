@@ -41,8 +41,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
-use url::Url;
+use zpay_dpop::{CanonicalUrlError, canonicalize_http_url};
+
+pub use zpay_dpop::compute_ec_jwk_thumbprint;
 
 /// Maximum clock drift (in seconds) tolerated between the proof's
 /// `iat` claim and the verifier's wall clock.
@@ -89,6 +90,14 @@ pub enum DpopError {
     /// current replay window or the supplied `jti` is empty.
     #[error("DPoP proof replay detected")]
     Replay,
+}
+
+impl From<CanonicalUrlError> for DpopError {
+    fn from(error: CanonicalUrlError) -> Self {
+        Self::InvalidProof {
+            reason: error.to_string(),
+        }
+    }
 }
 
 /// Successful verification result.
@@ -276,7 +285,7 @@ struct ProofClaims {
 /// 9449; the wire layer is expected to forward the verb verbatim.
 ///
 /// `url` is the request URL the caller hit (scheme + host + path).
-/// `canonicalize_url` resolves dot segments, lowercases the host,
+/// `canonicalize_http_url` resolves dot segments, lowercases the host,
 /// strips default ports, and normalizes percent-encoding before
 /// comparing against the proof's `htu` claim.
 ///
@@ -389,8 +398,8 @@ pub async fn verify_dpop_proof(
         });
     }
 
-    let want = canonicalize_url(url)?;
-    let got = canonicalize_url(&claims.htu)?;
+    let want = canonicalize_http_url(url)?;
+    let got = canonicalize_http_url(&claims.htu)?;
     if want != got {
         return Err(DpopError::InvalidProof {
             reason: format!("htu mismatch: expected {want}, got {got}"),
@@ -422,19 +431,6 @@ pub async fn verify_dpop_proof(
     })?;
 
     Ok(VerifiedDpopProof { jkt })
-}
-
-/// Compute the RFC 7638 JWK thumbprint for an EC P-256 key.
-///
-/// The canonical JWK JSON for EC is the lexicographic ordering of the
-/// required members: `{"crv":...,"kty":...,"x":...,"y":...}` with no
-/// whitespace.
-#[must_use]
-pub fn compute_ec_jwk_thumbprint(crv: &str, kty: &str, x: &str, y: &str) -> String {
-    // Lexicographic ordering of required EC JWK members per RFC 7638.
-    let canonical = format!(r#"{{"crv":"{crv}","kty":"{kty}","x":"{x}","y":"{y}"}}"#);
-    let digest = Sha256::digest(canonical.as_bytes());
-    URL_SAFE_NO_PAD.encode(digest)
 }
 
 fn decoding_key_from_ec_jwk(x_b64: &str, y_b64: &str) -> Result<DecodingKey, DpopError> {
@@ -480,42 +476,6 @@ fn abs_drift_seconds(iat_claim: i64, now_secs: i64) -> u64 {
     drift.max(other)
 }
 
-/// Canonicalize a URL for comparison between the inbound request and
-/// the proof's `htu` claim.
-///
-/// Rules applied (all delegated to the `url` crate):
-///
-/// - Scheme is lower-cased and required to be `http` or `https`.
-/// - Host is lower-cased.
-/// - Default ports (`80` for `http`, `443` for `https`) are stripped.
-/// - Dot segments in the path are resolved (`/a/./b` -> `/a/b`,
-///   `/a/../b` -> `/b`).
-/// - Percent-encoded ASCII bytes are normalized to upper-case hex by
-///   the `url` crate's path serializer; both sides therefore agree on
-///   the same percent-encoding for any byte that is itself
-///   percent-encoded. A `%2f` in the proof remains distinct from a
-///   literal `/` in the request URL, so path-traversal attempts that
-///   tunnel through an encoded slash are not silently equated.
-/// - Query and fragment are stripped before comparison.
-fn canonicalize_url(raw: &str) -> Result<String, DpopError> {
-    let mut parsed = Url::parse(raw).map_err(|err| DpopError::InvalidProof {
-        reason: format!("url parse failed: {err}"),
-    })?;
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(DpopError::InvalidProof {
-            reason: format!("url scheme must be http or https, got {scheme}"),
-        });
-    }
-    // The url crate's serializer already lower-cases the host and
-    // strips default ports for `http` and `https` when re-serializing
-    // through `set_port(None)` after a comparison, but the safest path
-    // is to clear query and fragment and let the serializer do its job.
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    Ok(parsed.to_string())
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -524,8 +484,8 @@ fn canonicalize_url(raw: &str) -> Result<String, DpopError> {
 mod tests {
     use super::{
         CLOCK_SKEW_SECONDS, DpopError, InMemoryReplayStore, MAX_JTI_LEN, REPLAY_WINDOW_SECONDS,
-        ReplayOutcome, ReplayStore, canonicalize_url, compute_ec_jwk_thumbprint,
-        current_unix_seconds, verify_dpop_proof,
+        ReplayOutcome, ReplayStore, compute_ec_jwk_thumbprint, current_unix_seconds,
+        verify_dpop_proof,
     };
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -573,17 +533,6 @@ mod tests {
 
         let thumbprint = compute_ec_jwk_thumbprint("P-256", "EC", &x, &y);
         Ok((proof, thumbprint))
-    }
-
-    #[test]
-    fn thumbprint_matches_rfc7638_vector() {
-        let crv = "P-256";
-        let kty = "EC";
-        let x = "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4";
-        let y = "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM";
-        let computed = compute_ec_jwk_thumbprint(crv, kty, x, y);
-        let expected = "cn-I_WNMClehiVp51i_0VpOENW1upEerA8sEam5hn-s";
-        assert_eq!(computed, expected);
     }
 
     #[tokio::test]
@@ -796,62 +745,5 @@ mod tests {
             );
         }
         Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_strips_default_port_https() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com:443/zpay/v1/prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
-        assert_eq!(a, b);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_strips_default_port_http() -> Result<(), DpopError> {
-        let a = canonicalize_url("http://zpay.example.com:80/zpay/v1/prepare")?;
-        let b = canonicalize_url("http://zpay.example.com/zpay/v1/prepare")?;
-        assert_eq!(a, b);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_resolves_dot_segments() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com/zpay/v1/./prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
-        assert_eq!(a, b);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_lowercases_host() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://ZPay.Example.COM/zpay/v1/prepare")?;
-        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
-        assert_eq!(a, b);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_strips_query_and_fragment() -> Result<(), DpopError> {
-        let a = canonicalize_url("https://zpay.example.com/zpay/v1/prepare?k=v#frag")?;
-        let b = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
-        assert_eq!(a, b);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_keeps_encoded_slash_distinct() -> Result<(), DpopError> {
-        // A %2f inside the path must NOT collapse onto a literal '/'.
-        // Otherwise an attacker could tunnel path traversal through an
-        // encoded slash.
-        let encoded = canonicalize_url("https://zpay.example.com/x402/v2%2fprepare")?;
-        let literal = canonicalize_url("https://zpay.example.com/zpay/v1/prepare")?;
-        assert_ne!(encoded, literal);
-        Ok(())
-    }
-
-    #[test]
-    fn canonicalize_url_rejects_non_http_scheme() {
-        let err = canonicalize_url("ftp://zpay.example.com/x").unwrap_err();
-        assert!(matches!(err, DpopError::InvalidProof { .. }));
     }
 }

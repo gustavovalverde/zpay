@@ -16,15 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Parser, Subcommand, ValueEnum};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use p256::ecdsa::SigningKey;
-use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
-use rand_core::OsRng;
+use jsonwebtoken::EncodingKey;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use zally_chain::{
@@ -39,6 +33,11 @@ use zally_keys::{AgeFileSealing, AgeFileSealingOptions};
 use zally_storage::{Sqlite, SqliteOptions};
 use zally_wallet::{PaymentRequest, SendPaymentPlan, Wallet};
 use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
+use zpay_testkit::{
+    AccessTokenGrant, FacilitatorRequest, ResourceInfo, X402PcztPayment, X402SettleResponse,
+    X402VerifyResponse, ZspendSignCall, ZspendSignError, build_x402_pczt_facilitator_request,
+    mint_access_token, request_zspend_signature,
+};
 use zspend_core::{
     Amount, AmountUnit, ChainId, ExpiresAt, IntentHashString, PaymentAuthorization,
     PaymentAuthorizationType, recompute_intent_hash,
@@ -506,7 +505,9 @@ async fn run_flow(
         informational_expiry = chain_tip_height.saturating_add(41),
         "wallet-side tip for orientation only; zpay's tip oracle is authoritative for expiry_height",
     );
-    let zpay_dpop_key = Arc::new(DpopKey::generate()?);
+    let zpay_dpop_key = Arc::new(
+        zpay_testkit::DpopKey::generate().map_err(|err| HarnessError::Jwt(err.to_string()))?,
+    );
     let prepared = call_prepare(zpay_url, &payee_id, network_label, &zpay_dpop_key).await?;
     info!(
         payment_id = %prepared.payment_id,
@@ -568,8 +569,13 @@ struct AgentRunInputs<'a> {
     network_label: &'a str,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the sequential live workflow stays in one place so its lifecycle and error translation remain readable"
+)]
 async fn run_agent_signed_flow(inputs: AgentRunInputs<'_>) -> Result<(), HarnessError> {
-    let zpay_dpop_key = DpopKey::generate()?;
+    let zpay_dpop_key =
+        zpay_testkit::DpopKey::generate().map_err(|err| HarnessError::Jwt(err.to_string()))?;
     let prepared = call_prepare(
         inputs.zpay_url,
         &inputs.payee_id,
@@ -596,25 +602,43 @@ async fn run_agent_signed_flow(inputs: AgentRunInputs<'_>) -> Result<(), Harness
     );
     let authorization = build_agent_authorization(&prepared, inputs.network)?;
     let issuer_key = load_issuer_encoding_key(inputs.issuer_key_path)?;
-    let dpop_key = DpopKey::generate()?;
+    let dpop_key =
+        zpay_testkit::DpopKey::generate().map_err(|err| HarnessError::Jwt(err.to_string()))?;
     let access_token = mint_access_token(&AccessTokenGrant {
         issuer_key: &issuer_key,
+        issuer_algorithm: jsonwebtoken::Algorithm::EdDSA,
         issuer_kid: inputs.issuer_kid,
         audience: inputs.audience,
-        dpop_jkt: &dpop_key.jkt,
+        dpop_jkt: dpop_key.jkt(),
         authorization: &authorization,
         token_ttl_seconds: inputs.token_ttl_seconds,
-    })?;
-    let dpop_proof = dpop_key.mint_access_bound_proof(&access_token, "POST", &sign_url)?;
-
-    let signed = request_zspend_signature(SignPaymentCall {
-        call_sign_url: &call_sign_url,
-        access_token: &access_token,
-        dpop_proof: &dpop_proof,
-        prepared: &prepared,
-        network_label: inputs.network_label,
+        jti_prefix: "zpay-e2e-at",
     })
-    .await?;
+    .map_err(|err| HarnessError::Jwt(err.to_string()))?;
+    let dpop_proof = dpop_key
+        .mint_access_bound_proof(&access_token, "POST", &sign_url, "zpay-e2e-dpop")
+        .map_err(|err| HarnessError::Jwt(err.to_string()))?;
+
+    let zspend_client = reqwest::Client::new();
+    let signed = request_zspend_signature(
+        &zspend_client,
+        ZspendSignCall {
+            call_sign_url: &call_sign_url,
+            access_token: &access_token,
+            dpop_proof: &dpop_proof,
+            payment_uri: &prepared.payment_uri,
+            network_label: inputs.network_label,
+            payment_id: &prepared.payment_id,
+            target_expiry_height: prepared.expiry_height,
+        },
+    )
+    .await
+    .map_err(zspend_sign_error)?;
+    info!(
+        tx_id = %signed.tx_id,
+        pczt_bytes = signed.pczt_byte_count,
+        "zspend returned signed PCZT",
+    );
 
     let facilitator_request = build_x402_facilitator_request(
         inputs.network,
@@ -682,120 +706,58 @@ fn build_agent_authorization(
     Ok(authorization)
 }
 
-struct SignPaymentCall<'a> {
-    call_sign_url: &'a str,
-    access_token: &'a str,
-    dpop_proof: &'a str,
-    prepared: &'a PreparedPayment,
-    network_label: &'a str,
-}
-
-struct AgentSignedPczt {
-    tx_id: String,
-    pczt_base64: String,
-}
-
-async fn request_zspend_signature(
-    call: SignPaymentCall<'_>,
-) -> Result<AgentSignedPczt, HarnessError> {
-    let sign_body = SignPaymentRequestBody {
-        payment_request: WirePaymentRequestBody {
-            scheme: "zip321".to_owned(),
-            request_uri: call.prepared.payment_uri.clone(),
-        },
-        network: call.network_label.to_owned(),
-        payment_id: call.prepared.payment_id.clone(),
-        target_expiry_height: call.prepared.expiry_height,
-    };
-    let client = reqwest::Client::new();
-    let response = client
-        .post(call.call_sign_url)
-        .header("authorization", format!("DPoP {}", call.access_token))
-        .header("dpop", call.dpop_proof)
-        .json(&sign_body)
-        .send()
-        .await
-        .map_err(|err| HarnessError::Http(err.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(HarnessError::SignFailed { status, body: text });
-    }
-    let signed: SignResponseBody = response
-        .json()
-        .await
-        .map_err(|err| HarnessError::Http(err.to_string()))?;
-    if signed.signed.format != "pczt-v2-extractable" {
-        return Err(HarnessError::SignedBytes(format!(
-            "expected pczt-v2-extractable, got {}",
-            signed.signed.format
-        )));
-    }
-    let pczt_bytes = URL_SAFE_NO_PAD
-        .decode(signed.signed.bytes.as_bytes())
-        .map_err(|err| HarnessError::SignedBytes(err.to_string()))?;
-    info!(
-        tx_id = %signed.signed.tx_id,
-        pczt_bytes = pczt_bytes.len(),
-        "zspend returned signed PCZT",
-    );
-    Ok(AgentSignedPczt {
-        tx_id: signed.signed.tx_id,
-        pczt_base64: signed.signed.bytes,
-    })
-}
-
 fn build_x402_facilitator_request(
     network: Network,
     zpay_url: &str,
     prepared: &PreparedPayment,
     pczt_base64: &str,
-) -> Result<serde_json::Value, HarnessError> {
+) -> Result<FacilitatorRequest, HarnessError> {
     let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
     let payment = parsed
         .payments()
         .first()
         .ok_or(HarnessError::PaymentMissing)?;
-    let network_id = x402_network_id(network);
-    let requirements = serde_json::json!({
-        "scheme": "exact",
-        "network": network_id,
-        "amount": payment.amount.as_u64().to_string(),
-        "asset": "ZEC",
-        "payTo": payment.recipient.encoded(),
-        "maxTimeoutSeconds": 120,
-        "extra": {
-            "binding": "x402-zcash-exact-v1",
-            "amountUnit": "zat",
-            "authorizationFormat": "pczt-v2-extractable",
-            "zpayPaymentId": prepared.payment_id.as_str()
-        }
-    });
-    let resource = serde_json::json!({
-        "url": format!("{}/zpay-e2e/payments/{}", zpay_url.trim_end_matches('/'), prepared.payment_id),
-        "description": "zpay e2e x402 payment",
-        "mimeType": "application/json",
-        "serviceName": "zpay-e2e",
-        "tags": ["e2e", "zcash"],
-    });
-    Ok(serde_json::json!({
-        "x402Version": 2,
-        "paymentPayload": {
-            "x402Version": 2,
-            "resource": resource,
-            "accepted": requirements,
-            "payload": {
-                "format": "pczt-v2-extractable",
-                "pczt": pczt_base64,
-            },
-        },
-        "paymentRequirements": requirements,
+    let recipient = payment.recipient.encoded();
+    let resource = ResourceInfo {
+        url: format!(
+            "{}/zpay-e2e/payments/{}",
+            zpay_url.trim_end_matches('/'),
+            prepared.payment_id
+        ),
+        description: Some("zpay e2e x402 payment".to_owned()),
+        mime_type: Some("application/json".to_owned()),
+        service_name: Some("zpay-e2e".to_owned()),
+        tags: vec!["e2e".to_owned(), "zcash".to_owned()],
+        icon_url: None,
+    };
+    Ok(build_x402_pczt_facilitator_request(X402PcztPayment {
+        network,
+        recipient,
+        amount_zat: payment.amount.as_u64(),
+        payment_timeout_seconds: 120,
+        payment_id: &prepared.payment_id,
+        resource: &resource,
+        pczt_base64,
     }))
+}
+
+fn zspend_sign_error(error: ZspendSignError) -> HarnessError {
+    match error {
+        ZspendSignError::Request { reason } | ZspendSignError::ResponseMalformed { reason } => {
+            HarnessError::Http(reason)
+        }
+        ZspendSignError::Rejected { status, body } => HarnessError::SignFailed { status, body },
+        ZspendSignError::SignedFormat { format } => {
+            HarnessError::SignedBytes(format!("expected pczt-v2-extractable, got {format}"))
+        }
+        ZspendSignError::SignedBytes { reason } => HarnessError::SignedBytes(reason),
+        other => HarnessError::Http(other.to_string()),
+    }
 }
 
 async fn verify_x402_payment(
     zpay_url: &str,
-    facilitator_request: &serde_json::Value,
+    facilitator_request: &FacilitatorRequest,
 ) -> Result<(), HarnessError> {
     let client = reqwest::Client::new();
     let verify_url = format!("{}/x402/v2/verify", zpay_url.trim_end_matches('/'));
@@ -810,7 +772,7 @@ async fn verify_x402_payment(
         let text = response.text().await.unwrap_or_default();
         return Err(HarnessError::VerifyFailed { status, body: text });
     }
-    let verify: X402VerifyResponseBody = response
+    let verify: X402VerifyResponse = response
         .json()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
@@ -827,7 +789,7 @@ async fn verify_x402_payment(
 
 async fn settle_x402_payment(
     zpay_url: &str,
-    facilitator_request: &serde_json::Value,
+    facilitator_request: &FacilitatorRequest,
 ) -> Result<String, HarnessError> {
     let client = reqwest::Client::new();
     let settle_url = format!("{}/x402/v2/settle", zpay_url.trim_end_matches('/'));
@@ -842,7 +804,7 @@ async fn settle_x402_payment(
         let text = response.text().await.unwrap_or_default();
         return Err(HarnessError::SettleFailed { status, body: text });
     }
-    let settle: X402SettleResponseBody = response
+    let settle: X402SettleResponse = response
         .json()
         .await
         .map_err(|err| HarnessError::Http(err.to_string()))?;
@@ -861,14 +823,6 @@ async fn settle_x402_payment(
         "x402 settle accepted signed PCZT",
     );
     Ok(tx_id)
-}
-
-fn x402_network_id(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "zcash:mainnet",
-        Network::Regtest(_) => "zcash:regtest",
-        Network::Testnet | _ => "zcash:testnet",
-    }
 }
 
 async fn check_zexplorer(
@@ -914,120 +868,6 @@ fn load_issuer_encoding_key(path: &std::path::Path) -> Result<EncodingKey, Harne
     } else {
         Ok(EncodingKey::from_ed_der(&raw))
     }
-}
-
-struct DpopKey {
-    encoding: EncodingKey,
-    x: String,
-    y: String,
-    jkt: String,
-}
-
-impl DpopKey {
-    fn generate() -> Result<Self, HarnessError> {
-        let signing_key = SigningKey::random(&mut OsRng);
-        let point = signing_key.verifying_key().to_encoded_point(false);
-        let x = URL_SAFE_NO_PAD.encode(
-            point
-                .x()
-                .ok_or_else(|| HarnessError::Jwt("P-256 point missing x coordinate".to_owned()))?,
-        );
-        let y = URL_SAFE_NO_PAD.encode(
-            point
-                .y()
-                .ok_or_else(|| HarnessError::Jwt("P-256 point missing y coordinate".to_owned()))?,
-        );
-        let pem = signing_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|err| HarnessError::Jwt(err.to_string()))?
-            .to_string();
-        let encoding = EncodingKey::from_ec_pem(pem.as_bytes())
-            .map_err(|err| HarnessError::Jwt(err.to_string()))?;
-        let jkt = zspend_core::ec_jwk_thumbprint("P-256", "EC", &x, &y);
-        Ok(Self {
-            encoding,
-            x,
-            y,
-            jkt,
-        })
-    }
-
-    fn mint_proof(&self, method: &str, proof_url: &str) -> Result<String, HarnessError> {
-        self.mint_proof_inner(method, proof_url, None)
-    }
-
-    fn mint_access_bound_proof(
-        &self,
-        access_token: &str,
-        method: &str,
-        proof_url: &str,
-    ) -> Result<String, HarnessError> {
-        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
-        self.mint_proof_inner(method, proof_url, Some(ath))
-    }
-
-    fn mint_proof_inner(
-        &self,
-        method: &str,
-        proof_url: &str,
-        ath: Option<String>,
-    ) -> Result<String, HarnessError> {
-        let mut header = Header::new(Algorithm::ES256);
-        header.typ = Some("dpop+jwt".to_owned());
-        header.jwk = Some(
-            serde_json::from_value(serde_json::json!({
-                "kty": "EC",
-                "crv": "P-256",
-                "x": self.x,
-                "y": self.y,
-            }))
-            .map_err(|err| HarnessError::Jwt(err.to_string()))?,
-        );
-        let mut claims = serde_json::json!({
-            "htm": method,
-            "htu": proof_url,
-            "jti": format!("zpay-e2e-dpop-{}", unix_now_ms()),
-            "iat": unix_now_seconds(),
-        });
-        if let Some(ath) = ath {
-            claims["ath"] = serde_json::Value::String(ath);
-        }
-        encode(&header, &claims, &self.encoding).map_err(|err| HarnessError::Jwt(err.to_string()))
-    }
-}
-
-struct AccessTokenGrant<'a> {
-    issuer_key: &'a EncodingKey,
-    issuer_kid: &'a str,
-    audience: &'a str,
-    dpop_jkt: &'a str,
-    authorization: &'a PaymentAuthorization,
-    token_ttl_seconds: u64,
-}
-
-fn mint_access_token(grant: &AccessTokenGrant<'_>) -> Result<String, HarnessError> {
-    let mut header = Header::new(Algorithm::EdDSA);
-    header.kid = Some(grant.issuer_kid.to_owned());
-    let claims = serde_json::json!({
-        "aud": grant.audience,
-        "jti": format!("zpay-e2e-at-{}", unix_now_ms()),
-        "exp": unix_now_seconds().saturating_add(grant.token_ttl_seconds),
-        "cnf": { "jkt": grant.dpop_jkt },
-        "authorization_details": [grant.authorization],
-    });
-    encode(&header, &claims, grant.issuer_key).map_err(|err| HarnessError::Jwt(err.to_string()))
-}
-
-fn unix_now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-fn unix_now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis())
 }
 
 fn chain_reference(network: Network) -> &'static str {
@@ -1129,7 +969,7 @@ async fn call_prepare(
     zpay_url: &str,
     payee_id: &str,
     network_label: &str,
-    dpop_key: &DpopKey,
+    dpop_key: &zpay_testkit::DpopKey,
 ) -> Result<PreparedPayment, HarnessError> {
     let idempotency_key = format!(
         "zpay-e2e-{}",
@@ -1148,7 +988,9 @@ async fn call_prepare(
     };
     let client = reqwest::Client::new();
     let prepare_url = format!("{}/zpay/v1/prepare", zpay_url.trim_end_matches('/'));
-    let dpop_proof = dpop_key.mint_proof("POST", &prepare_url)?;
+    let dpop_proof = dpop_key
+        .mint_proof("POST", &prepare_url, "zpay-e2e-dpop")
+        .map_err(|err| HarnessError::Jwt(err.to_string()))?;
     let response = client
         .post(&prepare_url)
         .header("dpop", dpop_proof)
@@ -1194,12 +1036,17 @@ struct ZpaySettleSubmitter {
     zpay_url: String,
     payment_id: String,
     network: Network,
-    dpop_key: Arc<DpopKey>,
+    dpop_key: Arc<zpay_testkit::DpopKey>,
     client: reqwest::Client,
 }
 
 impl ZpaySettleSubmitter {
-    fn new(zpay_url: String, payment_id: String, network: Network, dpop_key: Arc<DpopKey>) -> Self {
+    fn new(
+        zpay_url: String,
+        payment_id: String,
+        network: Network,
+        dpop_key: Arc<zpay_testkit::DpopKey>,
+    ) -> Self {
         Self {
             zpay_url,
             payment_id,
@@ -1224,7 +1071,7 @@ impl Submitter for ZpaySettleSubmitter {
         let settle_url = format!("{}/zpay/v1/settle", self.zpay_url.trim_end_matches('/'));
         let dpop_proof = self
             .dpop_key
-            .mint_proof("POST", &settle_url)
+            .mint_proof("POST", &settle_url, "zpay-e2e-dpop")
             .map_err(|err| SubmitterError::Unavailable {
                 reason: err.to_string(),
             })?;
@@ -1283,53 +1130,6 @@ fn decode_txid(tx_id_hex: &str) -> Result<[u8; 32], SubmitterError> {
     bytes.try_into().map_err(|_| SubmitterError::Unavailable {
         reason: "zpay broadcast outcome txid was not 32 bytes".to_owned(),
     })
-}
-
-/// Wire types for `POST /v1/payments/sign`.
-
-#[derive(Debug, Serialize)]
-struct SignPaymentRequestBody {
-    payment_request: WirePaymentRequestBody,
-    network: String,
-    payment_id: String,
-    target_expiry_height: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct WirePaymentRequestBody {
-    scheme: String,
-    #[serde(rename = "value")]
-    request_uri: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SignResponseBody {
-    #[serde(rename = "signed_payload")]
-    signed: SignedSpendWire,
-}
-
-#[derive(Debug, Deserialize)]
-struct SignedSpendWire {
-    format: String,
-    bytes: String,
-    tx_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct X402VerifyResponseBody {
-    is_valid: bool,
-    invalid_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct X402SettleResponseBody {
-    success: bool,
-    error_reason: Option<String>,
-    transaction: Option<String>,
-    network: String,
-    amount: String,
 }
 
 /// Wire types for `/zpay/v1/prepare`.

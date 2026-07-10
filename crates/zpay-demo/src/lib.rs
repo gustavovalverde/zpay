@@ -21,13 +21,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::Stream;
 use futures::stream;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use jsonwebtoken::{Algorithm, EncodingKey};
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
 use parking_lot::Mutex;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, interval_at, timeout};
 use tracing::{debug, error, warn};
@@ -43,6 +42,11 @@ use zally_wallet::{
     PaymentRequest, ProposalPlan, SyncDriver, SyncDriverOptions, SyncHandle, Wallet,
 };
 use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
+use zpay_testkit::{
+    AccessTokenError, AccessTokenGrant, DpopError, DpopKey, ResourceInfo, X402PcztPayment,
+    X402SettleResponse, X402VerifyResponse, ZspendSignCall, ZspendSignError,
+    build_x402_pczt_facilitator_request, mint_access_token, request_zspend_signature,
+};
 use zspend_core::{
     Amount, AmountUnit, ChainId, ExpiresAt, IntentHashString, PaymentAuthorization,
     PaymentAuthorizationType, recompute_intent_hash,
@@ -433,7 +437,7 @@ async fn create_payment_route(
         ));
     }
 
-    let dpop_key = Arc::new(DpopKey::generate()?);
+    let dpop_key = Arc::new(DpopKey::generate().map_err(|error| dpop_key_invalid(&error))?);
     let prepared = call_prepare(&state, &dpop_key).await?;
     let payment_id = prepared.payment_id.clone();
     let stored = StoredPayment {
@@ -625,7 +629,9 @@ async fn call_prepare(state: &DemoState, dpop_key: &DpopKey) -> Result<PreparedP
         "{}/zpay/v1/prepare",
         state.config.zpay_url.trim_end_matches('/')
     );
-    let dpop_proof = dpop_key.mint_proof("POST", &prepare_url)?;
+    let dpop_proof = dpop_key
+        .mint_proof("POST", &prepare_url, "zpay-demo-dpop")
+        .map_err(|error| dpop_proof_invalid(&error))?;
     let response = state
         .client
         .post(prepare_url)
@@ -694,16 +700,18 @@ async fn settle_autopay(
     state.set_stage_override(payment_id, Some(DemoStage::Signing));
     let authorization = build_agent_authorization(&stored.prepared, state.config.network)?;
     let issuer_key = load_or_create_issuer_encoding_key(&state.config)?;
-    let dpop_key = DpopKey::generate()?;
+    let dpop_key = DpopKey::generate().map_err(|error| dpop_key_invalid(&error))?;
     let access_token = mint_access_token(&AccessTokenGrant {
         issuer_key: &issuer_key.encoding,
         issuer_algorithm: issuer_key.algorithm,
         issuer_kid: &state.config.issuer_kid,
         audience: &state.config.zspend_audience,
-        dpop_jkt: &dpop_key.jkt,
+        dpop_jkt: dpop_key.jkt(),
         authorization: &authorization,
         token_ttl_seconds: state.config.token_ttl_seconds,
-    })?;
+        jti_prefix: "zpay-demo-at",
+    })
+    .map_err(|error| access_token_invalid(&error))?;
     let sign_public_url = format!(
         "{}/v1/payments/sign",
         state.config.zspend_public_url.trim_end_matches('/')
@@ -712,17 +720,28 @@ async fn settle_autopay(
         "{}/v1/payments/sign",
         state.config.zspend_url.trim_end_matches('/')
     );
-    let dpop_proof = dpop_key.mint_access_bound_proof(&access_token, "POST", &sign_public_url)?;
+    let dpop_proof = dpop_key
+        .mint_access_bound_proof(&access_token, "POST", &sign_public_url, "zpay-demo-dpop")
+        .map_err(|error| dpop_proof_invalid(&error))?;
     let signed = request_zspend_signature(
-        state,
-        SignPaymentCall {
-            call_sign_url,
-            access_token,
-            dpop_proof,
-            prepared: stored.prepared.clone(),
+        &state.client,
+        ZspendSignCall {
+            call_sign_url: &call_sign_url,
+            access_token: &access_token,
+            dpop_proof: &dpop_proof,
+            payment_uri: &stored.prepared.payment_uri,
+            network_label: &state.config.network_label,
+            payment_id: &stored.prepared.payment_id,
+            target_expiry_height: stored.prepared.expiry_height,
         },
     )
-    .await?;
+    .await
+    .map_err(zspend_sign_error)?;
+    debug!(
+        tx_id = %signed.tx_id,
+        pczt_bytes = signed.pczt_byte_count,
+        "zspend returned signed PCZT",
+    );
 
     state.set_stage_override(payment_id, Some(DemoStage::Settling));
     let transaction_id = settle_x402_pczt(state, &stored.prepared, &signed.pczt_base64).await?;
@@ -851,60 +870,6 @@ fn memo_from_protocol_prefix(memo_bytes: &[u8]) -> Result<Memo, DemoError> {
     Memo::try_from(&memo_bytes).map_err(|err| DemoError::rejected("memo_invalid", err.to_string()))
 }
 
-async fn request_zspend_signature(
-    state: &DemoState,
-    call: SignPaymentCall,
-) -> Result<AgentSignedPczt, DemoError> {
-    let body = SignPaymentRequestBody {
-        payment_request: WirePaymentRequestBody {
-            scheme: "zip321".to_owned(),
-            request_uri: call.prepared.payment_uri,
-        },
-        network: state.config.network_label.clone(),
-        payment_id: call.prepared.payment_id,
-        target_expiry_height: call.prepared.expiry_height,
-    };
-    let response = state
-        .client
-        .post(call.call_sign_url)
-        .header("authorization", format!("DPoP {}", call.access_token))
-        .header("dpop", call.dpop_proof)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|err| DemoError::unavailable("zspend_unavailable", err.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body_text = response.text().await.unwrap_or_default();
-        return Err(DemoError::unavailable(
-            "zspend_sign_failed",
-            format!("zspend /v1/payments/sign returned {status}: {body_text}"),
-        ));
-    }
-    let signed: SignResponseBody = response
-        .json()
-        .await
-        .map_err(|err| DemoError::unavailable("zspend_sign_malformed", err.to_string()))?;
-    if signed.signed.format != "pczt-v2-extractable" {
-        return Err(DemoError::rejected(
-            "signed_format_invalid",
-            format!("expected pczt-v2-extractable, got {}", signed.signed.format),
-        ));
-    }
-    let pczt_bytes = URL_SAFE_NO_PAD
-        .decode(signed.signed.bytes.as_bytes())
-        .map_err(|err| DemoError::rejected("signed_bytes_invalid", err.to_string()))?;
-    debug!(
-        tx_id = %signed.signed.tx_id,
-        pczt_bytes = pczt_bytes.len(),
-        "zspend returned signed PCZT",
-    );
-    Ok(AgentSignedPczt {
-        tx_id: signed.signed.tx_id,
-        pczt_base64: signed.signed.bytes,
-    })
-}
-
 async fn settle_x402_pczt(
     state: &DemoState,
     prepared: &PreparedPayment,
@@ -931,7 +896,7 @@ async fn settle_x402_pczt(
             format!("zpay /x402/v2/settle returned {status}: {body_text}"),
         ));
     }
-    let settle: X402SettleResponseBody = response
+    let settle: X402SettleResponse = response
         .json()
         .await
         .map_err(|err| DemoError::unavailable("settle_malformed", err.to_string()))?;
@@ -949,7 +914,10 @@ async fn settle_x402_pczt(
     })
 }
 
-async fn verify_x402_pczt(state: &DemoState, request: &serde_json::Value) -> Result<(), DemoError> {
+async fn verify_x402_pczt(
+    state: &DemoState,
+    request: &zpay_testkit::FacilitatorRequest,
+) -> Result<(), DemoError> {
     let verify_url = format!(
         "{}/x402/v2/verify",
         state.config.zpay_url.trim_end_matches('/')
@@ -969,7 +937,7 @@ async fn verify_x402_pczt(state: &DemoState, request: &serde_json::Value) -> Res
             format!("zpay /x402/v2/verify returned {status}: {body_text}"),
         ));
     }
-    let verify: X402VerifyResponseBody = response
+    let verify: X402VerifyResponse = response
         .json()
         .await
         .map_err(|err| DemoError::unavailable("verify_malformed", err.to_string()))?;
@@ -988,50 +956,61 @@ fn build_x402_facilitator_request(
     state: &DemoState,
     prepared: &PreparedPayment,
     pczt_base64: &str,
-) -> Result<serde_json::Value, DemoError> {
+) -> Result<zpay_testkit::FacilitatorRequest, DemoError> {
     let parsed = payment_request(prepared, state.config.network)?;
-    let network_id = x402_network_id(state.config.network);
-    let requirements = serde_json::json!({
-        "scheme": "exact",
-        "network": network_id,
-        "amount": parsed.amount.as_u64().to_string(),
-        "asset": "ZEC",
-        "payTo": parsed.recipient.encoded(),
-        "maxTimeoutSeconds": state.config.token_ttl_seconds,
-        "extra": {
-            "binding": "x402-zcash-exact-v1",
-            "amountUnit": "zat",
-            "authorizationFormat": "pczt-v2-extractable",
-            "zpayPaymentId": prepared.payment_id.as_str()
-        }
-    });
-    let resource = serde_json::json!({
-        "url": state.config.resource_uri.clone(),
-        "description": "zpay demo resource",
-        "mimeType": "application/json",
-        "serviceName": "zpay-demo",
-        "tags": ["demo", "zcash"],
-    });
-    Ok(serde_json::json!({
-        "x402Version": 2,
-        "paymentPayload": {
-            "x402Version": 2,
-            "resource": resource,
-            "accepted": requirements,
-            "payload": {
-                "format": "pczt-v2-extractable",
-                "pczt": pczt_base64,
-            },
-        },
-        "paymentRequirements": requirements,
+    let recipient = parsed.recipient.encoded();
+    let resource = ResourceInfo {
+        url: state.config.resource_uri.clone(),
+        description: Some("zpay demo resource".to_owned()),
+        mime_type: Some("application/json".to_owned()),
+        service_name: Some("zpay-demo".to_owned()),
+        tags: vec!["demo".to_owned(), "zcash".to_owned()],
+        icon_url: None,
+    };
+    Ok(build_x402_pczt_facilitator_request(X402PcztPayment {
+        network: state.config.network,
+        recipient,
+        amount_zat: parsed.amount.as_u64(),
+        payment_timeout_seconds: state.config.token_ttl_seconds,
+        payment_id: &prepared.payment_id,
+        resource: &resource,
+        pczt_base64,
     }))
 }
 
-fn x402_network_id(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "zcash:mainnet",
-        Network::Regtest(_) => "zcash:regtest",
-        Network::Testnet | _ => "zcash:testnet",
+fn dpop_key_invalid(error: &DpopError) -> DemoError {
+    DemoError::rejected("dpop_key_invalid", error.to_string())
+}
+
+fn dpop_proof_invalid(error: &DpopError) -> DemoError {
+    DemoError::rejected("dpop_proof_invalid", error.to_string())
+}
+
+fn access_token_invalid(error: &AccessTokenError) -> DemoError {
+    DemoError::rejected("access_token_invalid", error.to_string())
+}
+
+fn zspend_sign_error(error: ZspendSignError) -> DemoError {
+    match error {
+        ZspendSignError::Request { reason } => DemoError::unavailable("zspend_unavailable", reason),
+        ZspendSignError::Rejected { status, body } => DemoError::unavailable(
+            "zspend_sign_failed",
+            format!(
+                "zspend /v1/payments/sign returned {}: {body}",
+                status.as_u16()
+            ),
+        ),
+        ZspendSignError::ResponseMalformed { reason } => {
+            DemoError::unavailable("zspend_sign_malformed", reason)
+        }
+        ZspendSignError::SignedFormat { format } => DemoError::rejected(
+            "signed_format_invalid",
+            format!("expected pczt-v2-extractable, got {format}"),
+        ),
+        ZspendSignError::SignedBytes { reason } => {
+            DemoError::rejected("signed_bytes_invalid", reason)
+        }
+        other => DemoError::unavailable("zspend_sign_malformed", other.to_string()),
     }
 }
 
@@ -1180,20 +1159,6 @@ fn tighten_secret_permissions(path: &Path) -> Result<(), DemoError> {
 #[cfg(not(unix))]
 fn tighten_secret_permissions(_path: &Path) -> Result<(), DemoError> {
     Ok(())
-}
-
-fn mint_access_token(grant: &AccessTokenGrant<'_>) -> Result<String, DemoError> {
-    let mut header = Header::new(grant.issuer_algorithm);
-    header.kid = Some(grant.issuer_kid.to_owned());
-    let claims = serde_json::json!({
-        "aud": grant.audience,
-        "jti": format!("zpay-demo-at-{}", unix_now_ms()),
-        "exp": unix_now_seconds().saturating_add(grant.token_ttl_seconds),
-        "cnf": { "jkt": grant.dpop_jkt },
-        "authorization_details": [grant.authorization],
-    });
-    encode(&header, &claims, grant.issuer_key)
-        .map_err(|err| DemoError::rejected("access_token_invalid", err.to_string()))
 }
 
 async fn parse_faucet_response(response: reqwest::Response) -> Result<FaucetClaimBody, DemoError> {
@@ -1488,160 +1453,14 @@ struct SettlementResponseBody {
     broadcast_outcome: BroadcastOutcomeBody,
 }
 
-#[derive(Debug, Serialize)]
-struct SignPaymentRequestBody {
-    payment_request: WirePaymentRequestBody,
-    network: String,
-    payment_id: String,
-    target_expiry_height: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct WirePaymentRequestBody {
-    scheme: String,
-    #[serde(rename = "value")]
-    request_uri: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SignResponseBody {
-    #[serde(rename = "signed_payload")]
-    signed: SignedSpendWire,
-}
-
-#[derive(Debug, Deserialize)]
-struct SignedSpendWire {
-    format: String,
-    bytes: String,
-    tx_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct X402VerifyResponseBody {
-    is_valid: bool,
-    invalid_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct X402SettleResponseBody {
-    success: bool,
-    error_reason: Option<String>,
-    transaction: Option<String>,
-}
-
 struct ParsedDemoPayment {
     recipient: PaymentRecipient,
     amount: Zatoshis,
 }
 
-struct AgentSignedPczt {
-    tx_id: String,
-    pczt_base64: String,
-}
-
-struct SignPaymentCall {
-    call_sign_url: String,
-    access_token: String,
-    dpop_proof: String,
-    prepared: PreparedPayment,
-}
-
-struct AccessTokenGrant<'a> {
-    issuer_key: &'a EncodingKey,
-    issuer_algorithm: Algorithm,
-    issuer_kid: &'a str,
-    audience: &'a str,
-    dpop_jkt: &'a str,
-    authorization: &'a PaymentAuthorization,
-    token_ttl_seconds: u64,
-}
-
 struct IssuerEncodingKey {
     encoding: EncodingKey,
     algorithm: Algorithm,
-}
-
-struct DpopKey {
-    encoding: EncodingKey,
-    x: String,
-    y: String,
-    jkt: String,
-}
-
-impl DpopKey {
-    fn generate() -> Result<Self, DemoError> {
-        let signing_key = SigningKey::random(&mut OsRng);
-        let point = signing_key.verifying_key().to_encoded_point(false);
-        let x = URL_SAFE_NO_PAD.encode(
-            point
-                .x()
-                .ok_or_else(|| DemoError::rejected("dpop_key_invalid", "P-256 point missing x"))?,
-        );
-        let y = URL_SAFE_NO_PAD.encode(
-            point
-                .y()
-                .ok_or_else(|| DemoError::rejected("dpop_key_invalid", "P-256 point missing y"))?,
-        );
-        let pem = signing_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|err| DemoError::rejected("dpop_key_invalid", err.to_string()))?
-            .to_string();
-        let encoding = EncodingKey::from_ec_pem(pem.as_bytes())
-            .map_err(|err| DemoError::rejected("dpop_key_invalid", err.to_string()))?;
-        let jkt = zspend_core::ec_jwk_thumbprint("P-256", "EC", &x, &y);
-        Ok(Self {
-            encoding,
-            x,
-            y,
-            jkt,
-        })
-    }
-
-    fn mint_proof(&self, method: &str, proof_url: &str) -> Result<String, DemoError> {
-        self.mint_proof_inner(method, proof_url, None)
-    }
-
-    fn mint_access_bound_proof(
-        &self,
-        access_token: &str,
-        method: &str,
-        proof_url: &str,
-    ) -> Result<String, DemoError> {
-        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
-        self.mint_proof_inner(method, proof_url, Some(ath))
-    }
-
-    fn mint_proof_inner(
-        &self,
-        method: &str,
-        proof_url: &str,
-        ath: Option<String>,
-    ) -> Result<String, DemoError> {
-        let mut header = Header::new(Algorithm::ES256);
-        header.typ = Some("dpop+jwt".to_owned());
-        header.jwk = Some(
-            serde_json::from_value(serde_json::json!({
-                "kty": "EC",
-                "crv": "P-256",
-                "x": self.x,
-                "y": self.y,
-            }))
-            .map_err(|err| DemoError::rejected("dpop_proof_invalid", err.to_string()))?,
-        );
-        let mut claims = serde_json::json!({
-            "htm": method,
-            "htu": proof_url,
-            "jti": format!("zpay-demo-dpop-{}", unix_now_ms()),
-            "iat": unix_now_seconds(),
-        });
-        if let Some(ath) = ath {
-            claims["ath"] = serde_json::Value::String(ath);
-        }
-        encode(&header, &claims, &self.encoding)
-            .map_err(|err| DemoError::rejected("dpop_proof_invalid", err.to_string()))
-    }
 }
 
 #[cfg(test)]
@@ -1751,12 +1570,6 @@ async fn resolve_birthday_height(
     Ok(tip
         .as_u32()
         .saturating_sub(DEFAULT_BIRTHDAY_LOOKBACK_BLOCKS))
-}
-
-fn unix_now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn unix_now_ms() -> u128 {

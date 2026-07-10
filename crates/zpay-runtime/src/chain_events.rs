@@ -543,10 +543,10 @@ mod tests {
     #[tokio::test]
     async fn handle_reorg_completes_through_the_observed_then_zero_downgrade_path()
     -> Result<(), Box<dyn std::error::Error>> {
-        let oracle = ZinderConfirmationOracle::connect(
+        let oracle = ZinderConfirmationOracle::new(crate::connect_configured_zinder_chain(
             "http://127.0.0.1:1".to_owned(),
-            zinder_client::Network::ZcashRegtest,
-        )?;
+            "regtest",
+        )?);
         let sink = RuntimeSink {
             oracle: Arc::new(oracle),
             ledger: Arc::new(AnySettlementLedgerStore::Memory(SettlementLedger::new())),

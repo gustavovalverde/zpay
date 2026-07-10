@@ -138,6 +138,12 @@ enum StartupError {
     PlaceholderPayee { payee_id: String },
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ZinderChainConfigError {
+    #[error("invalid zinder endpoint URI: {reason}")]
+    EndpointInvalid { reason: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
     install_tracing()?;
@@ -557,23 +563,10 @@ fn spawn_settlement_reconciliation(
         );
         return Ok(None);
     };
-    let zinder_network = zinder_network_from_str(&config.network)?;
-    let oracle =
-        ZinderConfirmationOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
-            StartupError::Submitter {
-                endpoint: endpoint.clone(),
-                source: Box::new(source),
-            }
-        })?;
-    let oracle = Arc::new(oracle);
-    let chain = RemoteChainIndex::connect(RemoteOpenOptions {
-        endpoint: endpoint.clone(),
-        network: zinder_network,
-    })
-    .map_err(|source| StartupError::Submitter {
-        endpoint,
-        source: Box::new(source),
-    })?;
+    let oracle = Arc::new(ZinderConfirmationOracle::new(
+        connect_configured_zinder_chain(endpoint.clone(), &config.network)?,
+    ));
+    let chain = connect_configured_zinder_chain(endpoint, &config.network)?;
 
     spawn_confirmation_poll_loop(
         Arc::clone(&oracle),
@@ -916,12 +909,10 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, Start
         );
         return Ok(AnySubmitter::Rejecting(zally_network));
     };
-    let zinder_network = zinder_network_from_str(&config.network)?;
-    let client = ZinderSubmitter::connect(endpoint.clone(), zinder_network, zally_network)
-        .map_err(|source| StartupError::Submitter {
-            endpoint,
-            source: Box::new(source),
-        })?;
+    let client = ZinderSubmitter::new(
+        connect_configured_zinder_chain(endpoint, &config.network)?,
+        zally_network,
+    );
     tracing::info!(
         network = %config.network,
         "zinder submitter wired",
@@ -949,13 +940,7 @@ fn build_tip_oracle(config: &ResolvedConfig) -> Result<AnyTipOracle, StartupErro
             config.static_tip_fallback,
         )));
     };
-    let zinder_network = zinder_network_from_str(&config.network)?;
-    let oracle = ZinderTipOracle::connect(endpoint.clone(), zinder_network).map_err(|source| {
-        StartupError::Submitter {
-            endpoint,
-            source: Box::new(source),
-        }
-    })?;
+    let oracle = ZinderTipOracle::new(connect_configured_zinder_chain(endpoint, &config.network)?);
     tracing::info!(
         network = %config.network,
         "zinder chain tip oracle wired",
@@ -1070,6 +1055,23 @@ fn zinder_network_from_str(raw: &str) -> Result<ZinderNetwork, StartupError> {
             provided: other.to_owned(),
         }),
     }
+}
+
+fn connect_configured_zinder_chain(
+    endpoint: String,
+    network: &str,
+) -> Result<RemoteChainIndex, StartupError> {
+    let network = zinder_network_from_str(network)?;
+    RemoteChainIndex::connect(RemoteOpenOptions {
+        endpoint: endpoint.clone(),
+        network,
+    })
+    .map_err(|source| StartupError::Submitter {
+        endpoint,
+        source: Box::new(ZinderChainConfigError::EndpointInvalid {
+            reason: source.to_string(),
+        }),
+    })
 }
 
 /// Concrete submitter variant chosen at startup.
@@ -1669,8 +1671,9 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmationOracle, ConfirmationOutcome, StartupError, is_placeholder_pay_to, parse_truthy,
-        poll_oracle_once, resolve_verify_network, validate_payees,
+        ConfirmationOracle, ConfirmationOutcome, StartupError, connect_configured_zinder_chain,
+        is_placeholder_pay_to, parse_truthy, poll_oracle_once, resolve_verify_network,
+        validate_payees,
     };
     use parking_lot::Mutex;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
@@ -1709,6 +1712,30 @@ mod tests {
             resolve_verify_network(Some("testnet")),
             Ok(PaymentNetwork::Testnet),
         ));
+    }
+
+    #[test]
+    fn configured_chain_rejects_unknown_network_before_endpoint() {
+        let outcome = connect_configured_zinder_chain("not a URI".to_owned(), "unknown");
+        assert!(matches!(
+            outcome,
+            Err(StartupError::NetworkInvalid { ref provided }) if provided == "unknown",
+        ));
+    }
+
+    #[test]
+    fn configured_chain_preserves_endpoint_error() -> Result<(), String> {
+        let outcome = connect_configured_zinder_chain("not a URI".to_owned(), "regtest");
+        let Err(StartupError::Submitter { endpoint, source }) = outcome else {
+            return Err("invalid endpoint must fail before the chain plane is used".to_owned());
+        };
+        assert_eq!(endpoint, "not a URI");
+        assert!(
+            source
+                .to_string()
+                .starts_with("invalid zinder endpoint URI:")
+        );
+        Ok(())
     }
     use zpay_core::chain_status::{ChainStatusCache, ChainStatusView};
     use zpay_core::prepare::PreparedTxCache;

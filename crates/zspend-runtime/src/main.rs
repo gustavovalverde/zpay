@@ -48,7 +48,7 @@ use parking_lot::Mutex;
 use revocation::{RevocationOutcome, RevocationStore};
 use serde::{Deserialize, Serialize};
 use zally_chain::ChainSource;
-use zally_core::{AccountId, BlockHeight, Network, PaymentRecipient};
+use zally_core::{AccountId, BlockHeight, Network};
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions, SealingPosture, SeedSealing as _};
 use zally_pczt::PcztBytes;
 use zally_wallet::{
@@ -1182,7 +1182,7 @@ async fn sign_payment_inner(
         )));
     }
 
-    let recipient_for_plan = clone_recipient(&payment.recipient);
+    let recipient_for_plan = payment.recipient.clone();
     let amount_for_plan = payment.amount;
 
     // Revocation (D-6): consult the revocation cache on the access-token jti
@@ -1379,10 +1379,6 @@ fn classify_intent_divergence(auth: &PaymentAuthorization, parsed_amount: u64) -
             "recomputed intent_hash does not match the signed authorization",
         ))
     }
-}
-
-fn clone_recipient(recipient: &PaymentRecipient) -> PaymentRecipient {
-    recipient.clone()
 }
 
 /// Release a still-pending single-use reservation after a signing failure,

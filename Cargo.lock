@@ -7225,7 +7225,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.11.0-pre.4",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7235,7 +7234,18 @@ dependencies = [
  "zally-storage",
  "zally-wallet",
  "zpay-core",
+ "zpay-testkit",
  "zspend-core",
+]
+
+[[package]]
+name = "zpay-dpop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "sha2 0.11.0-pre.4",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -7243,16 +7253,12 @@ name = "zpay-e2e"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "clap",
  "hex",
  "jsonwebtoken",
- "p256",
- "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.11.0-pre.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7263,6 +7269,7 @@ dependencies = [
  "zally-storage",
  "zally-wallet",
  "zpay-core",
+ "zpay-testkit",
  "zspend-core",
 ]
 
@@ -7308,6 +7315,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zpay-testkit"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "jsonwebtoken",
+ "p256",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0-pre.4",
+ "thiserror 2.0.18",
+ "zally-core",
+ "zpay-x402",
+ "zspend-core",
+]
+
+[[package]]
 name = "zpay-x402"
 version = "0.1.0"
 dependencies = [
@@ -7334,6 +7359,7 @@ dependencies = [
  "zally-chain",
  "zally-core",
  "zpay-core",
+ "zpay-dpop",
 ]
 
 [[package]]
@@ -7352,6 +7378,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "zally-core",
+ "zpay-dpop",
 ]
 
 [[package]]

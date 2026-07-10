@@ -25,11 +25,13 @@ When the order conflicts, DX wins.
 |------|---------|
 | `zpay` | The product, the workspace, the brand. |
 | `zpay-core` | Library crate: protocol-neutral domain types, prepare, oracle, broadcast, status projection, local ZIP-311 verifier, capability registry. |
+| `zpay-dpop` | Library crate: pure RFC 7638 JWK thumbprint and RFC 9449 `htu` canonicalization used by the facilitator and wallet DPoP verifiers. |
 | `zpay-store` | Library crate: libSQL prepared-tx cache and settlement ledger. |
 | `zpay-x402` | Library crate: official x402 v2 facilitator routes, x402 header codecs, and the zpay lifecycle router used by demos and harnesses. |
 | `zpay-runtime` | Binary: composition root, Axum HTTP server, ops listener, env-driven config. |
 | `zpay-e2e` | Binary: end-to-end testnet validator that drives the full lifecycle against a running `zpay-runtime` plus zinder. |
 | `zpay-demo` | Dev-only binary: local browser checkout gateway. It owns demo wallet state and demo credentials, then calls zpay and zspend through their existing HTTP surfaces. |
+| `zpay-testkit` | Dev and test library: DPoP-bound agent payment client fixtures used by `zpay-demo` and `zpay-e2e`. |
 | `zspend-core` | Library crate: service-internal wallet auth types (`payment_authorization` RAR, PRC-7807 problem details, signing policy). |
 | `zspend-runtime` | Binary: the agent-bound wallet that signs under a bounded grant. zpay stays broadcaster-only. See [Proposal-0003](../proposals/0003-agent-wallet-production-architecture.md). |
 | Facilitator | The role zpay plays in a payment: verify, settle, and report supported payment kinds at the official x402 boundary. |

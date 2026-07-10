@@ -626,7 +626,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use futures::StreamExt as _;
     use tokio::sync::broadcast;
     use tokio::time::timeout;
@@ -634,22 +633,16 @@ mod tests {
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
     use zpay_core::broadcast::BroadcastOutcome;
     use zpay_core::chain_status::{ChainStatusCache, ChainStatusView};
-    use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
     use zpay_core::prepare::{PrepareRequest, PreparedTxCache, propose};
     use zpay_core::status::{
         DEFAULT_FINALITY_DEPTH, IntentPosture, PaymentStatus, PaymentStatusSnapshot,
         SettlementLedger, SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status,
     };
     use zpay_core::store::StoreError;
-    use zpay_core::tip::{ChainTipOracle, TipError};
     use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
-    use zpay_core::verify::{
-        AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
-        VerifyError, VerifyResponse,
-    };
 
     use super::{EventStream, PaymentEventHub, ResyncSource, StoreResyncSource};
-    use crate::AppState;
+    use crate::test_state::{TestTipOracle, build_test_app_state};
 
     const UNKNOWN_CHAIN: ChainStatusView = ChainStatusView {
         visible_tip_height: None,
@@ -701,67 +694,6 @@ mod tests {
         }
     }
 
-    struct UnusedChain;
-
-    #[async_trait]
-    impl zally_chain::Submitter for UnusedChain {
-        fn network(&self) -> zally_core::Network {
-            zally_core::Network::Testnet
-        }
-        async fn submit(
-            &self,
-            _raw_tx: &[u8],
-        ) -> Result<zally_chain::SubmitOutcome, zally_chain::SubmitterError> {
-            Err(zally_chain::SubmitterError::Unavailable {
-                reason: "test fixture: submit must not be called".to_owned(),
-            })
-        }
-    }
-
-    struct UnusedVerifier;
-
-    impl PaymentDisclosureVerifier for UnusedVerifier {
-        async fn verify_disclosure<Fetcher>(
-            &self,
-            _disclosure_bytes: &[u8],
-            _fetcher: &Fetcher,
-        ) -> Result<VerifyResponse, VerifyError>
-        where
-            Fetcher: DisclosureFetcher + ?Sized,
-        {
-            Ok(VerifyResponse {
-                cryptographic_verdict: CryptographicVerdict::Inconclusive,
-                inconclusive_reason: None,
-                chain_presence: ChainPresence::OracleUnavailable,
-                amount_reconciliation: AmountReconciliation::NotChecked,
-                transaction_id: None,
-                payment_id: None,
-                disclosed_value_zat: None,
-            })
-        }
-    }
-
-    struct UnusedFetcher;
-
-    impl DisclosureFetcher for UnusedFetcher {
-        async fn fetch_transaction(
-            &self,
-            _txid: [u8; 32],
-        ) -> Result<DisclosedTransaction, FetchError> {
-            Err(FetchError::Unavailable {
-                reason: "test fixture: fetcher must not be called".to_owned(),
-            })
-        }
-    }
-
-    struct FixedTipOracle;
-
-    impl ChainTipOracle for FixedTipOracle {
-        async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
-            Ok(3_217_900)
-        }
-    }
-
     fn valid_prepare_request() -> PrepareRequest {
         PrepareRequest {
             payee_id: PayeeId("aether-ai".to_owned()),
@@ -789,36 +721,6 @@ mod tests {
             }],
         );
         registry
-    }
-
-    fn build_state(
-        cache: Arc<PreparedTxCache>,
-        ledger: Arc<SettlementLedger>,
-        events: Arc<PaymentEventHub>,
-    ) -> AppState<
-        UnusedChain,
-        UnusedVerifier,
-        PreparedTxCache,
-        SettlementLedger,
-        FixedTipOracle,
-        UnusedFetcher,
-    > {
-        AppState::new(
-            cache,
-            ledger,
-            Arc::new(PayeeRegistry::new()),
-            Arc::new(UnusedChain),
-            Arc::new(UnusedVerifier),
-            events,
-            Arc::new(FixedTipOracle),
-            Arc::new(UnusedFetcher),
-            Arc::new(crate::dpop::InMemoryReplayStore::new()),
-            crate::dpop::DpopExpectations::unbound("http"),
-            DEFAULT_FINALITY_DEPTH,
-            Arc::new(ChainStatusCache::new()),
-            Arc::new(crate::RateLimiter::new(0, 0)),
-            false,
-        )
     }
 
     #[test]
@@ -875,7 +777,7 @@ mod tests {
         // `prepared` and the route accepts the id (existence check
         // passes via the prepared_store branch of lookup_payment_status).
         let registry = fixture_registry();
-        let oracle = FixedTipOracle;
+        let oracle = TestTipOracle;
         let preparation = propose(
             valid_prepare_request(),
             "test-jkt-events".to_owned(),
@@ -937,10 +839,10 @@ mod tests {
         let closed = timeout(Duration::from_secs(2), stream.next()).await?;
         assert!(closed.is_none(), "stream must close after settled event");
 
-        // The AppState wiring is exercised indirectly via build_state;
+        // The AppState wiring is exercised indirectly via build_test_app_state;
         // we touch it here to keep the import live and catch breakage
         // if AppState ever changes shape.
-        let _state = build_state(cache, ledger, hub);
+        let _state = build_test_app_state(cache, ledger, hub);
         Ok(())
     }
 
@@ -1126,7 +1028,7 @@ mod tests {
         let hub = Arc::new(PaymentEventHub::new());
 
         let registry = fixture_registry();
-        let oracle = FixedTipOracle;
+        let oracle = TestTipOracle;
         let preparation = propose(
             valid_prepare_request(),
             "test-jkt-events".to_owned(),

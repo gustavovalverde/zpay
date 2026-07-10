@@ -260,6 +260,8 @@ zpay/
   crates/
     zpay-core/              types, lifecycle, traits, ZIP-302 binding,
                               ZIP-311 verifier
+    zpay-dpop/              pure RFC 7638 JWK thumbprint and RFC 9449 htu
+                              canonicalization
     zpay-store/             libSQL impls of PreparedTxStore and
                               SettlementLedgerStore + migrations
     zpay-x402/              x402 v2 HTTP routes, SSE hub, DPoP middleware
@@ -267,6 +269,8 @@ zpay/
                               composition root
     zpay-e2e/               integration harness (zally as the wallet
                               counterparty)
+    zpay-testkit/           dev and test DPoP-bound agent payment client
+                              fixtures shared by zpay-demo and zpay-e2e
     zspend-core/            agent-wallet trust-boundary vocabulary: the
                               payment_authorization RAR, at+jwt and DPoP
                               verification, intent-hash, SigningPolicy

@@ -2,9 +2,11 @@
 members = [
   "crates/zpay-demo",
   "crates/zpay-core",
+  "crates/zpay-dpop",
   "crates/zpay-e2e",
   "crates/zpay-runtime",
   "crates/zpay-store",
+  "crates/zpay-testkit",
   "crates/zpay-x402",
   "crates/zspend-core",
   "crates/zspend-runtime",
@@ -66,10 +68,12 @@ zcash_address = { version = "0.13.0-pre.0" }
 # Internal crates: pinned by version and path so downstream consumers can vendor
 # either form; matches the fauzec workspace convention.
 zpay-core = { version = "0.1.0", path = "crates/zpay-core", default-features = false }
+zpay-dpop = { version = "0.1.0", path = "crates/zpay-dpop" }
 zpay-demo = { version = "0.1.0", path = "crates/zpay-demo" }
 zpay-e2e = { version = "0.1.0", path = "crates/zpay-e2e" }
 zpay-runtime = { version = "0.1.0", path = "crates/zpay-runtime" }
 zpay-store = { version = "0.1.0", path = "crates/zpay-store" }
+zpay-testkit = { version = "0.1.0", path = "crates/zpay-testkit" }
 zpay-x402 = { version = "0.1.0", path = "crates/zpay-x402" }
 zspend-core = { version = "0.1.0", path = "crates/zspend-core" }
 zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }

@@ -842,25 +842,18 @@ where
     F: DisclosureFetcher + 'static,
 {
     let response = 'response: {
-        let jkt = match verify_request_dpop(
-            "POST",
+        let jkt = match accept_lifecycle_write(
             &original_uri,
             &headers,
             state.dpop_replay.as_ref(),
             &state.dpop_expectations,
+            &state.rate_limiter,
         )
         .await
         {
-            Ok(verified) => verified.jkt,
-            Err(err) => break 'response dpop_error_response(&err),
+            Ok(jkt) => jkt,
+            Err(response) => break 'response response,
         };
-
-        if let RateLimitDecision::Limited {
-            retry_after_seconds,
-        } = state.rate_limiter.check_jkt(&jkt)
-        {
-            break 'response rate_limited_response(retry_after_seconds);
-        }
 
         // Header takes precedence over body field. RFC-draft `Idempotency-Key`
         // is the conventional surface; we accept the body field as a fallback
@@ -906,25 +899,18 @@ where
     F: DisclosureFetcher + 'static,
 {
     let response = 'response: {
-        let jkt = match verify_request_dpop(
-            "POST",
+        let jkt = match accept_lifecycle_write(
             &original_uri,
             &headers,
             state.dpop_replay.as_ref(),
             &state.dpop_expectations,
+            &state.rate_limiter,
         )
         .await
         {
-            Ok(verified) => verified.jkt,
-            Err(err) => break 'response dpop_error_response(&err),
+            Ok(jkt) => jkt,
+            Err(response) => break 'response response,
         };
-
-        if let RateLimitDecision::Limited {
-            retry_after_seconds,
-        } = state.rate_limiter.check_jkt(&jkt)
-        {
-            break 'response rate_limited_response(retry_after_seconds);
-        }
 
         match submit_settlement(
             body,
@@ -1410,6 +1396,26 @@ async fn verify_request_dpop(
     dpop::verify_dpop_proof(method, &url, proof, replay_store).await
 }
 
+async fn accept_lifecycle_write(
+    original_uri: &axum::http::Uri,
+    headers: &HeaderMap,
+    replay_store: &(dyn dpop::ReplayStore + '_),
+    expectations: &DpopExpectations,
+    rate_limiter: &RateLimiter,
+) -> Result<String, Response> {
+    let verified = verify_request_dpop("POST", original_uri, headers, replay_store, expectations)
+        .await
+        .map_err(|err| dpop_error_response(&err))?;
+    let jkt = verified.jkt;
+    if let RateLimitDecision::Limited {
+        retry_after_seconds,
+    } = rate_limiter.check_jkt(&jkt)
+    {
+        return Err(rate_limited_response(retry_after_seconds));
+    }
+    Ok(jkt)
+}
+
 fn dpop_error_response(err: &dpop::DpopError) -> Response {
     match err {
         dpop::DpopError::Missing => problem_response(
@@ -1462,6 +1468,127 @@ pub(crate) fn problem_response(
         body.to_string(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod test_state {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use zally_chain::{SubmitOutcome, Submitter, SubmitterError};
+    use zally_core::Network;
+    use zpay_core::accepts::PayeeRegistry;
+    use zpay_core::chain_status::ChainStatusCache;
+    use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
+    use zpay_core::prepare::PreparedTxCache;
+    use zpay_core::status::{DEFAULT_FINALITY_DEPTH, SettlementLedger};
+    use zpay_core::tip::{ChainTipOracle, TipError};
+    use zpay_core::types::PaymentNetwork;
+    use zpay_core::verify::{
+        AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
+        VerifyError, VerifyResponse,
+    };
+
+    use super::{AppState, DpopExpectations, PaymentEventHub, RateLimiter};
+
+    pub(crate) struct RejectingTestSubmitter;
+
+    #[async_trait]
+    impl Submitter for RejectingTestSubmitter {
+        fn network(&self) -> Network {
+            Network::Testnet
+        }
+
+        async fn submit(&self, _raw_tx: &[u8]) -> Result<SubmitOutcome, SubmitterError> {
+            Err(SubmitterError::Unavailable {
+                reason: "test fixture: submit must not be called".to_owned(),
+            })
+        }
+    }
+
+    pub(crate) struct InconclusiveTestVerifier;
+
+    impl PaymentDisclosureVerifier for InconclusiveTestVerifier {
+        async fn verify_disclosure<F>(
+            &self,
+            _disclosure_bytes: &[u8],
+            _fetcher: &F,
+        ) -> Result<VerifyResponse, VerifyError>
+        where
+            F: DisclosureFetcher + ?Sized,
+        {
+            Ok(VerifyResponse {
+                cryptographic_verdict: CryptographicVerdict::Inconclusive,
+                inconclusive_reason: None,
+                chain_presence: ChainPresence::OracleUnavailable,
+                amount_reconciliation: AmountReconciliation::NotChecked,
+                transaction_id: None,
+                payment_id: None,
+                disclosed_value_zat: None,
+            })
+        }
+    }
+
+    pub(crate) struct RejectingTestFetcher;
+
+    impl DisclosureFetcher for RejectingTestFetcher {
+        async fn fetch_transaction(
+            &self,
+            _txid: [u8; 32],
+        ) -> Result<DisclosedTransaction, FetchError> {
+            Err(FetchError::Unavailable {
+                reason: "test fixture: fetcher must not be called".to_owned(),
+            })
+        }
+    }
+
+    pub(crate) struct TestTipOracle;
+
+    impl ChainTipOracle for TestTipOracle {
+        async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
+            Ok(3_217_900)
+        }
+    }
+
+    pub(crate) type TestAppState = AppState<
+        RejectingTestSubmitter,
+        InconclusiveTestVerifier,
+        PreparedTxCache,
+        SettlementLedger,
+        TestTipOracle,
+        RejectingTestFetcher,
+    >;
+
+    pub(crate) fn new_test_app_state() -> TestAppState {
+        build_test_app_state(
+            Arc::new(PreparedTxCache::new()),
+            Arc::new(SettlementLedger::new()),
+            Arc::new(PaymentEventHub::default()),
+        )
+    }
+
+    pub(crate) fn build_test_app_state(
+        prepared_store: Arc<PreparedTxCache>,
+        ledger: Arc<SettlementLedger>,
+        events: Arc<PaymentEventHub>,
+    ) -> TestAppState {
+        AppState::new(
+            prepared_store,
+            ledger,
+            Arc::new(PayeeRegistry::new()),
+            Arc::new(RejectingTestSubmitter),
+            Arc::new(InconclusiveTestVerifier),
+            events,
+            Arc::new(TestTipOracle),
+            Arc::new(RejectingTestFetcher),
+            Arc::new(super::dpop::InMemoryReplayStore::new()),
+            DpopExpectations::unbound("http"),
+            DEFAULT_FINALITY_DEPTH,
+            Arc::new(ChainStatusCache::new()),
+            Arc::new(RateLimiter::new(0, 0)),
+            false,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1547,120 +1674,17 @@ mod ops_tests {
 
 #[cfg(test)]
 mod router_tests {
-    use super::{
-        AppState, DpopExpectations, PaymentEventHub, RateLimiter, lifecycle_router, router,
-    };
-    use async_trait::async_trait;
+    use super::test_state::new_test_app_state;
+    use super::{lifecycle_router, router};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use serde_json::Value;
-    use std::sync::Arc;
     use tower::ServiceExt as _;
-    use zally_chain::{SubmitOutcome, Submitter, SubmitterError};
-    use zally_core::Network;
-    use zpay_core::accepts::PayeeRegistry;
-    use zpay_core::chain_status::ChainStatusCache;
-    use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
-    use zpay_core::prepare::PreparedTxCache;
-    use zpay_core::status::{DEFAULT_FINALITY_DEPTH, SettlementLedger};
-    use zpay_core::tip::{ChainTipOracle, TipError};
-    use zpay_core::types::PaymentNetwork;
-    use zpay_core::verify::{
-        AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
-        VerifyError, VerifyResponse,
-    };
-
-    type TestState = AppState<
-        UnusedChain,
-        UnusedVerifier,
-        PreparedTxCache,
-        SettlementLedger,
-        FixedTipOracle,
-        UnusedFetcher,
-    >;
-
-    struct UnusedChain;
-
-    #[async_trait]
-    impl Submitter for UnusedChain {
-        fn network(&self) -> Network {
-            Network::Testnet
-        }
-
-        async fn submit(&self, _raw_tx: &[u8]) -> Result<SubmitOutcome, SubmitterError> {
-            Err(SubmitterError::Unavailable {
-                reason: "test fixture: submit must not be called".to_owned(),
-            })
-        }
-    }
-
-    struct UnusedVerifier;
-
-    impl PaymentDisclosureVerifier for UnusedVerifier {
-        async fn verify_disclosure<F>(
-            &self,
-            _disclosure_bytes: &[u8],
-            _fetcher: &F,
-        ) -> Result<VerifyResponse, VerifyError>
-        where
-            F: DisclosureFetcher + ?Sized,
-        {
-            Ok(VerifyResponse {
-                cryptographic_verdict: CryptographicVerdict::Inconclusive,
-                inconclusive_reason: None,
-                chain_presence: ChainPresence::OracleUnavailable,
-                amount_reconciliation: AmountReconciliation::NotChecked,
-                transaction_id: None,
-                payment_id: None,
-                disclosed_value_zat: None,
-            })
-        }
-    }
-
-    struct UnusedFetcher;
-
-    impl DisclosureFetcher for UnusedFetcher {
-        async fn fetch_transaction(
-            &self,
-            _txid: [u8; 32],
-        ) -> Result<DisclosedTransaction, FetchError> {
-            Err(FetchError::Unavailable {
-                reason: "test fixture: fetcher must not be called".to_owned(),
-            })
-        }
-    }
-
-    struct FixedTipOracle;
-
-    impl ChainTipOracle for FixedTipOracle {
-        async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
-            Ok(3_217_900)
-        }
-    }
-
-    fn build_state() -> TestState {
-        AppState::new(
-            Arc::new(PreparedTxCache::new()),
-            Arc::new(SettlementLedger::new()),
-            Arc::new(PayeeRegistry::new()),
-            Arc::new(UnusedChain),
-            Arc::new(UnusedVerifier),
-            Arc::new(PaymentEventHub::default()),
-            Arc::new(FixedTipOracle),
-            Arc::new(UnusedFetcher),
-            Arc::new(super::dpop::InMemoryReplayStore::new()),
-            DpopExpectations::unbound("http"),
-            DEFAULT_FINALITY_DEPTH,
-            Arc::new(ChainStatusCache::new()),
-            Arc::new(RateLimiter::new(0, 0)),
-            false,
-        )
-    }
 
     #[tokio::test]
     async fn official_router_exposes_supported_not_accepts()
     -> Result<(), Box<dyn std::error::Error>> {
-        let supported_response = router(build_state(), &[])
+        let supported_response = router(new_test_app_state(), &[])
             .oneshot(Request::builder().uri("/supported").body(Body::empty())?)
             .await?;
         assert_eq!(supported_response.status(), StatusCode::OK);
@@ -1673,7 +1697,7 @@ mod router_tests {
             "pczt-v2-extractable",
         );
 
-        let accepts_response = router(build_state(), &[])
+        let accepts_response = router(new_test_app_state(), &[])
             .oneshot(Request::builder().uri("/accepts").body(Body::empty())?)
             .await?;
         assert_eq!(accepts_response.status(), StatusCode::NOT_FOUND);
@@ -1712,7 +1736,7 @@ mod router_tests {
                 "maxTimeoutSeconds": 60
             }
         });
-        let response = router(build_state(), &[])
+        let response = router(new_test_app_state(), &[])
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1768,7 +1792,7 @@ mod router_tests {
                 "maxTimeoutSeconds": 60
             }
         });
-        let response = router(build_state(), &[])
+        let response = router(new_test_app_state(), &[])
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1827,7 +1851,7 @@ mod router_tests {
             },
             "paymentRequirements": requirements
         });
-        let response = router(build_state(), &[])
+        let response = router(new_test_app_state(), &[])
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1848,10 +1872,52 @@ mod router_tests {
     #[tokio::test]
     async fn lifecycle_router_does_not_expose_supported() -> Result<(), Box<dyn std::error::Error>>
     {
-        let response = lifecycle_router(build_state(), &[])
+        let response = lifecycle_router(new_test_app_state(), &[])
             .oneshot(Request::builder().uri("/supported").body(Body::empty())?)
             .await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_writes_reject_missing_dpop_consistently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let prepare_response = lifecycle_router(new_test_app_state(), &[])
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prepare")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "payee_id": "aether-ai",
+                        "network": "testnet",
+                        "scheme": "zcash",
+                        "resource_uri": "https://example.test/resources/events",
+                        "nonce": "00000000-0000-0000-0000-0000000000aa"
+                    }))?))?,
+            )
+            .await?;
+        let settle_response = lifecycle_router(new_test_app_state(), &[])
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settle")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "payment_id": "01JABCXYZ",
+                        "raw_tx_hex": "00"
+                    }))?))?,
+            )
+            .await?;
+
+        assert_eq!(prepare_response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(settle_response.status(), StatusCode::UNAUTHORIZED);
+        let prepare_body: Value =
+            serde_json::from_slice(&to_bytes(prepare_response.into_body(), usize::MAX).await?)?;
+        let settle_body: Value =
+            serde_json::from_slice(&to_bytes(settle_response.into_body(), usize::MAX).await?)?;
+        assert_eq!(prepare_body["kind"], "dpop_missing");
+        assert_eq!(settle_body["kind"], "dpop_missing");
         Ok(())
     }
 }

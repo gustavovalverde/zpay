@@ -156,16 +156,17 @@ What zpay deliberately keeps separate:
 
 ## Architecture Requirements
 
-zpay is a single binary (`zpay-runtime`) composing six crates:
+zpay is a single facilitator binary (`zpay-runtime`) composing seven crate roles:
 
 | Crate | Boundary | Owns |
 |---|---|---|
 | zpay-core | Library; never starts a runtime. | Domain types, prepare/oracle/broadcast/compliance modules, capability strings. |
+| zpay-dpop | Library. | Pure RFC 7638 JWK thumbprint and RFC 9449 `htu` canonicalization used by the DPoP verifiers. |
 | zpay-store | Library; libSQL only. | Prepared-tx cache, settlement ledger, bearer-key-hash table, schema migrations. |
 | zpay-x402 | Library; Axum router only. | x402 v2 route handlers, DPoP middleware, x402-specific request/response codecs. |
 | zpay-mpp | Library; Axum router only; feature-gated. | MPP route handlers. Mounted disabled in Phase 4; enabled in Phase 5. |
 | zpay-runtime | Binary. | Composition root, env-driven config, ops listener, tracing, signal handling, OpenAPI generation. |
-| zpay-testkit | Library; test-only. | `require_live()` gates, mock chain source, mock submitter, settlement fixtures. |
+| zpay-testkit | Library; test-only. | Agent-payment client fixtures, `require_live()` gates, mock chain source, mock submitter, settlement fixtures. |
 
 Network awareness is non-negotiable per the
 [public interfaces spine](architecture/public-interfaces.md#network-tagged-everywhere).

@@ -242,6 +242,7 @@ async fn settlement_ledger_round_trip() -> TestResult {
     ledger
         .record(payment_id.clone(), accepted_ledger_entry("deadbeef"))
         .await?;
+    assert_eq!(ledger.entry_count().await?, 1);
 
     let found = ledger.find(&payment_id).await?.ok_or("ledger find miss")?;
     let BroadcastOutcome::Accepted { transaction_id } = found.broadcast_outcome else {

@@ -1,0 +1,20 @@
+[package]
+name = "zpay-dpop"
+description = "Pure RFC 7638 and RFC 9449 primitives shared by zpay DPoP verifiers."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+readme = "../../README.md"
+keywords = ["dpop", "rfc7638", "rfc9449", "zpay"]
+categories = ["cryptography", "web-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true

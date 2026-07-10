@@ -75,7 +75,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 ],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         Ok(())
     }
 
@@ -93,11 +93,11 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 params![payment_id.0.clone()],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         let Some(row) = rows
             .next()
             .await
-            .map_err(|err| libsql_to_store_error(&err))?
+            .map_err(|error| StoreConnection::to_store_error(&error))?
         else {
             return Ok(None);
         };
@@ -105,24 +105,9 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
     }
 
     async fn entry_count(&self) -> Result<usize, StoreError> {
-        let mut rows = self
-            .connection
-            .query("SELECT COUNT(*) FROM settlement_ledger", params![])
+        self.connection
+            .entry_count("SELECT COUNT(*) FROM settlement_ledger")
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|err| libsql_to_store_error(&err))?
-            .ok_or_else(|| StoreError::Unavailable {
-                reason: "count query returned no row".to_owned(),
-            })?;
-        let raw: i64 = row.get(0).map_err(|err| StoreError::RowMalformed {
-            reason: format!("count column non-integer: {err}"),
-        })?;
-        usize::try_from(raw).map_err(|_| StoreError::RowMalformed {
-            reason: "count overflowed usize".to_owned(),
-        })
     }
 
     async fn success_kind_transactions(&self) -> Result<Vec<SuccessKindRow>, StoreError> {
@@ -136,12 +121,12 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 params![],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         let mut collected = Vec::new();
         while let Some(row) = rows
             .next()
             .await
-            .map_err(|err| libsql_to_store_error(&err))?
+            .map_err(|error| StoreConnection::to_store_error(&error))?
         {
             let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
                 reason: format!("payment_id read failed: {err}"),
@@ -197,7 +182,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 ],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         Ok(affected > 0)
     }
 
@@ -218,7 +203,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 params![reorged_at_unix_seconds, payment_id.0.clone()],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         Ok(affected > 0)
     }
 
@@ -244,12 +229,12 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 params![reorged_at_unix_seconds, start, end],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         let mut downgraded = Vec::new();
         while let Some(row) = rows
             .next()
             .await
-            .map_err(|err| libsql_to_store_error(&err))?
+            .map_err(|error| StoreConnection::to_store_error(&error))?
         {
             let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
                 reason: format!("payment_id read failed: {err}"),
@@ -354,14 +339,4 @@ fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerE
         last_reorged_at,
         expiry_height: expiry_height.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
     })
-}
-
-fn libsql_to_store_error(err: &libsql::Error) -> StoreError {
-    let message = err.to_string();
-    if message.contains("UNIQUE") {
-        return StoreError::IntegrityViolation {
-            constraint: message,
-        };
-    }
-    StoreError::Unavailable { reason: message }
 }

@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use libsql::{Builder, Connection, params::IntoParams};
+use libsql::{Builder, Connection, params, params::IntoParams};
 use tokio::sync::RwLock;
 
 use zpay_core::store::StoreError;
@@ -109,6 +109,34 @@ impl StoreConnection {
             }
             Err(err) => Err(err),
         }
+    }
+
+    pub(crate) fn to_store_error(error: &libsql::Error) -> StoreError {
+        let reason = error.to_string();
+        if reason.contains("UNIQUE") {
+            return StoreError::IntegrityViolation { constraint: reason };
+        }
+        StoreError::Unavailable { reason }
+    }
+
+    pub(crate) async fn entry_count(&self, count_query: &str) -> Result<usize, StoreError> {
+        let mut rows = self
+            .query(count_query, params![])
+            .await
+            .map_err(|error| Self::to_store_error(&error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| Self::to_store_error(&error))?
+            .ok_or_else(|| StoreError::Unavailable {
+                reason: "count query returned no row".to_owned(),
+            })?;
+        let raw: i64 = row.get(0).map_err(|error| StoreError::RowMalformed {
+            reason: format!("count column non-integer: {error}"),
+        })?;
+        usize::try_from(raw).map_err(|_| StoreError::RowMalformed {
+            reason: "count overflowed usize".to_owned(),
+        })
     }
 
     /// Begin a transaction in the given [`libsql::TransactionBehavior`].

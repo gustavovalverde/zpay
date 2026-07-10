@@ -9,10 +9,7 @@
 //! channel-self-heal pattern are inherited from `RemoteChainIndex`.
 
 use zally_core::TxId;
-use zinder_client::{
-    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
-    TransactionId, TxStatus,
-};
+use zinder_client::{ChainIndex, IndexerError, RemoteChainIndex, TransactionId, TxStatus};
 use zpay_core::chain_status::ChainStatusView;
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome, OracleError};
 
@@ -21,36 +18,9 @@ pub(crate) struct ZinderConfirmationOracle {
     chain: RemoteChainIndex,
 }
 
-/// Errors raised while constructing a [`ZinderConfirmationOracle`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub(crate) enum ZinderOracleConfigError {
-    /// The supplied endpoint did not parse as a valid gRPC URI.
-    #[error("invalid zinder endpoint URI: {reason}")]
-    EndpointInvalid {
-        /// Operator-facing reason.
-        reason: String,
-    },
-}
-
 impl ZinderConfirmationOracle {
-    /// Open a connection to the supplied `WalletQuery` endpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ZinderOracleConfigError::EndpointInvalid`] if `endpoint`
-    /// does not parse as a gRPC URI.
-    pub(crate) fn connect(
-        endpoint: String,
-        network: ZinderNetwork,
-    ) -> Result<Self, ZinderOracleConfigError> {
-        let chain =
-            RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(|err| {
-                ZinderOracleConfigError::EndpointInvalid {
-                    reason: err.to_string(),
-                }
-            })?;
-        Ok(Self { chain })
+    pub(crate) const fn new(chain: RemoteChainIndex) -> Self {
+        Self { chain }
     }
 }
 

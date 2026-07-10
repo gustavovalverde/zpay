@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use zally_chain::{RejectionReason, SubmitOutcome, Submitter, SubmitterError};
 use zally_core::{Network, TxId};
 use zinder_client::{
-    EndpointBackedIndex, IndexerError, Network as ZinderNetwork, RawTransactionBytes,
-    RemoteChainIndex, RemoteOpenOptions, TransactionBroadcastResult,
+    EndpointBackedIndex, IndexerError, RawTransactionBytes, RemoteChainIndex,
+    TransactionBroadcastResult,
 };
 
 /// Production submitter backed by zinder's `WalletQuery.BroadcastTransaction`.
@@ -21,41 +21,12 @@ pub(crate) struct ZinderSubmitter {
     network: Network,
 }
 
-/// Errors raised while constructing a [`ZinderSubmitter`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub(crate) enum ZinderSubmitterConfigError {
-    /// The supplied endpoint did not parse as a valid gRPC URI.
-    #[error("invalid zinder endpoint URI: {reason}")]
-    EndpointInvalid {
-        /// Operator-facing reason.
-        reason: String,
-    },
-}
-
 impl ZinderSubmitter {
-    /// Open a connection to the supplied `WalletQuery` endpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ZinderSubmitterConfigError::EndpointInvalid`] if `endpoint`
-    /// does not parse as a gRPC URI.
-    pub(crate) fn connect(
-        endpoint: String,
-        zinder_network: ZinderNetwork,
-        network: Network,
-    ) -> Result<Self, ZinderSubmitterConfigError> {
-        let chain = RemoteChainIndex::connect(RemoteOpenOptions {
-            endpoint,
-            network: zinder_network,
-        })
-        .map_err(|err| ZinderSubmitterConfigError::EndpointInvalid {
-            reason: err.to_string(),
-        })?;
-        Ok(Self {
+    pub(crate) fn new(chain: RemoteChainIndex, network: Network) -> Self {
+        Self {
             chain: Arc::new(chain),
             network,
-        })
+        }
     }
 }
 

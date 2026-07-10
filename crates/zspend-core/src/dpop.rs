@@ -15,10 +15,9 @@
 //! short-window store distinct from the single-use access-token `jti` ledger.
 //! This module returns the verified `jti` for the caller to record.
 //!
-//! The RFC 7638 thumbprint canonicalization mirrors the facilitator's
-//! `zpay_x402::dpop::compute_ec_jwk_thumbprint` so a single DPoP key yields the
-//! same `jkt` at the BFF, the facilitator, and the wallet. The duplication is a
-//! candidate for a future shared `dpop-verify` crate.
+//! RFC 7638 thumbprint derivation and RFC 9449 URL canonicalization come from
+//! `zpay-dpop`, so the wallet and facilitator use one deterministic `jkt` and
+//! `htu` implementation.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -26,7 +25,9 @@ use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use url::Url;
+use zpay_dpop::canonicalize_http_url;
+
+pub use zpay_dpop::compute_ec_jwk_thumbprint as ec_jwk_thumbprint;
 
 use crate::error::{ProblemDetail, ProblemKind};
 
@@ -162,18 +163,6 @@ pub fn verify_dpop_proof(
     })
 }
 
-/// Compute the RFC 7638 JWK thumbprint for an EC key.
-///
-/// The canonical JWK JSON for EC is the lexicographic ordering of the required
-/// members `{"crv":...,"kty":...,"x":...,"y":...}` with no whitespace. This is
-/// identical to the facilitator's computation so a key yields one `jkt`
-/// everywhere.
-#[must_use]
-pub fn ec_jwk_thumbprint(crv: &str, kty: &str, x: &str, y: &str) -> String {
-    let canonical = format!(r#"{{"crv":"{crv}","kty":"{kty}","x":"{x}","y":"{y}"}}"#);
-    URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes()))
-}
-
 fn dpop_invalid(detail: String) -> ProblemDetail {
     ProblemDetail::not_retryable(ProblemKind::DpopProofInvalid, "dpop_proof_invalid", detail)
 }
@@ -188,17 +177,7 @@ fn abs_drift(iat_claim: i64, now_secs: i64) -> u64 {
 /// Canonicalize a URL for `htu` comparison: lower-case scheme/host, strip
 /// default ports, resolve dot segments, drop query and fragment.
 fn canonicalize_url(raw: &str) -> Result<String, ProblemDetail> {
-    let mut parsed =
-        Url::parse(raw).map_err(|err| dpop_invalid(format!("url parse failed: {err}")))?;
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(dpop_invalid(format!(
-            "url scheme must be http or https, got {scheme}"
-        )));
-    }
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    Ok(parsed.to_string())
+    canonicalize_http_url(raw).map_err(|err| dpop_invalid(err.to_string()))
 }
 
 #[cfg(test)]
@@ -280,19 +259,6 @@ mod tests {
             NOW,
             DPOP_CLOCK_SKEW_SECONDS,
         )
-    }
-
-    #[test]
-    fn thumbprint_matches_rfc7638_vector() {
-        // The reference vector from RFC 7638 §3.1, also pinned by the
-        // facilitator's verifier so the two cannot drift.
-        let computed = ec_jwk_thumbprint(
-            "P-256",
-            "EC",
-            "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
-            "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM",
-        );
-        assert_eq!(computed, "cn-I_WNMClehiVp51i_0VpOENW1upEerA8sEam5hn-s");
     }
 
     #[test]

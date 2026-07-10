@@ -35,6 +35,7 @@ url.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
 zally-core.workspace = true
 zpay-core.workspace = true
+zpay-dpop.workspace = true
 
 [dev-dependencies]
 p256 = { workspace = true, features = ["pkcs8", "pem"] }

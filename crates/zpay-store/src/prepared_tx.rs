@@ -80,7 +80,7 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
                 ],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         Ok(())
     }
 
@@ -98,11 +98,11 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
                 params![payment_id.0.clone()],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         let Some(row) = rows
             .next()
             .await
-            .map_err(|err| libsql_to_store_error(&err))?
+            .map_err(|error| StoreConnection::to_store_error(&error))?
         else {
             return Ok(None);
         };
@@ -125,11 +125,11 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
                 params![jkt.to_owned(), idempotency_key.to_owned()],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         let Some(row) = rows
             .next()
             .await
-            .map_err(|err| libsql_to_store_error(&err))?
+            .map_err(|error| StoreConnection::to_store_error(&error))?
         else {
             return Ok(None);
         };
@@ -145,7 +145,7 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
                     params![payment_id.0.clone()],
                 )
                 .await
-                .map_err(|err| libsql_to_store_error(&err))?;
+                .map_err(|error| StoreConnection::to_store_error(&error))?;
         }
         Ok(existing)
     }
@@ -161,31 +161,16 @@ impl PreparedTxStore for LibsqlPreparedTxStore {
                 params![now],
             )
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
+            .map_err(|error| StoreConnection::to_store_error(&error))?;
         usize::try_from(dropped).map_err(|_| StoreError::RowMalformed {
             reason: "delete count overflowed usize".to_owned(),
         })
     }
 
     async fn entry_count(&self) -> Result<usize, StoreError> {
-        let mut rows = self
-            .connection
-            .query("SELECT COUNT(*) FROM prepared_tx", params![])
+        self.connection
+            .entry_count("SELECT COUNT(*) FROM prepared_tx")
             .await
-            .map_err(|err| libsql_to_store_error(&err))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|err| libsql_to_store_error(&err))?
-            .ok_or_else(|| StoreError::Unavailable {
-                reason: "count query returned no row".to_owned(),
-            })?;
-        let raw: i64 = row.get(0).map_err(|err| StoreError::RowMalformed {
-            reason: format!("count column non-integer: {err}"),
-        })?;
-        usize::try_from(raw).map_err(|_| StoreError::RowMalformed {
-            reason: "count overflowed usize".to_owned(),
-        })
     }
 }
 
@@ -300,14 +285,4 @@ fn sql_to_network(raw: &str) -> Result<PaymentNetwork, StoreError> {
             reason: format!("unknown network: {other}"),
         }),
     }
-}
-
-fn libsql_to_store_error(err: &libsql::Error) -> StoreError {
-    let message = err.to_string();
-    if message.contains("UNIQUE") {
-        return StoreError::IntegrityViolation {
-            constraint: message,
-        };
-    }
-    StoreError::Unavailable { reason: message }
 }

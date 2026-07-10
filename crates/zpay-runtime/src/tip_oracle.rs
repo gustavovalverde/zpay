@@ -11,9 +11,7 @@
 //!
 //! The composition root selects between them in `build_tip_oracle`.
 
-use zinder_client::{
-    ChainIndex, IndexerError, Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions,
-};
+use zinder_client::{ChainIndex, IndexerError, RemoteChainIndex};
 use zpay_core::tip::{ChainTipOracle, TipError};
 use zpay_core::types::PaymentNetwork;
 
@@ -22,31 +20,9 @@ pub(crate) struct ZinderTipOracle {
     chain: RemoteChainIndex,
 }
 
-/// Errors raised while constructing a [`ZinderTipOracle`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub(crate) enum ZinderTipOracleConfigError {
-    /// The supplied endpoint did not parse as a valid gRPC URI.
-    #[error("invalid zinder endpoint URI: {reason}")]
-    EndpointInvalid {
-        /// Operator-facing reason.
-        reason: String,
-    },
-}
-
 impl ZinderTipOracle {
-    /// Open a connection to the supplied `WalletQuery` endpoint.
-    pub(crate) fn connect(
-        endpoint: String,
-        network: ZinderNetwork,
-    ) -> Result<Self, ZinderTipOracleConfigError> {
-        let chain =
-            RemoteChainIndex::connect(RemoteOpenOptions { endpoint, network }).map_err(|err| {
-                ZinderTipOracleConfigError::EndpointInvalid {
-                    reason: err.to_string(),
-                }
-            })?;
-        Ok(Self { chain })
+    pub(crate) const fn new(chain: RemoteChainIndex) -> Self {
+        Self { chain }
     }
 }
 

@@ -33,6 +33,8 @@ The docs are organised by lifecycle, not by topic:
 | [0009](adrs/0009-settlement-lifecycle-and-finality.md) | Settlement lifecycle and finality semantics | Accepted | Settlement lifecycle |
 | [0010](adrs/0010-x402-public-boundary.md) | x402 public boundary | Accepted | Facilitator surface |
 | [0011](adrs/0011-zcash-x402-exact-binding.md) | Zcash x402 exact binding | Accepted | Facilitator surface |
+| [0012](adrs/0012-testkit-agent-payment-client.md) | Testkit owns agent payment client fixtures | Accepted | Dev and test client infrastructure |
+| [0013](adrs/0013-shared-dpop-primitives.md) | Shared DPoP primitives | Accepted | DPoP verification |
 
 ## Architecture index
 
