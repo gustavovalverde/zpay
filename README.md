@@ -47,13 +47,11 @@ The facilitator runs a payment through four typed stages:
    or below zinder's settled tip. See
    [ADR-0009](docs/adrs/0009-settlement-lifecycle-and-finality.md).
 
-For receipts, `POST /zpay/v1/verify` accepts a payment disclosure
-([ZIP-311](https://zips.z.cash/zip-0311)), runs the BIP-322 transparent
-check in-process, and
-reports a three-axis posture: `cryptographic_verdict`, `chain_presence`,
-`amount_reconciliation`. Sapling shielded verification ships behind the
-`verify_sapling` feature in a follow-on slice; today shielded disclosures
-surface as `Inconclusive { unsupported_pool }`.
+For receipts, `POST /zpay/v1/verify` accepts a payment disclosure, verifies
+ZIP-311 Draft1 Sapling evidence or the explicitly versioned Zally Ironwood
+extension in-process, fetches the exact mined transaction through zinder, and
+reports independent cryptographic, chain-presence, amount, recipient, and
+disclosure-message postures.
 
 ## Wire surface
 
@@ -92,7 +90,7 @@ The zpay Zcash lifecycle surface is product-owned and used by the demo,
 | GET | `/zpay/v1/tip?network=…` | none | Chain-tip height the prepare path uses for expiry math |
 | POST | `/zpay/v1/prepare` | DPoP | Allocate a `payment_id`, return a ZIP-321 URI and memo bytes |
 | POST | `/zpay/v1/settle` | DPoP | Broadcast a wallet-signed transaction; jkt must match the prepare proof |
-| POST | `/zpay/v1/verify` | none | Verify a ZIP-311 disclosure; three-axis response |
+| POST | `/zpay/v1/verify` | none | Verify a ZIP-311 disclosure; five-axis response |
 | GET | `/zpay/v1/payments/{id}` | none | Snapshot with `reorg_count` and `settled`; status is `awaiting`, `broadcast`, `mined`, `final`, `failed`, `never_issued`, or `expired` |
 | GET | `/zpay/v1/payments/{id}/events` | none | SSE stream of snapshots; closes once the payment is `settled`, `expired`, `failed`, or `never_issued` |
 
@@ -133,7 +131,6 @@ Cargo run for local development:
 
 ```bash
 ZPAY_NETWORK=testnet \
-ZPAY_VERIFY__NETWORK=testnet \
 ZPAY_ALLOW_DEMO_PAYEE=1 \
 ZPAY_PAYEES__CONFIG_PATH=$(pwd)/etc/aether-demo.toml \
 cargo run --release --bin zpay-runtime

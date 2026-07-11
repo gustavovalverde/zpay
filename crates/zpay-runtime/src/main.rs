@@ -40,7 +40,7 @@ use zpay_core::status::{
     SuccessKindRow, lookup_payment_status,
 };
 use zpay_core::store::StoreError;
-use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
+use zpay_core::types::{PayeeId, PaymentId};
 use zpay_core::verify::LocalPaymentDisclosureVerifier;
 use zpay_store::{LibsqlPreparedTxStore, LibsqlSettlementLedgerStore, open_and_migrate};
 use zpay_x402::{
@@ -102,14 +102,8 @@ enum StartupError {
         "ZPAY_NETWORK has unknown value {provided:?}; expected one of mainnet, testnet, regtest"
     )]
     NetworkInvalid { provided: String },
-    #[error(
-        "ZPAY_VERIFY__NETWORK has unknown value {provided:?}; expected one of mainnet, testnet"
-    )]
-    VerifyNetworkInvalid { provided: String },
-    #[error(
-        "ZPAY_VERIFY__NETWORK is required; set it to mainnet or testnet (regtest pins to testnet)"
-    )]
-    VerifyNetworkMissing,
+    #[error("Sapling parameters are unavailable from the platform default location")]
+    SaplingParametersUnavailable,
     #[error("ZPAY_STATIC_TIP_FALLBACK has invalid u32 value {provided:?}: {source}")]
     StaticTipInvalid {
         provided: String,
@@ -240,7 +234,13 @@ struct AppPlane {
 
 async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
     let chain = build_broadcast_client(config)?;
-    let verifier = LocalPaymentDisclosureVerifier::new(config.verify_network);
+    let prover = zcash_proofs::prover::LocalTxProver::with_default_location()
+        .ok_or_else(|| StartupError::SaplingParametersUnavailable)?;
+    let (spend_verifying_key, _) = prover.verifying_keys();
+    let verifier = LocalPaymentDisclosureVerifier::new(
+        zally_network_from_config_str(&config.network)?,
+        spend_verifying_key.prepare(),
+    );
     let fetcher = build_transaction_fetcher(config)?;
     let payees = load_payee_registry(config)?;
     validate_payees(&payees, config.allow_demo_payee)?;
@@ -923,7 +923,8 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, Start
 fn zally_network_from_config_str(raw: &str) -> Result<zally_core::Network, StartupError> {
     match raw {
         "mainnet" => Ok(zally_core::Network::Mainnet),
-        "testnet" | "regtest" => Ok(zally_core::Network::Testnet),
+        "testnet" => Ok(zally_core::Network::Testnet),
+        "regtest" => Ok(zally_core::Network::regtest()),
         other => Err(StartupError::NetworkInvalid {
             provided: other.to_owned(),
         }),
@@ -1145,20 +1146,16 @@ impl DisclosureFetcher for AnyTransactionFetcher {
 fn build_transaction_fetcher(
     config: &ResolvedConfig,
 ) -> Result<AnyTransactionFetcher, StartupError> {
-    let Some(endpoint) = config.explorer_grpc_addr.clone() else {
+    let Some(endpoint) = config.indexer_grpc_addr.clone() else {
         tracing::warn!(
-            "ZPAY_EXPLORER_URL unset; /x402/v2/verify reports chain_presence=oracle_unavailable until an explorer plane is configured",
+            "ZPAY_CHAIN_SOURCE_URL unset; /zpay/v1/verify reports chain_presence=oracle_unavailable until a chain plane is configured",
         );
         return Ok(AnyTransactionFetcher::Rejecting(
             RejectingTransactionFetcher::new(),
         ));
     };
-    let fetcher = ZinderTransactionFetcher::connect(endpoint.clone()).map_err(|source| {
-        StartupError::Submitter {
-            endpoint,
-            source: Box::new(source),
-        }
-    })?;
+    let fetcher =
+        ZinderTransactionFetcher::new(connect_configured_zinder_chain(endpoint, &config.network)?);
     tracing::info!("zinder transaction fetcher wired");
     Ok(AnyTransactionFetcher::Zinder(Box::new(fetcher)))
 }
@@ -1342,13 +1339,7 @@ struct ResolvedConfig {
     app_bind_addr: SocketAddr,
     ops_bind_addr: SocketAddr,
     network: String,
-    /// Network the ZIP-311 `BLAKE2b` digest personalization binds to.
-    /// Read from `ZPAY_VERIFY__NETWORK` and constrained to mainnet
-    /// or testnet (per ADR-0007: regtest carries no distinct SLIP-44
-    /// number).
-    verify_network: PaymentNetwork,
     indexer_grpc_addr: Option<String>,
-    explorer_grpc_addr: Option<String>,
     payees_config_path: Option<String>,
     store_backend: String,
     store_url: String,
@@ -1404,9 +1395,6 @@ impl ResolvedConfig {
             std::env::var("ZPAY_OPS__BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9295".to_string());
         let network = std::env::var("ZPAY_NETWORK").unwrap_or_else(|_| "regtest".to_string());
         let indexer_grpc_addr = std::env::var("ZPAY_CHAIN_SOURCE_URL")
-            .ok()
-            .filter(|raw| !raw.trim().is_empty());
-        let explorer_grpc_addr = std::env::var("ZPAY_EXPLORER_URL")
             .ok()
             .filter(|raw| !raw.trim().is_empty());
         let payees_config_path = std::env::var("ZPAY_PAYEES__CONFIG_PATH")
@@ -1499,16 +1487,6 @@ impl ResolvedConfig {
             },
         );
 
-        // Verify-network: the digest personalization binds the
-        // ZIP-311 BLAKE2b output to the network. Pinned via
-        // ZPAY_VERIFY__NETWORK. The config has no default: a mismatch
-        // between operator intent and the SLIP-44 coin type the
-        // verifier uses would silently produce wrong verdicts (a
-        // mainnet disclosure would never verify under testnet
-        // personalization). Force the operator to choose.
-        let verify_network_raw = std::env::var("ZPAY_VERIFY__NETWORK").ok();
-        let verify_network = resolve_verify_network(verify_network_raw.as_deref())?;
-
         // Placeholder-payee gate: off by default. Truthy values are
         // `1`, `true`, `yes` (case-insensitive); anything else is
         // treated as off so a typo does not silently disable the gate.
@@ -1541,9 +1519,7 @@ impl ResolvedConfig {
             app_bind_addr,
             ops_bind_addr,
             network,
-            verify_network,
             indexer_grpc_addr,
-            explorer_grpc_addr,
             payees_config_path,
             store_backend,
             store_url,
@@ -1598,32 +1574,6 @@ fn parse_truthy(raw: &str) -> bool {
     )
 }
 
-/// Parse `ZPAY_VERIFY__NETWORK` into a [`PaymentNetwork`]. Constrained
-/// to mainnet or testnet per ADR-0007.
-fn parse_verify_network(raw: &str) -> Result<PaymentNetwork, StartupError> {
-    match raw {
-        "mainnet" => Ok(PaymentNetwork::Mainnet),
-        "testnet" => Ok(PaymentNetwork::Testnet),
-        other => Err(StartupError::VerifyNetworkInvalid {
-            provided: other.to_owned(),
-        }),
-    }
-}
-
-/// Resolve the raw `ZPAY_VERIFY__NETWORK` env value into a pinned
-/// [`PaymentNetwork`].
-///
-/// Returns [`StartupError::VerifyNetworkMissing`] when the var is
-/// absent or empty after trimming, and
-/// [`StartupError::VerifyNetworkInvalid`] for any other string.
-fn resolve_verify_network(raw: Option<&str>) -> Result<PaymentNetwork, StartupError> {
-    let trimmed = raw.map_or("", str::trim);
-    if trimmed.is_empty() {
-        return Err(StartupError::VerifyNetworkMissing);
-    }
-    parse_verify_network(trimmed)
-}
-
 fn default_expected_scheme(expected_host: Option<&str>) -> String {
     if expected_host.is_some() {
         "https".to_owned()
@@ -1672,47 +1622,13 @@ async fn shutdown_signal() {
 mod tests {
     use super::{
         ConfirmationOracle, ConfirmationOutcome, StartupError, connect_configured_zinder_chain,
-        is_placeholder_pay_to, parse_truthy, poll_oracle_once, resolve_verify_network,
-        validate_payees,
+        is_placeholder_pay_to, parse_truthy, poll_oracle_once, validate_payees,
     };
     use parking_lot::Mutex;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
     use zpay_core::broadcast::BroadcastOutcome;
     use zpay_core::oracle::OracleError;
     use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, PaymentScheme, Zatoshis};
-
-    #[test]
-    fn verify_network_required_when_env_missing() {
-        let outcome = resolve_verify_network(None);
-        assert!(matches!(outcome, Err(StartupError::VerifyNetworkMissing)));
-    }
-
-    #[test]
-    fn verify_network_required_when_env_empty() {
-        let outcome = resolve_verify_network(Some("   "));
-        assert!(matches!(outcome, Err(StartupError::VerifyNetworkMissing)));
-    }
-
-    #[test]
-    fn verify_network_invalid_for_unrecognised_value() {
-        let outcome = resolve_verify_network(Some("regtest"));
-        assert!(matches!(
-            outcome,
-            Err(StartupError::VerifyNetworkInvalid { ref provided }) if provided == "regtest",
-        ));
-    }
-
-    #[test]
-    fn verify_network_accepts_mainnet_and_testnet() {
-        assert!(matches!(
-            resolve_verify_network(Some("mainnet")),
-            Ok(PaymentNetwork::Mainnet),
-        ));
-        assert!(matches!(
-            resolve_verify_network(Some("testnet")),
-            Ok(PaymentNetwork::Testnet),
-        ));
-    }
 
     #[test]
     fn configured_chain_rejects_unknown_network_before_endpoint() {

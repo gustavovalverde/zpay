@@ -2,7 +2,7 @@
 
 | Field | Value |
 | ----- | ----- |
-| Status | Accepted |
+| Status | Accepted; implementation details superseded by [ADR-0015](0015-zip311-draft1-verification.md) |
 | Product | zpay |
 | Domain | Facilitator wire surface, payment-disclosure verification |
 | Related | [ADR-0003](0003-zinder-as-chain-plane.md), [ADR-0005](0005-protocol-neutral-core-with-wire-adapters.md), [ZIP-311](https://zips.z.cash/zip-0311) |

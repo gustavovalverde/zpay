@@ -1151,7 +1151,14 @@ where
         ) {
             break 'response limited;
         }
-        match verify(body, state.verifier.as_ref(), state.fetcher.as_ref()).await {
+        match verify(
+            body,
+            state.chain.network(),
+            state.verifier.as_ref(),
+            state.fetcher.as_ref(),
+        )
+        .await
+        {
             Ok(response) => json_ok(&response),
             Err(err) => verify_error_response(&err),
         }
@@ -1169,9 +1176,22 @@ fn verify_error_response(err: &VerifyError) -> Response {
             "disclosure_payload_hex must be valid hex",
             false,
         ),
-        // VerifyError is #[non_exhaustive]; today PayloadInvalid is
-        // the only variant. Any future transport-class error gets a
-        // safe 500 with no operator detail echoed.
+        VerifyError::ExpectedPayToInvalid => problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid Argument",
+            "expected_pay_to_invalid",
+            "expected_pay_to must be a Unified Address with a Sapling receiver on the configured network",
+            false,
+        ),
+        VerifyError::ExpectedDisclosureMessageInvalid { .. } => problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid Argument",
+            "expected_disclosure_message_invalid",
+            "expected_disclosure_message_hex must be valid hex",
+            false,
+        ),
+        // VerifyError is #[non_exhaustive]. Any future transport-class error
+        // gets a safe 500 with no operator detail echoed.
         _ => problem_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal",
@@ -1477,6 +1497,7 @@ mod test_state {
     use async_trait::async_trait;
     use zally_chain::{SubmitOutcome, Submitter, SubmitterError};
     use zally_core::Network;
+    use zcash_payment_disclosure::PaymentDisclosure;
     use zpay_core::accepts::PayeeRegistry;
     use zpay_core::chain_status::ChainStatusCache;
     use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
@@ -1485,8 +1506,7 @@ mod test_state {
     use zpay_core::tip::{ChainTipOracle, TipError};
     use zpay_core::types::PaymentNetwork;
     use zpay_core::verify::{
-        AmountReconciliation, ChainPresence, CryptographicVerdict, PaymentDisclosureVerifier,
-        VerifyError, VerifyResponse,
+        DisclosureVerificationError, PaymentDisclosureVerifier, VerifiedPaymentDisclosure,
     };
 
     use super::{AppState, DpopExpectations, PaymentEventHub, RateLimiter};
@@ -1509,23 +1529,12 @@ mod test_state {
     pub(crate) struct InconclusiveTestVerifier;
 
     impl PaymentDisclosureVerifier for InconclusiveTestVerifier {
-        async fn verify_disclosure<F>(
+        fn verify_disclosure(
             &self,
-            _disclosure_bytes: &[u8],
-            _fetcher: &F,
-        ) -> Result<VerifyResponse, VerifyError>
-        where
-            F: DisclosureFetcher + ?Sized,
-        {
-            Ok(VerifyResponse {
-                cryptographic_verdict: CryptographicVerdict::Inconclusive,
-                inconclusive_reason: None,
-                chain_presence: ChainPresence::OracleUnavailable,
-                amount_reconciliation: AmountReconciliation::NotChecked,
-                transaction_id: None,
-                payment_id: None,
-                disclosed_value_zat: None,
-            })
+            _disclosure: &PaymentDisclosure,
+            _transaction: &DisclosedTransaction,
+        ) -> Result<VerifiedPaymentDisclosure, DisclosureVerificationError> {
+            Ok(VerifiedPaymentDisclosure::new(Vec::new()))
         }
     }
 

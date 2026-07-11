@@ -83,6 +83,8 @@ verdicts (malformed, invalid signature, inconclusive) flow through the
 | Variant | Retry | HTTP | `kind` | Operator hint |
 |---------|-------|------|--------|---------------|
 | `PayloadInvalid { reason }` | not_retryable | 422 | `disclosure_payload_invalid` | `disclosure_payload_hex` is not valid hex; the caller must resubmit. |
+| `ExpectedPayToInvalid` | not_retryable | 422 | `expected_pay_to_invalid` | `expected_pay_to` must carry the network-matched Sapling or Ironwood receiver required by the disclosure profile. |
+| `ExpectedDisclosureMessageInvalid { reason }` | not_retryable | 422 | `expected_disclosure_message_invalid` | `expected_disclosure_message_hex` is not valid hex; the caller must resubmit. |
 
 ### `zpay_core::tip::TipError`
 

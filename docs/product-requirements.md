@@ -227,12 +227,17 @@ Capability: `zpay.v1.accepts`, `zpay.v1.prepare`, `zpay.v1.settle`,
 
 #### R-FAC-5. Verify a payment disclosure
 
-Now: nothing exists.
+Now: `/zpay/v1/verify` verifies ZIP-311 Draft1 Sapling evidence in-process,
+fetches mined transaction context from zinder, and reconciles recipient,
+amount, and the merchant's expected disclosure message independently from
+proof validity.
 Why it belongs in zpay: shielded payments require ZIP-311 disclosure to
 prove a specific recipient received a specific amount.
-Proposed change: `POST /zpay/v1/verify` accepts
-`{ txid, expected_amount_zat, expected_pay_to, disclosure_payload }`,
-delegates to zinder's `VerifyPaymentDisclosure`, returns a typed verdict.
+Shipped contract: `POST /zpay/v1/verify` accepts
+`{ txid, expected_amount_zat, expected_pay_to,
+expected_disclosure_message_hex, disclosure_payload_hex }`,
+uses Zally's experimental payment-disclosure crate, and returns a typed
+five-axis verdict.
 Capability: `zpay.v1.verify`.
 
 ### MPP facilitator (R-MPP-*)

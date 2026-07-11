@@ -162,7 +162,7 @@ fn requirements_invalid_reason(requirements: &PaymentRequirements) -> Option<&'s
     if !is_valid_zat_amount(&requirements.amount) {
         return Some("zcash_exact_amount_invalid");
     }
-    if !has_valid_unified_address_prefix(&requirements.network, &requirements.pay_to) {
+    if !has_valid_recipient_prefix(&requirements.network, &requirements.pay_to) {
         return Some("zcash_exact_pay_to_invalid");
     }
     None
@@ -224,12 +224,20 @@ fn is_valid_zat_amount(amount_zat: &str) -> bool {
         .is_ok_and(|parsed_zat| parsed_zat > 0 && parsed_zat <= ZCASH_EXACT_MAX_ZAT)
 }
 
-fn has_valid_unified_address_prefix(network: &str, pay_to: &str) -> bool {
+fn has_valid_recipient_prefix(network: &str, pay_to: &str) -> bool {
     match network {
-        ZCASH_MAINNET_NETWORK => pay_to.starts_with("u1") || pay_to.starts_with("zu1"),
-        ZCASH_TESTNET_NETWORK => pay_to.starts_with("utest1") || pay_to.starts_with("zutest1"),
+        ZCASH_MAINNET_NETWORK => {
+            pay_to.starts_with("u1") || pay_to.starts_with("zu1") || pay_to.starts_with("zs1")
+        }
+        ZCASH_TESTNET_NETWORK => {
+            pay_to.starts_with("utest1")
+                || pay_to.starts_with("zutest1")
+                || pay_to.starts_with("ztestsapling1")
+        }
         ZCASH_REGTEST_NETWORK => {
-            pay_to.starts_with("uregtest1") || pay_to.starts_with("zuregtest1")
+            pay_to.starts_with("uregtest1")
+                || pay_to.starts_with("zuregtest1")
+                || pay_to.starts_with("zregtestsapling1")
         }
         _ => false,
     }
@@ -336,6 +344,21 @@ mod tests {
             request_invalid_reason(&request),
             Some("zcash_exact_pay_to_invalid"),
         );
+    }
+
+    #[test]
+    fn accepts_network_matched_testnet_sapling_address() {
+        let mut sapling = requirements();
+        sapling.pay_to = "ztestsapling12p79hg7sffq7j2ukmpur208cyy7cxdr4mkwnn8eh09w3hgnysv6dmtwuwy8z7e6lvgmngrxeh6g".to_owned();
+        let request = request_with(
+            sapling,
+            json!({
+                "format": ZCASH_EXACT_AUTHORIZATION_FORMAT,
+                "pczt": "UENaVAIAAAAA",
+            }),
+        );
+
+        assert_eq!(request_invalid_reason(&request), None);
     }
 
     #[test]

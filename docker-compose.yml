@@ -28,7 +28,6 @@ services:
       # ZIP-311 BLAKE2b digest personalization pins to a SLIP-44 coin
       # type. Required (no default at runtime); regtest stacks pin to
       # testnet explicitly. See ADR-0007.
-      ZPAY_VERIFY__NETWORK: ${ZPAY_VERIFY__NETWORK:-testnet}
       # libSQL file lives on a named volume so prepared/ledger rows
       # survive `docker compose down` without `--volumes`.
       ZPAY_STORE__BACKEND: libsql

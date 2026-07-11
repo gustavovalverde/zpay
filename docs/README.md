@@ -35,6 +35,7 @@ The docs are organised by lifecycle, not by topic:
 | [0011](adrs/0011-zcash-x402-exact-binding.md) | Zcash x402 exact binding | Accepted | Facilitator surface |
 | [0012](adrs/0012-testkit-agent-payment-client.md) | Testkit owns agent payment client fixtures | Accepted | Dev and test client infrastructure |
 | [0013](adrs/0013-shared-dpop-primitives.md) | Shared DPoP primitives | Accepted | DPoP verification |
+| [0015](adrs/0015-zip311-draft1-verification.md) | ZIP-311 Draft1 verification uses Zally and Zinder | Accepted | Verify plane |
 
 ## Architecture index
 

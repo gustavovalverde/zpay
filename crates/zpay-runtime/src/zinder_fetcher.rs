@@ -1,103 +1,87 @@
-//! Production [`DisclosureFetcher`] backed by zinder's explorer plane.
-//!
-//! Reads `WalletQuery.TransactionById` (placement, raw transaction)
-//! plus `WalletQuery.TransparentOutputsByOutpoint` (prevout
-//! resolution). Mirrors the connection-management pattern from
-//! [`super::zinder_oracle`] and [`super::zinder_submitter`]: lazy
-//! channel construction, HTTP/2 keepalive, and channel-self-heal on
-//! transport-class failures.
-//!
-//! Today this fetcher carries scaffolding for the integration: it
-//! holds the lazy channel and exposes the [`DisclosureFetcher`]
-//! impl, but the bytes-to-`DisclosedTransaction` translator is not
-//! wired against a specific zinder capability yet. Calls return
-//! [`FetchError::Unavailable`] with a clear operator-facing reason,
-//! which the verifier surfaces as `chain_presence: "oracle_unavailable"`
-//! on the 3-axis wire response. The translator lands behind a
-//! capability-detection step in a follow-on slice.
+//! Production payment-disclosure transaction fetcher backed by `WalletQuery`.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use arc_swap::ArcSwap;
-use tonic::transport::{Channel, Endpoint};
-use zinder_proto::v1::explorer::explorer_query_client::ExplorerQueryClient;
+use zinder_client::{ChainIndex, RemoteChainIndex, TransactionId, TxStatus};
 use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
 
-/// Production transaction fetcher backed by zinder's explorer plane.
+/// Fetches exact mined transaction context from Zinder's native wallet plane.
 pub(crate) struct ZinderTransactionFetcher {
-    /// Lazy gRPC client; swapped out on transport-class failures so
-    /// the next call dials a fresh connection.
-    client: Arc<ArcSwap<ExplorerQueryClient<Channel>>>,
-    /// Endpoint the channel was opened against. Kept so
-    /// [`Self::reconnect_on_transport_error`] can rebuild the channel
-    /// without re-parsing the URI.
-    endpoint: Endpoint,
-}
-
-/// Errors raised while constructing a [`ZinderTransactionFetcher`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub(crate) enum ZinderFetcherConfigError {
-    /// The supplied endpoint did not parse as a valid gRPC URI.
-    #[error("invalid zinder explorer endpoint URI: {reason}")]
-    EndpointInvalid {
-        /// Operator-facing reason.
-        reason: String,
-    },
+    chain: RemoteChainIndex,
 }
 
 impl ZinderTransactionFetcher {
-    /// Open a lazy channel to the supplied `ExplorerQuery` endpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ZinderFetcherConfigError::EndpointInvalid`] if
-    /// `endpoint` does not parse as a gRPC URI.
-    pub(crate) fn connect(endpoint: String) -> Result<Self, ZinderFetcherConfigError> {
-        let endpoint = Endpoint::from_shared(endpoint).map_err(|err| {
-            ZinderFetcherConfigError::EndpointInvalid {
-                reason: err.to_string(),
-            }
-        })?;
-        // Mirror zinder-client's keepalive cadence so half-open
-        // connections are detected quickly rather than hanging the
-        // verify handler.
-        let endpoint = endpoint
-            .http2_keep_alive_interval(Duration::from_secs(20))
-            .keep_alive_timeout(Duration::from_secs(10))
-            .keep_alive_while_idle(true);
-        let channel = endpoint.connect_lazy();
-        let client = ExplorerQueryClient::new(channel);
-        Ok(Self {
-            client: Arc::new(ArcSwap::from_pointee(client)),
-            endpoint,
-        })
-    }
-
-    /// On a transport-class failure rebuild the lazy channel so the
-    /// next call dials a fresh connection.
-    #[allow(
-        dead_code,
-        reason = "self-heal helper kept live for the upcoming fetcher translator; today the surface intentionally returns Unavailable until the capability lands"
-    )]
-    fn reconnect_on_transport_error(&self, status: &tonic::Status) {
-        if status.code() != tonic::Code::Unavailable {
-            return;
-        }
-        let channel = self.endpoint.clone().connect_lazy();
-        self.client
-            .store(Arc::new(ExplorerQueryClient::new(channel)));
+    /// Wrap an already-configured remote chain index.
+    pub(crate) const fn new(chain: RemoteChainIndex) -> Self {
+        Self { chain }
     }
 }
 
 impl DisclosureFetcher for ZinderTransactionFetcher {
-    async fn fetch_transaction(&self, _txid: [u8; 32]) -> Result<DisclosedTransaction, FetchError> {
-        // Keep the channel handle live so the connection is
-        // pre-warmed for the upcoming translator.
-        let _ = &*self.client.load();
-        Err(FetchError::Unavailable {
-            reason: "zinder explorer fetcher does not yet translate transaction bytes to DisclosedTransaction; falls back to local cryptography-only verdict".to_owned(),
-        })
+    async fn fetch_transaction(
+        &self,
+        rpc_txid: [u8; 32],
+    ) -> Result<DisclosedTransaction, FetchError> {
+        let expected_transaction_id = internal_transaction_id(rpc_txid);
+        let status = self
+            .chain
+            .transaction_by_id(expected_transaction_id, None)
+            .await
+            .map_err(|error| FetchError::Unavailable {
+                reason: error.to_string(),
+            })?;
+        let mined = match status {
+            TxStatus::Mined(mined) => mined,
+            TxStatus::NotFound | TxStatus::InMempool(_) | TxStatus::ConflictingChain => {
+                return Err(FetchError::NotFound);
+            }
+            _ => {
+                return Err(FetchError::Unavailable {
+                    reason: "zinder returned an unsupported transaction status".to_owned(),
+                });
+            }
+        };
+        if mined.location.transaction_id != expected_transaction_id {
+            return Err(FetchError::Unavailable {
+                reason: "zinder returned a different transaction id".to_owned(),
+            });
+        }
+        let raw_transaction_bytes =
+            mined
+                .raw_transaction_bytes
+                .ok_or_else(|| FetchError::Unavailable {
+                    reason: "zinder does not retain transaction blobs; set storage.raw_blob_policy to transactions or all before ingest"
+                        .to_owned(),
+                })?;
+        Ok(DisclosedTransaction::new(
+            rpc_txid,
+            raw_transaction_bytes,
+            mined.location.block_height.value(),
+        ))
+    }
+}
+
+fn internal_transaction_id(mut rpc_txid: [u8; 32]) -> TransactionId {
+    rpc_txid.reverse();
+    TransactionId::from_bytes(rpc_txid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::internal_transaction_id;
+
+    #[test]
+    fn rpc_transaction_id_is_reversed_for_zinder_lookup() {
+        let rpc_txid = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ];
+        let expected_internal_txid = [
+            31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
+            9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+        ];
+
+        assert_eq!(
+            internal_transaction_id(rpc_txid).as_bytes(),
+            expected_internal_txid
+        );
     }
 }

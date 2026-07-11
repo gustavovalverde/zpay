@@ -41,6 +41,7 @@ zally-chain = { workspace = true, features = ["zinder"] }
 zally-core.workspace = true
 zinder-client.workspace = true
 zinder-proto.workspace = true
+zcash_proofs.workspace = true
 zpay-core = { workspace = true, features = ["in_memory"] }
 zpay-store.workspace = true
 zpay-x402.workspace = true

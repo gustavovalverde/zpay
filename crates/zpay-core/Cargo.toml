@@ -20,15 +20,8 @@ default = ["in_memory"]
 # (`default-features = false`) when shipping a production binary that
 # exclusively uses libSQL through `zpay-store`.
 in_memory = ["dep:parking_lot"]
-# Enables Groth16 verification of Sapling spend proofs inside the
-# local ZIP-311 verifier. Disabled by default: Sapling disclosures
-# surface as `CryptographicVerdict::Inconclusive { UnsupportedPool }`
-# until a Groth16 prover backend is wired in.
-verify_sapling = []
-
 [dependencies]
 base64.workspace = true
-blake2b_simd = "1.0.3"
 hex.workspace = true
 async-trait.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
@@ -37,18 +30,19 @@ zally-pczt = { workspace = true }
 parking_lot = { workspace = true, optional = true }
 orchard.workspace = true
 pczt.workspace = true
-ripemd = "0.1.3"
 sapling.workspace = true
-secp256k1 = { version = "0.29.1", features = ["recovery"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 thiserror.workspace = true
 ulid = { workspace = true, features = ["serde"] }
 zcash_keys.workspace = true
 zcash_address.workspace = true
+zcash-payment-disclosure.workspace = true
+zcash_protocol.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 toml.workspace = true
+zip32.workspace = true
