@@ -83,6 +83,7 @@ const WALLET_SYNC_TIMEOUT_SECONDS: u64 = 120;
 pub struct DemoConfig {
     bind_addr: SocketAddr,
     zpay_url: String,
+    zpay_public_url: String,
     zpay_ops_url: String,
     zspend_url: String,
     zspend_public_url: String,
@@ -112,6 +113,7 @@ impl DemoConfig {
     pub fn from_env() -> Result<Self, DemoError> {
         let network_label = env_string("ZPAY_DEMO_NETWORK", DEFAULT_NETWORK_LABEL);
         let network = parse_demo_network(&network_label)?;
+        let zpay_url = env_string("ZPAY_DEMO_ZPAY_URL", DEFAULT_ZPAY_URL);
         let zspend_url = env_string("ZPAY_DEMO_ZSPEND_URL", DEFAULT_ZSPEND_URL);
         let wallet_dir = PathBuf::from(env_string("ZPAY_DEMO_WALLET_DIR", DEFAULT_WALLET_DIR));
         let issuer_key_path = env_path("ZPAY_DEMO_ISSUER_KEY_PATH")
@@ -120,7 +122,8 @@ impl DemoConfig {
             .unwrap_or_else(|| wallet_dir.join(DEFAULT_ISSUER_JWKS_FILE));
         Ok(Self {
             bind_addr: env_socket_addr("ZPAY_DEMO_BIND_ADDR", DEFAULT_BIND_ADDR)?,
-            zpay_url: env_string("ZPAY_DEMO_ZPAY_URL", DEFAULT_ZPAY_URL),
+            zpay_public_url: env_string("ZPAY_DEMO_ZPAY_PUBLIC_URL", &zpay_url),
+            zpay_url,
             zpay_ops_url: env_string("ZPAY_DEMO_ZPAY_OPS_URL", DEFAULT_ZPAY_OPS_URL),
             zspend_public_url: env_string("ZPAY_DEMO_ZSPEND_PUBLIC_URL", &zspend_url),
             zspend_url,
@@ -693,8 +696,14 @@ async fn call_prepare(state: &DemoState, dpop_key: &DpopKey) -> Result<PreparedP
         "{}/zpay/v1/prepare",
         state.config.zpay_url.trim_end_matches('/')
     );
+    // The proof htu carries zpay's pinned public host even when the POST rides
+    // the private network, matching zpay's ZPAY_EXPECTED_HOST canonicalization.
+    let prepare_public_url = format!(
+        "{}/zpay/v1/prepare",
+        state.config.zpay_public_url.trim_end_matches('/')
+    );
     let dpop_proof = dpop_key
-        .mint_proof("POST", &prepare_url, "zpay-demo-dpop")
+        .mint_proof("POST", &prepare_public_url, "zpay-demo-dpop")
         .map_err(|error| dpop_proof_invalid(&error))?;
     let response = state
         .client
@@ -1944,6 +1953,7 @@ mod tests {
         let config = DemoConfig {
             bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7410)),
             zpay_url: DEFAULT_ZPAY_URL.to_owned(),
+            zpay_public_url: DEFAULT_ZPAY_URL.to_owned(),
             zpay_ops_url: DEFAULT_ZPAY_OPS_URL.to_owned(),
             zspend_url: DEFAULT_ZSPEND_URL.to_owned(),
             zspend_public_url: DEFAULT_ZSPEND_URL.to_owned(),

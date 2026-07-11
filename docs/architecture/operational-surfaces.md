@@ -261,6 +261,7 @@ Configuration:
 | `ZPAY_DEMO_BIND_ADDR` | `127.0.0.1:7410` | Demo gateway listener. Non-loopback binds are for deliberate local demos only. |
 | `ZPAY_DEMO_NETWORK` | `testnet` | `testnet` or `regtest`. `mainnet` is refused. |
 | `ZPAY_DEMO_ZPAY_URL` | `http://127.0.0.1:8080` | zpay main listener. |
+| `ZPAY_DEMO_ZPAY_PUBLIC_URL` | `ZPAY_DEMO_ZPAY_URL` | URL encoded into zpay DPoP proofs; must match zpay's pinned `ZPAY_EXPECTED_HOST`. |
 | `ZPAY_DEMO_ZPAY_OPS_URL` | `http://127.0.0.1:9295` | zpay ops listener for readiness. |
 | `ZPAY_DEMO_ZSPEND_URL` | `http://127.0.0.1:8090` | zspend listener used by the gateway. |
 | `ZPAY_DEMO_ZSPEND_PUBLIC_URL` | `ZPAY_DEMO_ZSPEND_URL` | URL encoded into zspend DPoP proofs. |
@@ -286,6 +287,7 @@ the configured zinder chain tip.
 
 | Var | Default | Description |
 |-----|---------|-------------|
+| `ZSPEND_PUBLIC_URL` | `http://<bind addr>` | Base of the externally-reachable sign URL the DPoP `htu` verification pins against. Leaving it unset emits a startup `WARN`; set it in production. |
 | `ZSPEND_CHAIN_SOURCE_URL` | none | zinder gRPC endpoint. Required to materialise a fresh wallet account and to run continuous wallet sync. |
 | `ZSPEND_BIRTHDAY_HEIGHT` | network default | Optional wallet birthday override. Use for repros such as Orchard divergence from height `4050200`. |
 | `ZSPEND_WALLET_SYNC_POLL_INTERVAL_MS` | `5000` | Polling cadence when no chain event arrives. |
