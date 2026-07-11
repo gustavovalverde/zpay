@@ -425,7 +425,10 @@ async fn list_recent_orders_most_recent_first_and_filters_by_payee() -> TestResu
         .list_recent(10, Some(&PayeeId("aether-ai".to_owned())))
         .await?;
     assert_eq!(
-        filtered.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
+        filtered
+            .iter()
+            .map(|(id, _)| id.0.clone())
+            .collect::<Vec<_>>(),
         vec!["01BBB".to_owned(), "01AAA".to_owned()],
     );
     for (_, entry) in &filtered {

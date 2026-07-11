@@ -1110,4 +1110,12 @@ mod tests {
         }
         hex_out
     }
+
+    #[test]
+    fn testnet_sapling_pay_to_decodes_for_pczt_settlement() {
+        let params = zally_core::Network::Testnet.to_parameters();
+        let encoded = "ztestsapling12p79hg7sffq7j2ukmpur208cyy7cxdr4mkwnn8eh09w3hgnysv6dmtwuwy8z7e6lvgmngrxeh6g";
+
+        assert!(zcash_keys::address::Address::decode(&params, encoded).is_some());
+    }
 }

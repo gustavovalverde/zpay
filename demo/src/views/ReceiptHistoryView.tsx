@@ -4,6 +4,8 @@ import {
   type AmountReconciliation,
   type ChainPresence,
   type CryptographicVerdict,
+  type MessageReconciliation,
+  type RecipientReconciliation,
   type VerifyResponseBody,
   verifyPaymentReceipt
 } from "../demo-client";
@@ -38,11 +40,7 @@ export function ReceiptHistoryView() {
     setVerifyError(null);
     setVerifyResult(null);
     try {
-      const result = await verifyPaymentReceipt({
-        txid: selected.transaction_id,
-        expected_amount_zat: selected.amount_zat,
-        disclosure_payload_hex: ""
-      });
+      const result = await verifyPaymentReceipt(selected.payment_id);
       setVerifyResult(result);
     } catch (err) {
       setVerifyError(friendlyProblem(err));
@@ -119,7 +117,7 @@ export function ReceiptHistoryView() {
                 onClick={onVerifyClick}
                 disabled={!selected.transaction_id || isVerifying}
               >
-                {isVerifying ? "Verifying…" : "Verify ZIP-311 disclosure"}
+                {isVerifying ? "Verifying…" : "Verify payment disclosure"}
               </button>
             </div>
 
@@ -148,11 +146,20 @@ export function ReceiptHistoryView() {
                     value={verifyResult.amount_reconciliation}
                     tone={amountReconciliationTone(verifyResult.amount_reconciliation)}
                   />
+                  <VerdictChip
+                    label="recipient_reconciliation"
+                    value={verifyResult.recipient_reconciliation}
+                    tone={recipientReconciliationTone(verifyResult.recipient_reconciliation)}
+                  />
+                  <VerdictChip
+                    label="message_reconciliation"
+                    value={verifyResult.message_reconciliation}
+                    tone={messageReconciliationTone(verifyResult.message_reconciliation)}
+                  />
                 </div>
                 <p className="verdict-note">
-                  The demo wallet doesn't yet emit a spendable ZIP-311 disclosure, so this check runs
-                  against an empty disclosure payload. The verdict above is real, not fabricated: it is
-                  what zpay's verifier actually returns for that input.
+                  ZIP-311 Draft1 and the Zally Ironwood extension check spend authority, recipient, amount, and
+                  challenge independently against the mined transaction
                 </p>
               </div>
             )}
@@ -193,6 +200,24 @@ function chainPresenceTone(value: ChainPresence): VerdictTone {
 }
 
 function amountReconciliationTone(value: AmountReconciliation): VerdictTone {
+  if (value === "match") {
+    return "positive";
+  }
+  if (value === "not_checked") {
+    return "neutral";
+  }
+  return "negative";
+}
+
+function recipientReconciliationTone(value: RecipientReconciliation): VerdictTone {
+  return reconciliationTone(value);
+}
+
+function messageReconciliationTone(value: MessageReconciliation): VerdictTone {
+  return reconciliationTone(value);
+}
+
+function reconciliationTone(value: "match" | "mismatch" | "not_checked"): VerdictTone {
   if (value === "match") {
     return "positive";
   }

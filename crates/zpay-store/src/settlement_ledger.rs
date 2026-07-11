@@ -173,7 +173,9 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         } else {
             self.connection
                 .query(
-                    &format!("SELECT {COLUMNS} FROM settlement_ledger ORDER BY payment_id DESC LIMIT ?"),
+                    &format!(
+                        "SELECT {COLUMNS} FROM settlement_ledger ORDER BY payment_id DESC LIMIT ?"
+                    ),
                     params![limit_i64],
                 )
                 .await
@@ -332,42 +334,55 @@ fn row_to_settlement_ledger_entry(
         reason: format!("broadcast_outcome_kind read failed: {err}"),
     })?;
     let transaction_id: Option<String> =
-        row.get(offset + 1).map_err(|err| StoreError::RowMalformed {
-            reason: format!("transaction_id read failed: {err}"),
-        })?;
+        row.get(offset + 1)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("transaction_id read failed: {err}"),
+            })?;
     let upstream_message: Option<String> =
-        row.get(offset + 2).map_err(|err| StoreError::RowMalformed {
-            reason: format!("upstream_message read failed: {err}"),
-        })?;
+        row.get(offset + 2)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("upstream_message read failed: {err}"),
+            })?;
     let settled_at_unix_seconds: i64 =
-        row.get(offset + 3).map_err(|err| StoreError::RowMalformed {
-            reason: format!("settled_at_unix_seconds read failed: {err}"),
-        })?;
+        row.get(offset + 3)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("settled_at_unix_seconds read failed: {err}"),
+            })?;
     let confirmation_count: Option<i64> =
-        row.get(offset + 4).map_err(|err| StoreError::RowMalformed {
-            reason: format!("confirmation_count read failed: {err}"),
-        })?;
+        row.get(offset + 4)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("confirmation_count read failed: {err}"),
+            })?;
     let mined_block_height: Option<i64> =
-        row.get(offset + 5).map_err(|err| StoreError::RowMalformed {
-            reason: format!("mined_block_height read failed: {err}"),
+        row.get(offset + 5)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("mined_block_height read failed: {err}"),
+            })?;
+    let reorg_count: i64 = row
+        .get(offset + 6)
+        .map_err(|err| StoreError::RowMalformed {
+            reason: format!("reorg_count read failed: {err}"),
         })?;
-    let reorg_count: i64 = row.get(offset + 6).map_err(|err| StoreError::RowMalformed {
-        reason: format!("reorg_count read failed: {err}"),
-    })?;
     let last_reorged_at: Option<i64> =
-        row.get(offset + 7).map_err(|err| StoreError::RowMalformed {
-            reason: format!("last_reorged_at read failed: {err}"),
-        })?;
+        row.get(offset + 7)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("last_reorged_at read failed: {err}"),
+            })?;
     let expiry_height: Option<i64> =
-        row.get(offset + 8).map_err(|err| StoreError::RowMalformed {
-            reason: format!("expiry_height read failed: {err}"),
+        row.get(offset + 8)
+            .map_err(|err| StoreError::RowMalformed {
+                reason: format!("expiry_height read failed: {err}"),
+            })?;
+    let payee_id: String = row
+        .get(offset + 9)
+        .map_err(|err| StoreError::RowMalformed {
+            reason: format!("payee_id read failed: {err}"),
         })?;
-    let payee_id: String = row.get(offset + 9).map_err(|err| StoreError::RowMalformed {
-        reason: format!("payee_id read failed: {err}"),
-    })?;
-    let amount_zat: i64 = row.get(offset + 10).map_err(|err| StoreError::RowMalformed {
-        reason: format!("amount_zat read failed: {err}"),
-    })?;
+    let amount_zat: i64 = row
+        .get(offset + 10)
+        .map_err(|err| StoreError::RowMalformed {
+            reason: format!("amount_zat read failed: {err}"),
+        })?;
 
     let broadcast_outcome = match kind.as_str() {
         "accepted" => BroadcastOutcome::Accepted {

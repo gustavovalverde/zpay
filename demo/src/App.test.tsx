@@ -114,4 +114,18 @@ describe("App", () => {
 
     expect(await screen.findByText("Autopay isn't configured. Check zspend JWKS, then try again.")).toBeInTheDocument();
   });
+
+  it("verifies a wallet-produced disclosure from a settled receipt", async () => {
+    stubGateway({ payments: [finalPayment] });
+    render(<App />);
+
+    await screen.findByText("Ready to start checkout");
+    await userEvent.click(screen.getByRole("radio", { name: "Receipts" }));
+    expect((await screen.findAllByText("0.0005 ZEC")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Verify payment disclosure" }));
+
+    expect(await screen.findByText("cryptographic_verdict")).toBeInTheDocument();
+    expect(screen.getAllByText("match")).toHaveLength(3);
+    expect(screen.queryByText(/empty disclosure payload/i)).not.toBeInTheDocument();
+  });
 });

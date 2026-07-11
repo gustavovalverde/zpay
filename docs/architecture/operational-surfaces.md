@@ -258,7 +258,7 @@ Routes:
 | `/demo/v1/payments/{payment_id}/settle` | POST | Sign and settle using the stored payment mode. |
 | `/demo/v1/payments/{payment_id}` | GET | Enriched payment status for the UI. |
 | `/demo/v1/payments/{payment_id}/events` | GET | SSE status stream for the UI. |
-| `/demo/v1/verify` | POST | Proxy to zpay's ZIP-311 disclosure verify. |
+| `/demo/v1/payments/{payment_id}/verify` | POST | Verify the wallet-produced disclosure using server-held payment expectations. |
 | `/demo/v1/console/payments` | GET | Proxy to zpay's ops-listener `GET /payments` operator console. |
 
 Configuration:

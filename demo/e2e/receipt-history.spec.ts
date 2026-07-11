@@ -14,10 +14,11 @@ test("receipts view lists a settled payment and shows a real verify verdict", as
   await page.getByRole("radio", { name: "Receipts" }).click();
 
   await expect(page.locator(".payment-history-list")).toContainText("0.001 ZEC");
-  await page.getByRole("button", { name: "Verify ZIP-311 disclosure" }).click();
+  await page.getByRole("button", { name: "Verify payment disclosure" }).click();
 
-  await expect(page.locator(".verdict-chip-value", { hasText: "malformed" })).toBeVisible();
-  await expect(page.getByText(/doesn't yet emit a spendable ZIP-311 disclosure/i)).toBeVisible();
+  await expect(page.locator(".verdict-chip-value", { hasText: "valid" })).toBeVisible();
+  await expect(page.locator(".verdict-chip-value", { hasText: "mined" })).toBeVisible();
+  await expect(page.locator(".verdict-chip-value", { hasText: "match" })).toHaveCount(3);
 });
 
 test("receipts view shows an empty state before any payment exists", async ({ page }) => {
@@ -108,12 +109,16 @@ async function installGatewayRoutes(page: Page, options?: { emptyHistory?: boole
         `data: {"payment_id":"${paymentId}","mode":"checkout","stage":"review","amount_zat":100000,"expiry_height":4152900,"confirmation_count":0,"reorg_count":0,"settled":false,"can_settle":true,"message":"Review the payment before signing"}\n\n`
     });
   });
-  await page.route("**/demo/v1/verify", async (route) => {
+  await page.route(`**/demo/v1/payments/${paymentId}/verify`, async (route) => {
     await route.fulfill({
       json: {
-        cryptographic_verdict: "malformed",
-        chain_presence: "oracle_unavailable",
-        amount_reconciliation: "not_checked"
+        cryptographic_verdict: "valid",
+        chain_presence: "mined",
+        amount_reconciliation: "match",
+        recipient_reconciliation: "match",
+        message_reconciliation: "match",
+        transaction_id: transactionId,
+        disclosed_value_zat: 100000
       }
     });
   });

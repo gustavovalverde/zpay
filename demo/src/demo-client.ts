@@ -81,18 +81,16 @@ export type CryptographicVerdict = "valid" | "invalid_signature" | "malformed" |
 export type InconclusiveReason = "unsupported_pool" | "unknown_version" | "prevout_unresolved";
 export type ChainPresence = "mined" | "not_found" | "oracle_unavailable";
 export type AmountReconciliation = "match" | "mismatch" | "not_checked";
-
-export interface VerifyRequestBody {
-  txid: string;
-  expected_amount_zat: number;
-  disclosure_payload_hex: string;
-}
+export type RecipientReconciliation = "match" | "mismatch" | "not_checked";
+export type MessageReconciliation = "match" | "mismatch" | "not_checked";
 
 export interface VerifyResponseBody {
   cryptographic_verdict: CryptographicVerdict;
   inconclusive_reason?: InconclusiveReason;
   chain_presence: ChainPresence;
   amount_reconciliation: AmountReconciliation;
+  recipient_reconciliation: RecipientReconciliation;
+  message_reconciliation: MessageReconciliation;
   transaction_id?: string;
   payment_id?: string;
   disclosed_value_zat?: number;
@@ -218,10 +216,10 @@ export function listPayments(): Promise<PaymentBody[]> {
   return requestJson<PaymentBody[]>("/demo/v1/payments");
 }
 
-export function verifyPaymentReceipt(request: VerifyRequestBody): Promise<VerifyResponseBody> {
-  return requestJson<VerifyResponseBody>("/demo/v1/verify", {
+export function verifyPaymentReceipt(paymentId: string): Promise<VerifyResponseBody> {
+  return requestJson<VerifyResponseBody>(`/demo/v1/payments/${paymentId}/verify`, {
     method: "POST",
-    body: JSON.stringify(request)
+    body: "{}"
   });
 }
 

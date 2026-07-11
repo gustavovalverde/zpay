@@ -39,10 +39,10 @@ use zally_core::{AccountId, BlockHeight, Memo, MemoBytes, Network, PaymentRecipi
 use zally_keys::{AgeFileSealing, AgeFileSealingOptions};
 use zally_storage::{Sqlite, SqliteOptions};
 use zally_wallet::{
-    PaymentRequest, ProposalPlan, SyncDriver, SyncDriverOptions, SyncHandle, Wallet,
+    ExportPaymentDisclosurePlan, PaymentDisclosureProfile, PaymentRequest, ProposalPlan,
+    SyncDriver, SyncDriverOptions, SyncHandle, Wallet,
 };
 use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
-use zpay_core::verify::{VerifyRequest, VerifyResponse};
 use zpay_testkit::{
     AccessTokenError, AccessTokenGrant, DpopError, DpopKey, ResourceInfo, X402PcztPayment,
     X402SettleResponse, X402VerifyResponse, ZspendSignCall, ZspendSignError,
@@ -255,6 +255,18 @@ struct StoredPayment {
     mode: PaymentMode,
     stage_override: Option<DemoStage>,
     settled_transaction_id: Option<String>,
+    disclosure: Option<StoredDisclosure>,
+}
+
+#[derive(Clone)]
+struct StoredDisclosure {
+    payload_hex: String,
+    message_hex: String,
+}
+
+struct SettlementArtifacts {
+    transaction_id: String,
+    disclosure: Option<StoredDisclosure>,
 }
 
 /// Starts the local demo gateway.
@@ -293,11 +305,11 @@ fn router(state: DemoState) -> Router {
             "/demo/v1/payments/{payment_id}/events",
             get(payment_events_route),
         )
-        .route("/demo/v1/verify", post(verify_route))
         .route(
-            "/demo/v1/console/payments",
-            get(console_payments_route),
+            "/demo/v1/payments/{payment_id}/verify",
+            post(verify_payment_route),
         )
+        .route("/demo/v1/console/payments", get(console_payments_route))
         .with_state(state)
 }
 
@@ -357,9 +369,10 @@ impl DemoState {
         }
     }
 
-    fn record_settlement(&self, payment_id: &str, transaction_id: String) {
+    fn record_settlement(&self, payment_id: &str, artifacts: SettlementArtifacts) {
         if let Some(stored) = self.payments.lock().get_mut(payment_id) {
-            stored.settled_transaction_id = Some(transaction_id);
+            stored.settled_transaction_id = Some(artifacts.transaction_id);
+            stored.disclosure = artifacts.disclosure;
             stored.stage_override = None;
         }
     }
@@ -458,12 +471,15 @@ async fn create_payment_route(
         mode: body.mode,
         stage_override: Some(DemoStage::Review),
         settled_transaction_id: None,
+        disclosure: None,
     };
     state.payments.lock().insert(payment_id.clone(), stored);
     payment_snapshot(&state, &payment_id).await.map(Json)
 }
 
-async fn payments_route(State(state): State<DemoState>) -> Result<Json<Vec<PaymentBody>>, DemoError> {
+async fn payments_route(
+    State(state): State<DemoState>,
+) -> Result<Json<Vec<PaymentBody>>, DemoError> {
     let ids = payment_ids_most_recent_first(state.payment_ids());
     let mut payments = Vec::with_capacity(ids.len());
     for payment_id in ids {
@@ -491,11 +507,14 @@ async fn settle_payment_route(
     AxumPath(payment_id): AxumPath<String>,
 ) -> Result<Json<PaymentBody>, DemoError> {
     let stored = state.stored_payment(&payment_id)?;
-    let transaction_id = match stored.mode {
+    let artifacts = match stored.mode {
         PaymentMode::Checkout => settle_checkout(&state, &payment_id, &stored).await?,
-        PaymentMode::Autopay => settle_autopay(&state, &payment_id, &stored).await?,
+        PaymentMode::Autopay => SettlementArtifacts {
+            transaction_id: settle_autopay(&state, &payment_id, &stored).await?,
+            disclosure: None,
+        },
     };
-    state.record_settlement(&payment_id, transaction_id);
+    state.record_settlement(&payment_id, artifacts);
     payment_snapshot(&state, &payment_id).await.map(Json)
 }
 
@@ -683,14 +702,38 @@ async fn call_prepare(state: &DemoState, dpop_key: &DpopKey) -> Result<PreparedP
         .map_err(|err| DemoError::unavailable("prepare_malformed", err.to_string()))
 }
 
-async fn verify_route(
+async fn verify_payment_route(
     State(state): State<DemoState>,
-    Json(body): Json<VerifyRequest>,
-) -> Result<Json<VerifyResponse>, DemoError> {
+    AxumPath(payment_id): AxumPath<String>,
+) -> Result<Json<DisclosureVerifyResponseBody>, DemoError> {
+    let stored = state.stored_payment(&payment_id)?;
+    let transaction_id = stored.settled_transaction_id.ok_or_else(|| {
+        DemoError::rejected(
+            "disclosure_unavailable",
+            "The payment hasn't been broadcast by this wallet",
+        )
+    })?;
+    let disclosure = stored.disclosure.ok_or_else(|| {
+        DemoError::rejected(
+            "disclosure_unavailable",
+            "The signing wallet didn't return a payment disclosure",
+        )
+    })?;
+    let payment = payment_request(&stored.prepared, state.config.network)?;
+    let body = DisclosureVerifyRequestBody {
+        txid: transaction_id,
+        expected_amount_zat: payment.amount.as_u64(),
+        expected_pay_to: payment.recipient.encoded().to_owned(),
+        expected_disclosure_message_hex: disclosure.message_hex,
+        disclosure_payload_hex: disclosure.payload_hex,
+    };
     call_verify(&state, body).await.map(Json)
 }
 
-async fn call_verify(state: &DemoState, body: VerifyRequest) -> Result<VerifyResponse, DemoError> {
+async fn call_verify(
+    state: &DemoState,
+    body: DisclosureVerifyRequestBody,
+) -> Result<DisclosureVerifyResponseBody, DemoError> {
     let verify_url = format!(
         "{}/zpay/v1/verify",
         state.config.zpay_url.trim_end_matches('/')
@@ -751,7 +794,7 @@ async fn settle_checkout(
     state: &DemoState,
     payment_id: &str,
     stored: &StoredPayment,
-) -> Result<String, DemoError> {
+) -> Result<SettlementArtifacts, DemoError> {
     state.set_stage_override(payment_id, Some(DemoStage::Signing));
     let balance = state.wallet.get_account_balance(state.account_id).await?;
     let parsed = payment_request(&stored.prepared, state.config.network)?;
@@ -769,9 +812,10 @@ async fn settle_checkout(
 
     state.set_stage_override(payment_id, Some(DemoStage::Settling));
     let memo = memo_from_protocol_prefix(&stored.prepared.memo_bytes)?;
+    let recipient = parsed.recipient;
     let plan = ProposalPlan::conventional(
         state.account_id,
-        parsed.recipient,
+        recipient.clone(),
         parsed.amount,
         Some(memo),
     );
@@ -781,8 +825,37 @@ async fn settle_checkout(
         .await?;
     let proven_pczt = state.wallet.prove_pczt(unsigned_pczt).await?;
     let signed_pczt = state.wallet.sign_pczt(proven_pczt).await?;
+    let wallet_transaction_id = state.wallet.extract_pczt(signed_pczt.clone()).await?;
     let pczt_base64 = URL_SAFE_NO_PAD.encode(signed_pczt.as_bytes());
-    settle_x402_pczt(state, &stored.prepared, &pczt_base64).await
+    let transaction_id = settle_x402_pczt(state, &stored.prepared, &pczt_base64).await?;
+    if transaction_id != wallet_transaction_id.to_rpc_hex() {
+        return Err(DemoError::rejected(
+            "settle_txid_mismatch",
+            format!(
+                "x402 settle returned {transaction_id} but the demo wallet extracted {}",
+                wallet_transaction_id.to_rpc_hex()
+            ),
+        ));
+    }
+    let message = disclosure_message(payment_id);
+    let disclosure_profile = payment_disclosure_profile(&recipient)?;
+    let disclosure = state
+        .wallet
+        .export_payment_disclosure(ExportPaymentDisclosurePlan::new(
+            wallet_transaction_id,
+            recipient,
+            parsed.amount,
+            message.clone(),
+            disclosure_profile,
+        ))
+        .await?;
+    Ok(SettlementArtifacts {
+        transaction_id,
+        disclosure: Some(StoredDisclosure {
+            payload_hex: hex::encode(disclosure.to_bytes()),
+            message_hex: hex::encode(message),
+        }),
+    })
 }
 
 async fn settle_autopay(
@@ -946,6 +1019,19 @@ fn payment_request(
         recipient: payment.recipient.clone(),
         amount: payment.amount,
     })
+}
+
+fn payment_disclosure_profile(
+    recipient: &PaymentRecipient,
+) -> Result<PaymentDisclosureProfile, DemoError> {
+    match recipient {
+        PaymentRecipient::SaplingAddress { .. } => Ok(PaymentDisclosureProfile::Zip311Draft1),
+        PaymentRecipient::UnifiedAddress { .. } => Ok(PaymentDisclosureProfile::ZallyIronwood),
+        _ => Err(DemoError::rejected(
+            "disclosure_profile_unsupported",
+            "payment recipient has no supported disclosure profile",
+        )),
+    }
 }
 
 fn memo_from_protocol_prefix(memo_bytes: &[u8]) -> Result<Memo, DemoError> {
@@ -1538,6 +1624,32 @@ struct PrepareRequestBody {
     idempotency_key: Option<String>,
 }
 
+#[derive(Serialize)]
+struct DisclosureVerifyRequestBody {
+    txid: String,
+    expected_amount_zat: u64,
+    expected_pay_to: String,
+    expected_disclosure_message_hex: String,
+    disclosure_payload_hex: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DisclosureVerifyResponseBody {
+    cryptographic_verdict: String,
+    #[serde(default)]
+    inconclusive_reason: Option<String>,
+    chain_presence: String,
+    amount_reconciliation: String,
+    recipient_reconciliation: String,
+    message_reconciliation: String,
+    #[serde(default)]
+    transaction_id: Option<String>,
+    #[serde(default)]
+    payment_id: Option<String>,
+    #[serde(default)]
+    disclosed_value_zat: Option<u64>,
+}
+
 #[derive(Deserialize, Serialize)]
 struct ConsolePaymentRow {
     payment_id: String,
@@ -1699,6 +1811,10 @@ fn unix_now_ms() -> u128 {
         .map_or(0, |elapsed| elapsed.as_millis())
 }
 
+fn disclosure_message(payment_id: &str) -> Vec<u8> {
+    format!("zpay-demo-payment:{payment_id}").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1706,7 +1822,7 @@ mod tests {
         DEFAULT_NETWORK_LABEL, DEFAULT_PAYEE_ID, DEFAULT_RESOURCE_URI, DEFAULT_TOKEN_TTL_SECONDS,
         DEFAULT_ZEXPLORER_TX_URL, DEFAULT_ZINDER_URL, DEFAULT_ZPAY_OPS_URL, DEFAULT_ZPAY_URL,
         DEFAULT_ZSPEND_AUDIENCE, DEFAULT_ZSPEND_URL, DemoConfig, DemoStage, PaymentBody,
-        PaymentMode, PaymentStatusBody, SettlementResponseBody, is_settled,
+        PaymentMode, PaymentStatusBody, SettlementResponseBody, disclosure_message, is_settled,
         load_or_create_issuer_encoding_key, parse_demo_network, payment_ids_most_recent_first,
         stage_from_status, zpay_outcome_to_submit_outcome,
     };
@@ -1910,6 +2026,18 @@ mod tests {
                 "01JBBB0000000000000000000".to_owned(),
                 "01JAAA0000000000000000000".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn disclosure_message_is_bound_to_the_payment_id() {
+        assert_ne!(
+            disclosure_message("01JZPAY-A"),
+            disclosure_message("01JZPAY-B")
+        );
+        assert_eq!(
+            disclosure_message("01JZPAY-A"),
+            b"zpay-demo-payment:01JZPAY-A"
         );
     }
 }

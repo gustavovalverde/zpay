@@ -142,7 +142,7 @@ Dev demo surface (`zpay-demo`, loopback only by default):
 | `POST /demo/v1/payments/{payment_id}/settle` | Sign and settle the prepared demo payment. |
 | `GET /demo/v1/payments/{payment_id}` | Enriched demo payment status. |
 | `GET /demo/v1/payments/{payment_id}/events` | SSE stream of enriched demo payment status. |
-| `POST /demo/v1/verify` | Proxy to zpay's ZIP-311 disclosure verify. |
+| `POST /demo/v1/payments/{payment_id}/verify` | Verify the wallet-produced payment disclosure using server-held payment expectations. |
 | `GET /demo/v1/console/payments` | Proxy to zpay's ops-listener operator console. |
 
 The demo route surface is not a production zpay runtime API. Browser clients

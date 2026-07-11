@@ -212,12 +212,15 @@ so it needs zspend `/readyz` ready and `jwks_cache` loaded.
 Select the `Receipts` tab to see every payment made this session
 (`GET /demo/v1/payments`), most recent first; the list resets when the
 gateway restarts, since it reflects only the gateway's in-memory state. Pick
-a payment and click `Verify ZIP-311 disclosure` (enabled once the payment
-has broadcast) to call the real `POST /demo/v1/verify` proxy to zpay's ZIP-311
-verifier. The demo wallet does not yet emit a spendable disclosure, so the
-call runs with an empty payload and honestly reports whatever zpay's
-verifier returns for that input (typically `cryptographic_verdict:
-malformed`) rather than a fabricated pass.
+a payment and click `Verify payment disclosure` (enabled once the payment
+has broadcast) to call `POST /demo/v1/payments/{payment_id}/verify`. The
+gateway resolves the expected transaction, recipient, amount, and challenge
+from its payment record instead of trusting browser-supplied expectations.
+The demo wallet produces ZIP-311 Draft1 for Sapling payments and the
+explicitly versioned Zally Ironwood extension for Unified Address payments.
+The verifier checks the disclosure against the mined transaction and reports
+the cryptographic, chain-presence, amount, recipient, and challenge verdicts
+independently.
 
 ## Facilitator console (operator view)
 

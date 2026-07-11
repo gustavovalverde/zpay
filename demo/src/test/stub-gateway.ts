@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { PaymentBody, ReadinessBody, WalletBody } from "../demo-client";
+import type { PaymentBody, ReadinessBody, VerifyResponseBody, WalletBody } from "../demo-client";
 
 export class MockEventSource extends EventTarget {
   static instances: MockEventSource[] = [];
@@ -67,12 +67,24 @@ export const finalPayment: PaymentBody = {
   message: "Payment settled"
 };
 
+export const validDisclosure: VerifyResponseBody = {
+  cryptographic_verdict: "valid",
+  chain_presence: "mined",
+  amount_reconciliation: "match",
+  recipient_reconciliation: "match",
+  message_reconciliation: "match",
+  transaction_id: finalPayment.transaction_id,
+  disclosed_value_zat: finalPayment.amount_zat
+};
+
 export function stubGateway(options?: {
   readiness?: ReadinessBody;
   wallet?: WalletBody;
   payment?: PaymentBody;
   faucetClaim?: unknown;
   paymentProblem?: unknown;
+  payments?: PaymentBody[];
+  verifyResponse?: VerifyResponseBody;
 }) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -90,6 +102,12 @@ export function stubGateway(options?: {
         return Promise.resolve(problemResponse(options.paymentProblem));
       }
       return Promise.resolve(jsonResponse(options?.payment ?? preparedPayment));
+    }
+    if (url.endsWith("/demo/v1/payments") && init?.method !== "POST") {
+      return Promise.resolve(jsonResponse(options?.payments ?? []));
+    }
+    if (url.endsWith(`/demo/v1/payments/${finalPayment.payment_id}/verify`) && init?.method === "POST") {
+      return Promise.resolve(jsonResponse(options?.verifyResponse ?? validDisclosure));
     }
     return Promise.resolve(
       problemResponse({
