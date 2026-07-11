@@ -2,7 +2,7 @@
 # zpay-runtime - Rust x402 facilitator on port 8080 (app) + 9295 (ops)
 # Public domain: zpay.up.railway.app initially, pay.zentity.xyz later
 # Runs in the same Railway project as zinder; reaches it through
-# private networking (`zinder.railway.internal:<port>`).
+# private networking (`zinder-v12.railway.internal:<port>`).
 #
 # ── Required secrets / config ────────────────────────────────────────────
 #   ZPAY_NETWORK=testnet                     # mainnet | testnet | regtest
@@ -10,7 +10,7 @@
 #   ZPAY_EXPECTED_SCHEME=https
 #
 # ── Chain plane (zinder cross-service wiring) ────────────────────────────
-#   ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
+#   ZPAY_CHAIN_SOURCE_URL=http://zinder-v12.railway.internal:9101
 #
 # ── Persistence (libSQL on a Railway volume) ─────────────────────────────
 #   ZPAY_STORE__BACKEND=libsql

@@ -32,8 +32,9 @@ invalid (fail-loud per ADR-0007).
 | `ZPAY_EXPECTED_SCHEME` | yes (prod) | `https` | Defaults to `https` when `ZPAY_EXPECTED_HOST` is set. |
 | `ZPAY_STORE__BACKEND` | yes | `libsql` | Only `libsql` and `memory` recognised. |
 | `ZPAY_STORE__URL` | yes | `file:/var/lib/zpay/zpay.libsql` | Use a `file:` URL for the mounted volume; `libsql://…` for Turso. |
-| `ZPAY_PAYEES__CONFIG_PATH` | yes | `/etc/zpay/payees.toml` | The image bakes a placeholder file here; production overrides via bind-mount or custom image. |
-| `ZPAY_CHAIN_SOURCE_URL` | yes | `http://zinder.railway.internal:9067` | Internal DNS provided by Railway. Used for settle, lifecycle observation, and disclosure transaction fetch. |
+| `ZPAY_PAYEES__CONFIG_PATH` | yes | `/etc/zpay/payees.toml` | The image bakes a placeholder file here; production overrides via `ZPAY_PAYEES_TOML`, bind-mount, or custom image. |
+| `ZPAY_PAYEES_TOML` | optional | TOML text | If set, `docker/start.sh` writes this content to `ZPAY_PAYEES__CONFIG_PATH` on every start, before the process execs. No custom image needed. |
+| `ZPAY_CHAIN_SOURCE_URL` | yes | `http://zinder-v12.railway.internal:9101` | Internal DNS provided by Railway. Used for settle, lifecycle observation, and disclosure transaction fetch. |
 | `ZPAY_FINALITY_DEPTH` | optional | `3` | Default 3; bump for mainnet. |
 | `ZPAY_STORE__AUTH_TOKEN` | optional | `<turso-token>` | Turso only. |
 | `ZPAY_STATIC_TIP_FALLBACK` | optional | `4000000` | Only meaningful without a tip oracle. |
@@ -54,14 +55,14 @@ loses state on every redeploy.
 ## Cross-service wiring (zinder)
 
 zpay reaches the zinder chain plane over Railway private networking.
-The hostname is `zinder.railway.internal` (the service name is the
-DNS label).
-
-Set both endpoints to the same gRPC port unless zinder exposes the
-explorer plane on a different port:
+The hostname is `zinder-v12.railway.internal` (the service name is the
+DNS label). Point at `zinder-v12`, not the older `zinder` service in the
+same project: `fauzec-runtime` already runs against `zinder-v12` in
+production, and it carries the aligned indexer stack described in
+`docs/plans/2026-07-08-wallet-stack-alignment.md`.
 
 ```
-ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
+ZPAY_CHAIN_SOURCE_URL=http://zinder-v12.railway.internal:9101
 ```
 
 Private networking carries plaintext gRPC; there is no TLS termination
@@ -88,7 +89,8 @@ Walk this in order. Each step is independent and can be reverted.
 1. Confirm the placeholder-payee gate is OFF (`ZPAY_ALLOW_DEMO_PAYEE`
    unset). The runtime refuses to start when the baked-in
    `aether-demo` placeholder receiver is still active.
-2. Stage the production `payees.toml`. Either bake it into a custom
+2. Stage the production `payees.toml`. Set `ZPAY_PAYEES_TOML` to the
+   TOML content (simplest, no rebuild needed), or bake it into a custom
    image at `/etc/zpay/payees.toml`, or bind-mount it via a Railway
    volume.
 3. Provision the `zpay-data` volume at `/var/lib/zpay` (see above).
@@ -141,10 +143,12 @@ Extraction loads Sapling verifying parameters through `zcash_proofs`, so
 the runtime must have `sapling-spend.params` and `sapling-output.params`
 under the default ZcashParams directory.
 
-The container image sets `HOME=/opt/zpay-home`. Mount the parameter
-directory at `/opt/zpay-home/.zcash-params` for Railway services. Local
-compose stacks also mount the same host directory at `/home/zpay/.zcash-params`
-to cover platform home-directory fallback behavior.
+The image bakes both files into `/opt/zpay-home/.zcash-params` at build
+time (fetched from `download.z.cash`, the same source `fetch-params.sh`
+uses), with `/home/zpay/.zcash-params` symlinked to the same directory.
+Railway services need no volume or extra configuration for this; local
+compose stacks instead bind-mount a host directory at both paths to avoid
+re-downloading ~50 MB per image build.
 
 ## Operational warnings
 
