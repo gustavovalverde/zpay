@@ -2432,6 +2432,88 @@ mod tests {
         })
     }
 
+    fn wallet_sync_snapshot_with(
+        network: Network,
+        phase: WalletSyncPhase,
+        lag_blocks: Option<u32>,
+    ) -> WalletSyncSnapshot {
+        WalletSyncSnapshot {
+            network,
+            phase,
+            sync_status: WalletSyncScanStatus::AtTip,
+            scanned_height: Some(BlockHeight::from(100)),
+            safe_chain_tip_height: Some(BlockHeight::from(100)),
+            lag_blocks,
+            last_fault: None,
+            published_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn wallet_sync_is_fresh_at_the_lag_and_age_boundaries() {
+        let network = Network::Testnet;
+        let at_bounds = wallet_sync_snapshot_with(network, WalletSyncPhase::Waiting, Some(3));
+        assert!(
+            super::is_wallet_sync_fresh(&at_bounds, network, 3, 30, 30),
+            "lag_blocks and snapshot_age_seconds equal to their configured max are still fresh",
+        );
+
+        let over_lag = wallet_sync_snapshot_with(network, WalletSyncPhase::Waiting, Some(4));
+        assert!(
+            !super::is_wallet_sync_fresh(&over_lag, network, 3, 30, 0),
+            "lag_blocks one past max_lag_blocks must be stale",
+        );
+
+        let over_age = wallet_sync_snapshot_with(network, WalletSyncPhase::Waiting, Some(0));
+        assert!(
+            !super::is_wallet_sync_fresh(&over_age, network, 3, 30, 31),
+            "snapshot_age_seconds one past stale_after_seconds must be stale",
+        );
+    }
+
+    #[test]
+    fn wallet_sync_is_stale_on_network_mismatch_or_missing_lag() {
+        let network = Network::Testnet;
+        let wrong_network =
+            wallet_sync_snapshot_with(Network::Mainnet, WalletSyncPhase::Waiting, Some(0));
+        assert!(
+            !super::is_wallet_sync_fresh(&wrong_network, network, 3, 30, 0),
+            "a snapshot published for a different network must never satisfy readiness",
+        );
+
+        let no_lag = wallet_sync_snapshot_with(network, WalletSyncPhase::Waiting, None);
+        assert!(
+            !super::is_wallet_sync_fresh(&no_lag, network, 3, 30, 0),
+            "an unknown lag must not be treated as fresh",
+        );
+    }
+
+    #[test]
+    fn wallet_sync_is_stale_outside_syncing_and_waiting_phases() {
+        let network = Network::Testnet;
+        for phase in [
+            WalletSyncPhase::Starting,
+            WalletSyncPhase::Recovering,
+            WalletSyncPhase::Parked,
+            WalletSyncPhase::Closing,
+            WalletSyncPhase::Closed,
+            WalletSyncPhase::Unknown,
+        ] {
+            let snapshot = wallet_sync_snapshot_with(network, phase, Some(0));
+            assert!(
+                !super::is_wallet_sync_fresh(&snapshot, network, 3, 30, 0),
+                "phase {phase:?} must not be treated as fresh",
+            );
+        }
+        for phase in [WalletSyncPhase::Syncing, WalletSyncPhase::Waiting] {
+            let snapshot = wallet_sync_snapshot_with(network, phase, Some(0));
+            assert!(
+                super::is_wallet_sync_fresh(&snapshot, network, 3, 30, 0),
+                "phase {phase:?} must be treated as fresh when lag and age are within bounds",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn current_unified_address_returns_testnet_ua() -> Result<(), Box<dyn std::error::Error>>
     {
