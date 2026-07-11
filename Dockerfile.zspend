@@ -40,16 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 
 # Copy the full workspace. The workspace has multiple interlinked crates
-# (Phase 4 adds `zspend-core` and `zspend-runtime`); registry + target
-# cache mounts keep iterative builds fast.
+# (Phase 4 adds `zspend-core` and `zspend-runtime`).
 COPY --link Cargo.toml Cargo.lock ./
 COPY --link crates ./crates
 
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=${APP_HOME}/target \
-    cargo build --locked --release --bin zspend-runtime && \
+RUN cargo build --locked --release --bin zspend-runtime && \
     cp ${APP_HOME}/target/release/zspend-runtime ${APP_HOME}/zspend-runtime
 
 # --- Stage 2: Runtime ---
@@ -75,12 +72,23 @@ COPY --link docker/start-zspend.sh ./start.sh
 
 RUN groupadd --gid ${APP_GID} ${APP_USER} && \
     useradd --uid ${APP_UID} --gid ${APP_USER} --shell /sbin/nologin ${APP_USER} && \
-    mkdir -p /var/lib/zspend && \
+    mkdir -p /var/lib/zspend /opt/zspend-home/.zcash-params /home/zspend && \
+    ln -s /opt/zspend-home/.zcash-params /home/zspend/.zcash-params && \
     touch /var/lib/zspend/.keep && \
     chmod +x start.sh && \
-    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zspend
+    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zspend /opt/zspend-home /home/zspend
+
+# Sapling trusted-setup parameters, needed by the Local prover that signs
+# spends. zcash_proofs resolves them via home_dir()/.zcash-params, which is
+# why HOME is pinned below rather than left at the container default.
+RUN curl -fsSL -o /opt/zspend-home/.zcash-params/sapling-spend.params \
+        https://download.z.cash/downloads/sapling-spend.params && \
+    curl -fsSL -o /opt/zspend-home/.zcash-params/sapling-output.params \
+        https://download.z.cash/downloads/sapling-output.params && \
+    chown -R ${APP_UID}:${APP_GID} /opt/zspend-home/.zcash-params
 
 ENV RUST_LOG=info \
+    HOME=/opt/zspend-home \
     ZSPEND_BIND_ADDR=0.0.0.0:8090 \
     ZSPEND_NETWORK=testnet \
     ZSPEND_SEALED_SEED_PATH=/var/lib/zspend/wallet.age \

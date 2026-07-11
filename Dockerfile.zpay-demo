@@ -1,0 +1,112 @@
+# syntax=docker/dockerfile:1
+
+# zpay-demo: browser checkout demo gateway.
+#
+# Three stages: the Rust builder compiles the zpay-demo binary, a Node
+# builder produces the static Vite bundle in demo/, and the runtime
+# stage serves both from one process (the gateway's static-file
+# fallback route, gated on ZPAY_DEMO_STATIC_DIR). Mirrors Dockerfile
+# and Dockerfile.zspend's gosu conventions.
+
+ARG SOURCE_DATE_EPOCH=0
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+
+ARG APP_UID=10001
+ARG APP_GID=${APP_UID}
+ARG APP_USER=zpay-demo
+ARG APP_HOME=/app
+
+# --- Stage 1: Rust builder ---
+FROM rust:1.95-trixie AS rust-builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG APP_HOME
+WORKDIR ${APP_HOME}
+
+ARG SOURCE_DATE_EPOCH
+ARG GIT_SHA
+ARG BUILD_TIME
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    clang \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/* /tmp/*
+
+COPY --link Cargo.toml Cargo.lock ./
+COPY --link crates ./crates
+
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
+RUN cargo build --locked --release --bin zpay-demo && \
+    cp ${APP_HOME}/target/release/zpay-demo ${APP_HOME}/zpay-demo
+
+# --- Stage 2: frontend builder ---
+FROM node:22-slim AS frontend-builder
+WORKDIR /app/demo
+
+RUN corepack enable
+
+COPY --link demo/package.json demo/pnpm-lock.yaml demo/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY --link demo/ ./
+RUN pnpm build
+
+# --- Stage 3: runtime ---
+FROM debian:trixie-slim AS runtime
+
+ARG APP_UID
+ARG APP_GID
+ARG APP_USER
+ARG APP_HOME
+
+WORKDIR ${APP_HOME}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gosu \
+    && rm -rf /var/lib/apt/lists/* /tmp/*
+
+COPY --link --from=rust-builder ${APP_HOME}/zpay-demo ${APP_HOME}/zpay-demo
+COPY --link --from=frontend-builder /app/demo/dist ${APP_HOME}/static
+COPY --link docker/start-zpay-demo.sh ./start.sh
+
+RUN groupadd --gid ${APP_GID} ${APP_USER} && \
+    useradd --uid ${APP_UID} --gid ${APP_USER} --shell /sbin/nologin ${APP_USER} && \
+    mkdir -p /var/lib/zpay-demo /opt/zpay-demo-home/.zcash-params /home/zpay-demo && \
+    ln -s /opt/zpay-demo-home/.zcash-params /home/zpay-demo/.zcash-params && \
+    touch /var/lib/zpay-demo/.keep && \
+    chmod +x start.sh && \
+    chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zpay-demo /opt/zpay-demo-home /home/zpay-demo
+
+# Sapling trusted-setup parameters, needed by the demo wallet's Local prover
+# in checkout mode. zcash_proofs resolves them via home_dir()/.zcash-params,
+# which is why HOME is pinned below rather than left at the container default.
+RUN curl -fsSL -o /opt/zpay-demo-home/.zcash-params/sapling-spend.params \
+        https://download.z.cash/downloads/sapling-spend.params && \
+    curl -fsSL -o /opt/zpay-demo-home/.zcash-params/sapling-output.params \
+        https://download.z.cash/downloads/sapling-output.params && \
+    chown -R ${APP_UID}:${APP_GID} /opt/zpay-demo-home/.zcash-params
+
+ENV RUST_LOG=info \
+    HOME=/opt/zpay-demo-home \
+    ZPAY_DEMO_BIND_ADDR=0.0.0.0:7410 \
+    ZPAY_DEMO_STATIC_DIR=/app/static \
+    ZPAY_DEMO_WALLET_DIR=/var/lib/zpay-demo/wallet
+
+EXPOSE 7410
+
+# Liveness probe: /demo/v1/readiness always returns 200 (dependency
+# status lives in the body), so a non-200 means the process itself is
+# down or unresponsive.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS --max-time 5 -o /dev/null "http://localhost:7410/demo/v1/readiness" || exit 1
+
+CMD ["./start.sh"]

@@ -36,11 +36,19 @@ ensure_seed() {
     exit 1
 }
 
+ensure_jwks() {
+    if [ -n "${ZSPEND_JWKS_JSON:-}" ] && [ -n "${ZSPEND_JWKS_FILE:-}" ]; then
+        printf '%s' "$ZSPEND_JWKS_JSON" > "$ZSPEND_JWKS_FILE"
+    fi
+}
+
 if [ "$(id -u)" = "0" ]; then
     chown -R zspend:zspend /var/lib/zspend 2>/dev/null || true
+    ensure_jwks
     ensure_seed "gosu zspend"
     exec gosu zspend /app/zspend-runtime serve
 else
+    ensure_jwks
     ensure_seed ""
     exec /app/zspend-runtime serve
 fi

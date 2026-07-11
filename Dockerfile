@@ -40,16 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy the full workspace. The workspace has seven crates with
 # interlinked path deps; the dummy-src cache trick used in single-
-# crate Dockerfiles does not extend cleanly here, so we rely on the
-# registry + target cache mounts to keep iterative builds fast.
+# crate Dockerfiles does not extend cleanly here.
 COPY --link Cargo.toml Cargo.lock ./
 COPY --link crates ./crates
 
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=${APP_HOME}/target \
-    cargo build --locked --release --bin zpay-runtime && \
+RUN cargo build --locked --release --bin zpay-runtime && \
     cp ${APP_HOME}/target/release/zpay-runtime ${APP_HOME}/zpay-runtime
 
 # --- Stage 2: Runtime ---
@@ -78,10 +75,20 @@ COPY --link docker/start.sh ./start.sh
 
 RUN groupadd --gid ${APP_GID} ${APP_USER} && \
     useradd --uid ${APP_UID} --gid ${APP_USER} --shell /sbin/nologin ${APP_USER} && \
-    mkdir -p /var/lib/zpay /opt/zpay-home/.zcash-params /home/zpay/.zcash-params && \
+    mkdir -p /var/lib/zpay /opt/zpay-home/.zcash-params /home/zpay && \
+    ln -s /opt/zpay-home/.zcash-params /home/zpay/.zcash-params && \
     touch /var/lib/zpay/.keep && \
     chmod +x start.sh && \
     chown -R ${APP_UID}:${APP_GID} ${APP_HOME} /var/lib/zpay /opt/zpay-home /home/zpay
+
+# Sapling trusted-setup parameters: the same files zcashd/lightwalletd fetch
+# via fetch-params.sh. Baked into the image so PCZT verification/extraction
+# needs no outbound fetch at boot (see docs/runbooks/railway-deploy.md).
+RUN curl -fsSL -o /opt/zpay-home/.zcash-params/sapling-spend.params \
+        https://download.z.cash/downloads/sapling-spend.params && \
+    curl -fsSL -o /opt/zpay-home/.zcash-params/sapling-output.params \
+        https://download.z.cash/downloads/sapling-output.params && \
+    chown -R ${APP_UID}:${APP_GID} /opt/zpay-home/.zcash-params
 
 ENV RUST_LOG=info \
     HOME=/opt/zpay-home \
