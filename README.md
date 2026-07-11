@@ -252,7 +252,7 @@ zpay/
   Cargo.toml                workspace root
   Dockerfile                multi-stage Rust release build
   docker-compose.yml        local dev: zpay + dev-only payee bypass
-  railway.toml              Railway deploy config; same project as zinder
+  railway.<service>.toml    per-service Railway deploy configs (zpay, zspend, zpay-demo)
   rust-toolchain.toml       1.95
   crates/
     zpay-core/              types, lifecycle, traits, ZIP-302 binding,
@@ -299,13 +299,13 @@ Railway is the supported managed path. The runbook covers the env-var
 matrix, volume provisioning, and the cross-service wiring to zinder:
 
 ```bash
-./scripts/deploy-to-railway.sh
+./scripts/deploy-to-railway.sh <zpay|zspend|zpay-demo|all>
 ```
 
 See [docs/runbooks/railway-deploy.md](docs/runbooks/railway-deploy.md)
-for the first-deploy checklist, the placeholder-payee boot gate, and
-the rollback procedure. The Dockerfile is the source of truth for the
-build; Docker Compose mirrors it locally with the dev-only
+for the service matrix, first-deploy checklist, and rollback
+procedure. The per-service Dockerfiles are the source of truth for the
+builds; Docker Compose mirrors them locally with the dev-only
 `ZPAY_ALLOW_DEMO_PAYEE=1` flag flipped on.
 
 ## Validation gate

@@ -64,7 +64,7 @@ How `zspend` uses the wallet:
   `wallet.send_payment(plan)` (`crates/zspend-runtime/src/main.rs:931`). There
   is no pool-specific construction, so the wallet spends the conventional
   (Orchard) path. Ironwood is unwired in the wallet today.
-- Deployment already carries a restart policy: `railway.toml` sets
+- Deployment already carries a restart policy: the per-service Railway configs set
   `restartPolicyType = "ALWAYS"`. zpay does not share fauzec's original
   outage cause (a watchdog exit with no Railway restart).
 

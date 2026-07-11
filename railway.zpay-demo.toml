@@ -1,0 +1,14 @@
+#:schema https://railway.com/railway.schema.json
+# zpay-demo service config, staged as ./railway.toml by
+# scripts/deploy-to-railway.sh (which also overlays Dockerfile.zpay-demo
+# as ./Dockerfile). Env vars live in docs/runbooks/railway-deploy.md.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/demo/v1/readiness"
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"
+numReplicas = 1
