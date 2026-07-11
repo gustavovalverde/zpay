@@ -77,6 +77,57 @@ export interface PaymentBody {
   message: string;
 }
 
+export type CryptographicVerdict = "valid" | "invalid_signature" | "malformed" | "inconclusive";
+export type InconclusiveReason = "unsupported_pool" | "unknown_version" | "prevout_unresolved";
+export type ChainPresence = "mined" | "not_found" | "oracle_unavailable";
+export type AmountReconciliation = "match" | "mismatch" | "not_checked";
+
+export interface VerifyRequestBody {
+  txid: string;
+  expected_amount_zat: number;
+  disclosure_payload_hex: string;
+}
+
+export interface VerifyResponseBody {
+  cryptographic_verdict: CryptographicVerdict;
+  inconclusive_reason?: InconclusiveReason;
+  chain_presence: ChainPresence;
+  amount_reconciliation: AmountReconciliation;
+  transaction_id?: string;
+  payment_id?: string;
+  disclosed_value_zat?: number;
+}
+
+export interface ConsoleBroadcastOutcomeBody {
+  kind: string;
+  transaction_id?: string;
+  upstream_message?: string;
+}
+
+export interface ConsolePaymentRow {
+  payment_id: string;
+  payee_id: string;
+  amount_zat: number;
+  broadcast_outcome: ConsoleBroadcastOutcomeBody;
+  confirmation_count?: number;
+  mined_block_height?: number;
+  reorg_count: number;
+  settled_at_unix_seconds: number;
+}
+
+export interface ConsoleRateLimitsBody {
+  per_jkt_per_minute: number;
+  per_ip_per_minute: number;
+  tracked_jkt_count: number;
+  tracked_ip_count: number;
+  limited_total_count: number;
+}
+
+export interface ConsolePaymentsBody {
+  payments: ConsolePaymentRow[];
+  rate_limits: ConsoleRateLimitsBody;
+}
+
 export class DemoProblem extends Error {
   readonly kind: string;
   readonly retryable: boolean;
@@ -161,4 +212,19 @@ export function settlePayment(paymentId: string): Promise<PaymentBody> {
 
 export function paymentEventsUrl(paymentId: string): string {
   return `/demo/v1/payments/${paymentId}/events`;
+}
+
+export function listPayments(): Promise<PaymentBody[]> {
+  return requestJson<PaymentBody[]>("/demo/v1/payments");
+}
+
+export function verifyPaymentReceipt(request: VerifyRequestBody): Promise<VerifyResponseBody> {
+  return requestJson<VerifyResponseBody>("/demo/v1/verify", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function getConsolePayments(): Promise<ConsolePaymentsBody> {
+  return requestJson<ConsolePaymentsBody>("/demo/v1/console/payments");
 }

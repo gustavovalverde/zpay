@@ -73,6 +73,10 @@ async fn migration_upgrades_existing_v1_database() -> TestResult {
     assert_eq!(entry.reorg_count, 0);
     assert_eq!(entry.last_reorged_at, None);
     assert_eq!(entry.expiry_height, None);
+    // Migration 0003 sentinel defaults for a row that predates payee/amount
+    // attribution (ADR-0014): empty payee_id, zero amount_zat.
+    assert_eq!(entry.payee_id.0, "");
+    assert_eq!(entry.amount_zat.0, 0);
 
     // The reorg-aware path works against the upgraded row.
     assert!(

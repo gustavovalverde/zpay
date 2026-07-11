@@ -864,6 +864,8 @@ mod tests {
                     reorg_count: 0,
                     last_reorged_at: None,
                     expiry_height: Some(2_000_010),
+                    payee_id: PayeeId("aether-ai".to_owned()),
+                    amount_zat: Zatoshis(50_000),
                 },
             )
             .await?;

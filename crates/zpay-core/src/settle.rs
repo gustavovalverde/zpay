@@ -447,6 +447,8 @@ where
                 reorg_count: 0,
                 last_reorged_at: None,
                 expiry_height: Some(prepared.preparation.expiry_height),
+                payee_id: prepared.payee_id.clone(),
+                amount_zat: prepared.amount_zat,
             },
         )
         .await?;

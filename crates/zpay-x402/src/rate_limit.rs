@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -43,12 +44,32 @@ struct Window {
     started_at: Instant,
 }
 
+/// Point-in-time view of the limiter's tracked windows.
+///
+/// For the operator console (see [ADR-0014](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0014-operator-payments-console.md)).
+/// Read-only: taking a snapshot never changes a budget or a window.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitSnapshot {
+    /// Configured per-`jkt`-per-minute budget. `0` means the dimension is disabled.
+    pub per_jkt_per_minute: u32,
+    /// Configured per-IP-per-minute budget. `0` means the dimension is disabled.
+    pub per_ip_per_minute: u32,
+    /// Distinct `jkt` keys with a live (unexpired) window right now.
+    pub tracked_jkt_count: usize,
+    /// Distinct IP keys with a live (unexpired) window right now.
+    pub tracked_ip_count: usize,
+    /// Requests refused with [`RateLimitDecision::Limited`] since the
+    /// process started, across both dimensions.
+    pub limited_total_count: u64,
+}
+
 /// Shared, process-wide fixed-window limiter.
 pub struct RateLimiter {
     per_jkt_per_minute: u32,
     per_ip_per_minute: u32,
     windows: Mutex<HashMap<RateLimitKey, Window>>,
     last_sweep: Mutex<Instant>,
+    limited_total: AtomicU64,
 }
 
 impl RateLimiter {
@@ -61,6 +82,34 @@ impl RateLimiter {
             per_ip_per_minute,
             windows: Mutex::new(HashMap::new()),
             last_sweep: Mutex::new(Instant::now()),
+            limited_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Current snapshot of tracked windows and lifetime limited count, for
+    /// the operator console.
+    #[must_use]
+    pub fn snapshot(&self) -> RateLimitSnapshot {
+        let now = Instant::now();
+        let windows = self.windows.lock();
+        let mut tracked_jkt_count = 0;
+        let mut tracked_ip_count = 0;
+        for (key, window) in windows.iter() {
+            if now.duration_since(window.started_at) >= WINDOW {
+                continue;
+            }
+            match key {
+                RateLimitKey::Jkt(_) => tracked_jkt_count += 1,
+                RateLimitKey::Ip(_) => tracked_ip_count += 1,
+            }
+        }
+        drop(windows);
+        RateLimitSnapshot {
+            per_jkt_per_minute: self.per_jkt_per_minute,
+            per_ip_per_minute: self.per_ip_per_minute,
+            tracked_jkt_count,
+            tracked_ip_count,
+            limited_total_count: self.limited_total.load(Ordering::Relaxed),
         }
     }
 
@@ -97,6 +146,7 @@ impl RateLimiter {
                 .saturating_sub(now.duration_since(window.started_at))
                 .as_secs()
                 .max(1);
+            self.limited_total.fetch_add(1, Ordering::Relaxed);
             RateLimitDecision::Limited {
                 retry_after_seconds,
             }
@@ -229,5 +279,36 @@ mod tests {
             "expired window must be evicted by the sweep",
         );
         Ok(())
+    }
+
+    #[test]
+    fn snapshot_reports_configured_budgets_and_live_tracked_keys() {
+        let limiter = RateLimiter::new(1, 2);
+        assert_eq!(limiter.check_jkt("a"), RateLimitDecision::Allowed);
+        assert_eq!(limiter.check_ip(ip(1)), RateLimitDecision::Allowed);
+        assert_eq!(limiter.check_ip(ip(2)), RateLimitDecision::Allowed);
+
+        let snapshot = limiter.snapshot();
+        assert_eq!(snapshot.per_jkt_per_minute, 1);
+        assert_eq!(snapshot.per_ip_per_minute, 2);
+        assert_eq!(snapshot.tracked_jkt_count, 1);
+        assert_eq!(snapshot.tracked_ip_count, 2);
+        assert_eq!(snapshot.limited_total_count, 0);
+    }
+
+    #[test]
+    fn snapshot_counts_limited_decisions_cumulatively() {
+        let limiter = RateLimiter::new(1, 0);
+        assert_eq!(limiter.check_jkt("k"), RateLimitDecision::Allowed);
+        assert!(matches!(
+            limiter.check_jkt("k"),
+            RateLimitDecision::Limited { .. }
+        ));
+        assert!(matches!(
+            limiter.check_jkt("k"),
+            RateLimitDecision::Limited { .. }
+        ));
+
+        assert_eq!(limiter.snapshot().limited_total_count, 2);
     }
 }

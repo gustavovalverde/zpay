@@ -17,11 +17,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Json, Router};
 use clap::Parser;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use rejecting_fetcher::RejectingTransactionFetcher;
@@ -31,6 +31,7 @@ use zinder_fetcher::ZinderTransactionFetcher;
 use zinder_oracle::ZinderConfirmationOracle;
 use zinder_submitter::ZinderSubmitter;
 use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
+use zpay_core::broadcast::BroadcastOutcome;
 use zpay_core::chain_status::{ChainStatusCache, ChainStatusView};
 use zpay_core::disclosure_fetcher::{DisclosedTransaction, DisclosureFetcher, FetchError};
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome};
@@ -168,6 +169,8 @@ async fn main() -> Result<(), StartupError> {
         metrics,
         app_bind_addr: config.app_bind_addr,
         ops_bind_addr: config.ops_bind_addr,
+        settlement_ledger: Arc::clone(&app_plane.ledger),
+        rate_limiter: Arc::clone(&app_plane.rate_limiter),
     };
 
     let app_router = app_plane.router;
@@ -236,6 +239,7 @@ struct AppPlane {
     ledger: Arc<AnySettlementLedgerStore>,
     events: Arc<PaymentEventHub>,
     chain_status: Arc<ChainStatusCache>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupError> {
@@ -269,7 +273,7 @@ async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupEr
         expectations,
         config.finality_depth,
         Arc::clone(&chain_status),
-        rate_limiter,
+        Arc::clone(&rate_limiter),
         config.rate_limit_trust_forwarded_headers,
     );
     // `/healthz` lives on the app listener too so platform health probes
@@ -293,6 +297,7 @@ async fn build_app_router(config: &ResolvedConfig) -> Result<AppPlane, StartupEr
         ledger,
         events,
         chain_status,
+        rate_limiter,
     })
 }
 
@@ -431,6 +436,17 @@ impl SettlementLedgerStore for AnySettlementLedgerStore {
         match self {
             Self::Memory(inner) => inner.success_kind_transactions().await,
             Self::Libsql(inner) => inner.success_kind_transactions().await,
+        }
+    }
+
+    async fn list_recent(
+        &self,
+        limit: u32,
+        payee_id: Option<&PayeeId>,
+    ) -> Result<Vec<(PaymentId, SettlementLedgerEntry)>, StoreError> {
+        match self {
+            Self::Memory(inner) => inner.list_recent(limit, payee_id).await,
+            Self::Libsql(inner) => inner.list_recent(limit, payee_id).await,
         }
     }
 
@@ -1214,6 +1230,10 @@ struct OpsState {
     metrics: PrometheusHandle,
     app_bind_addr: SocketAddr,
     ops_bind_addr: SocketAddr,
+    /// Settlement ledger, for the operator payments console (ADR-0014).
+    settlement_ledger: Arc<AnySettlementLedgerStore>,
+    /// Rate limiter, for the operator payments console's rate-limit panel.
+    rate_limiter: Arc<RateLimiter>,
 }
 
 fn build_ops_router(state: OpsState) -> Router {
@@ -1221,6 +1241,7 @@ fn build_ops_router(state: OpsState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
+        .route("/payments", get(ops_payments_route))
         .with_state(state)
 }
 
@@ -1335,6 +1356,110 @@ async fn evaluate_readiness(
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, body)
+}
+
+/// Default and maximum row count for [`ops_payments_route`].
+///
+/// Bounded, not paginated: the console shows a recent window, not a full
+/// history browser (see [ADR-0014](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0014-operator-payments-console.md)).
+const OPS_PAYMENTS_DEFAULT_LIMIT: u32 = 50;
+const OPS_PAYMENTS_MAX_LIMIT: u32 = 200;
+
+#[derive(Debug, serde::Deserialize)]
+struct OpsPaymentsQuery {
+    limit: Option<u32>,
+    payee_id: Option<String>,
+}
+
+/// One settlement ledger row, as the operator payments console renders it.
+#[derive(serde::Serialize)]
+struct OpsPaymentRow {
+    payment_id: String,
+    payee_id: String,
+    amount_zat: u64,
+    broadcast_outcome: BroadcastOutcome,
+    confirmation_count: Option<u32>,
+    mined_block_height: Option<u64>,
+    reorg_count: u32,
+    settled_at_unix_seconds: i64,
+}
+
+/// Snapshot of the rate limiter's configured budgets and current load, for
+/// the operator payments console.
+#[derive(serde::Serialize)]
+struct OpsRateLimitBody {
+    per_jkt_per_minute: u32,
+    per_ip_per_minute: u32,
+    tracked_jkt_count: usize,
+    tracked_ip_count: usize,
+    limited_total_count: u64,
+}
+
+#[derive(serde::Serialize)]
+struct OpsPaymentsBody {
+    payments: Vec<OpsPaymentRow>,
+    rate_limits: OpsRateLimitBody,
+}
+
+/// Clamp the caller-requested row count to `(0, OPS_PAYMENTS_MAX_LIMIT]`,
+/// defaulting to [`OPS_PAYMENTS_DEFAULT_LIMIT`] when unset.
+fn clamp_ops_payments_limit(requested: Option<u32>) -> u32 {
+    requested
+        .unwrap_or(OPS_PAYMENTS_DEFAULT_LIMIT)
+        .clamp(1, OPS_PAYMENTS_MAX_LIMIT)
+}
+
+fn ops_payment_rows(entries: Vec<(PaymentId, SettlementLedgerEntry)>) -> Vec<OpsPaymentRow> {
+    entries
+        .into_iter()
+        .map(|(payment_id, entry)| OpsPaymentRow {
+            payment_id: payment_id.0,
+            payee_id: entry.payee_id.0,
+            amount_zat: entry.amount_zat.0,
+            broadcast_outcome: entry.broadcast_outcome,
+            confirmation_count: entry.confirmation_count,
+            mined_block_height: entry.mined_block_height,
+            reorg_count: entry.reorg_count,
+            settled_at_unix_seconds: entry.settled_at_unix_seconds,
+        })
+        .collect()
+}
+
+async fn ops_payments_route(
+    State(state): State<OpsState>,
+    Query(query): Query<OpsPaymentsQuery>,
+) -> Response {
+    let limit = clamp_ops_payments_limit(query.limit);
+    let payee_id = query.payee_id.map(PayeeId);
+
+    let rows = match state
+        .settlement_ledger
+        .list_recent(limit, payee_id.as_ref())
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let payments = ops_payment_rows(rows);
+    let rate_limit_snapshot = state.rate_limiter.snapshot();
+    Json(OpsPaymentsBody {
+        payments,
+        rate_limits: OpsRateLimitBody {
+            per_jkt_per_minute: rate_limit_snapshot.per_jkt_per_minute,
+            per_ip_per_minute: rate_limit_snapshot.per_ip_per_minute,
+            tracked_jkt_count: rate_limit_snapshot.tracked_jkt_count,
+            tracked_ip_count: rate_limit_snapshot.tracked_ip_count,
+            limited_total_count: rate_limit_snapshot.limited_total_count,
+        },
+    })
+    .into_response()
 }
 
 #[derive(Debug, Clone)]
@@ -1671,9 +1796,9 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmationOracle, ConfirmationOutcome, StartupError, connect_configured_zinder_chain,
-        is_placeholder_pay_to, parse_truthy, poll_oracle_once, resolve_verify_network,
-        validate_payees,
+        ConfirmationOracle, ConfirmationOutcome, OPS_PAYMENTS_MAX_LIMIT, StartupError,
+        clamp_ops_payments_limit, connect_configured_zinder_chain, is_placeholder_pay_to,
+        ops_payment_rows, parse_truthy, poll_oracle_once, resolve_verify_network, validate_payees,
     };
     use parking_lot::Mutex;
     use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
@@ -1802,6 +1927,8 @@ mod tests {
             reorg_count: 0,
             last_reorged_at: None,
             expiry_height: Some(2_000_000),
+            payee_id: PayeeId("aether-demo".to_owned()),
+            amount_zat: Zatoshis(50_000),
         }
     }
 
@@ -2148,6 +2275,8 @@ mod tests {
                     reorg_count: 0,
                     last_reorged_at: None,
                     expiry_height: None,
+                    payee_id: PayeeId("aether-demo".to_owned()),
+                    amount_zat: Zatoshis(50_000),
                 },
             )
             .await
@@ -2169,6 +2298,44 @@ mod tests {
         )
         .await;
         Ok(())
+    }
+
+    #[test]
+    fn ops_payments_limit_defaults_and_clamps_to_the_maximum() {
+        assert_eq!(clamp_ops_payments_limit(None), 50);
+        assert_eq!(clamp_ops_payments_limit(Some(10)), 10);
+        assert_eq!(
+            clamp_ops_payments_limit(Some(OPS_PAYMENTS_MAX_LIMIT + 1_000)),
+            OPS_PAYMENTS_MAX_LIMIT,
+        );
+        assert_eq!(clamp_ops_payments_limit(Some(0)), 1);
+    }
+
+    #[test]
+    fn ops_payment_rows_project_ledger_entries_to_console_rows() {
+        let entry = SettlementLedgerEntry {
+            broadcast_outcome: BroadcastOutcome::Accepted {
+                transaction_id: "deadbeef".to_owned(),
+            },
+            settled_at_unix_seconds: 1_700_000_000,
+            confirmation_count: Some(3),
+            mined_block_height: Some(2_000_000),
+            reorg_count: 0,
+            last_reorged_at: None,
+            expiry_height: Some(2_000_010),
+            payee_id: PayeeId("aether-demo".to_owned()),
+            amount_zat: Zatoshis(50_000),
+        };
+        let rows = ops_payment_rows(vec![(PaymentId("pid-1".to_owned()), entry)]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].payment_id, "pid-1");
+        assert_eq!(rows[0].payee_id, "aether-demo");
+        assert_eq!(rows[0].amount_zat, 50_000);
+        assert!(matches!(
+            rows[0].broadcast_outcome,
+            BroadcastOutcome::Accepted { .. }
+        ));
+        assert_eq!(rows[0].confirmation_count, Some(3));
     }
 }
 

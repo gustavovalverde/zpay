@@ -55,7 +55,7 @@ use zpay_core::settle::{
 };
 use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore, lookup_payment_status};
 use zpay_core::tip::{ChainTip, ChainTipOracle, TipError};
-use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork};
+use zpay_core::types::{PayeeId, PaymentId, PaymentNetwork, Zatoshis};
 use zpay_core::verify::{PaymentDisclosureVerifier, VerifyError, VerifyRequest, verify};
 
 pub use dpop::{
@@ -63,7 +63,7 @@ pub use dpop::{
     ReplayStore as DpopReplayStore, VerifiedDpopProof,
 };
 pub use events::PaymentEventHub;
-pub use rate_limit::{RateLimitDecision, RateLimiter};
+pub use rate_limit::{RateLimitDecision, RateLimitSnapshot, RateLimiter};
 pub use wire::{
     FacilitatorRequest, PAYMENT_REQUIRED_HEADER, PAYMENT_RESPONSE_HEADER, PAYMENT_SIGNATURE_HEADER,
     PaymentPayload, PaymentRequired, PaymentRequirements, ResourceInfo,
@@ -699,6 +699,8 @@ fn x402_request_invalid_reason(request: &FacilitatorRequest) -> Option<&'static 
 struct PreparedX402Settlement {
     payment_id: PaymentId,
     expiry_height: u32,
+    payee_id: PayeeId,
+    amount_zat: Zatoshis,
 }
 
 struct LifecycleSinks<'a, P, L>
@@ -789,6 +791,8 @@ where
     Ok(Some(PreparedX402Settlement {
         payment_id,
         expiry_height: prepared.preparation.expiry_height,
+        payee_id: prepared.payee_id.clone(),
+        amount_zat: prepared.amount_zat,
     }))
 }
 
@@ -813,6 +817,8 @@ where
                 reorg_count: 0,
                 last_reorged_at: None,
                 expiry_height: Some(prepared.expiry_height),
+                payee_id: prepared.payee_id.clone(),
+                amount_zat: prepared.amount_zat,
             },
         )
         .await

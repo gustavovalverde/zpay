@@ -154,18 +154,29 @@ Open [http://127.0.0.1:5174](http://127.0.0.1:5174).
 2. Click `Pay with ZEC`.
 3. Review the wallet sheet.
 4. Click `Approve payment`.
-5. Wait for `confirming`, then `paid`.
+5. Watch the stepper move through Quote, Authorize, Broadcast, and Settled.
 6. Click `View transaction`.
 
 Expected:
 
 - the locked report becomes `Report unlocked`,
 - the transaction opens on zexplorer,
-- `Payment details` shows the payment id, expiry height, confirmations,
-  settled state, and transaction id.
+- `What's happening on the wire` shows the payment id, expiry height,
+  confirmations, and transaction id.
 
 The demo grants access once zpay reports the payment as `final`. zpay may still
 report `settled: false` until zinder's settled tip reaches the mined block.
+
+## Read the protocol receipt
+
+Select the `Receipt` tab at any point during or after a checkout to see the
+same payment as a lifecycle timeline (prepared, signed, broadcast, settled).
+Switching tabs does not interrupt the in-flight payment: the checkout view's
+state, including its open SSE subscription, stays alive underneath. Each
+timeline node shows a client-observed timestamp only for stages the browser
+actually witnessed; a stage the gateway's response skipped over (for example
+when settlement jumps straight from `review` to a later stage) is marked
+reached without a fabricated timestamp.
 
 ## Run autopay mode
 
@@ -173,7 +184,7 @@ report `settled: false` until zinder's settled tip reaches the mined block.
 2. Select `Autopay`.
 3. Click `Pay with ZEC`.
 4. Click `Start autopay`.
-5. Wait for `confirming`, then `paid`.
+5. Watch the stepper move through Quote, Authorize, Broadcast, and Settled.
 6. Click `View transaction`.
 
 Expected:
@@ -185,6 +196,39 @@ Expected:
 
 The same access rule applies here: `final` unlocks the demo report, while
 settled depth can arrive later.
+
+## Run the agent comparison
+
+Select the `Agent` tab and click `Run agent`. This drives real, sequential
+`prepare` and `settle` calls in autopay mode against the demo stack: each call
+mints its own single-use zspend authorization grant (zspend does not pool a
+budget across payments), and the loop stops at a small demo-configured call
+count or spend ceiling, whichever comes first. `Reset` clears the counters so
+the loop can run again. This mode exercises the same autopay path as above,
+so it needs zspend `/readyz` ready and `jwks_cache` loaded.
+
+## Browse receipts and verify a disclosure
+
+Select the `Receipts` tab to see every payment made this session
+(`GET /demo/v1/payments`), most recent first; the list resets when the
+gateway restarts, since it reflects only the gateway's in-memory state. Pick
+a payment and click `Verify ZIP-311 disclosure` (enabled once the payment
+has broadcast) to call the real `POST /demo/v1/verify` proxy to zpay's ZIP-311
+verifier. The demo wallet does not yet emit a spendable disclosure, so the
+call runs with an empty payload and honestly reports whatever zpay's
+verifier returns for that input (typically `cryptographic_verdict:
+malformed`) rather than a fabricated pass.
+
+## Facilitator console (operator view)
+
+Select the `Console` tab for an operator-facing view of zpay-runtime itself:
+recent settled payments across all payees, rate-limit budgets and current
+load. This proxies to zpay-runtime's ops-listener `GET /payments`
+(see [ADR-0014](../adrs/0014-operator-payments-console.md)), not to
+`zpay-demo`'s own state, so it requires a zpay-runtime build that includes
+this route. Against an older zpay-runtime, the tab shows a graceful "zpay ops
+/payments returned 404" error rather than crashing; rebuild and restart
+zpay-runtime to pick up the route.
 
 ## Troubleshooting
 

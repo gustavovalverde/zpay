@@ -18,7 +18,7 @@ use crate::broadcast::BroadcastOutcome;
 use crate::chain_status::ChainStatusView;
 use crate::prepare::PreparedTxStore;
 use crate::store::StoreError;
-use crate::types::PaymentId;
+use crate::types::{PayeeId, PaymentId, Zatoshis};
 
 #[cfg(feature = "in_memory")]
 use parking_lot::Mutex;
@@ -178,6 +178,14 @@ pub struct SettlementLedgerEntry {
     /// unmined row's expiry-lapse check. `None` on rows written before the
     /// column existed.
     pub expiry_height: Option<u32>,
+    /// Payee carried onto the ledger at settle time, from the prepared row
+    /// before its fire-once deletion. See [ADR-0014](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0014-operator-payments-console.md).
+    /// Empty on rows written before this field existed.
+    pub payee_id: PayeeId,
+    /// Amount carried onto the ledger at settle time, from the prepared row
+    /// before its fire-once deletion. Zero on rows written before this field
+    /// existed.
+    pub amount_zat: Zatoshis,
 }
 
 /// A success-kind ledger row the confirmation poll iterates each tick.
@@ -222,6 +230,17 @@ pub trait SettlementLedgerStore: Send + Sync {
     fn success_kind_transactions(
         &self,
     ) -> impl Future<Output = Result<Vec<SuccessKindRow>, StoreError>> + Send;
+
+    /// The `limit` most recently recorded entries, most recent first,
+    /// optionally restricted to one payee. `payment_id` is a ULID, so a
+    /// descending sort by `payment_id` orders by recency without a
+    /// timestamp column. Backs the operator payments console
+    /// (see [ADR-0014](https://github.com/gustavovalverde/zpay/blob/main/docs/adrs/0014-operator-payments-console.md)).
+    fn list_recent(
+        &self,
+        limit: u32,
+        payee_id: Option<&PayeeId>,
+    ) -> impl Future<Output = Result<Vec<(PaymentId, SettlementLedgerEntry)>, StoreError>> + Send;
 
     /// Update the confirmation count and mined block height for an
     /// existing ledger entry. Returns `true` when an entry was found
@@ -322,6 +341,23 @@ impl SettlementLedgerStore for SettlementLedger {
             })
             .collect();
         drop(guard);
+        Ok(rows)
+    }
+
+    async fn list_recent(
+        &self,
+        limit: u32,
+        payee_id: Option<&PayeeId>,
+    ) -> Result<Vec<(PaymentId, SettlementLedgerEntry)>, StoreError> {
+        let guard = self.entries.lock();
+        let mut rows: Vec<(PaymentId, SettlementLedgerEntry)> = guard
+            .iter()
+            .filter(|(_, entry)| payee_id.is_none_or(|wanted| &entry.payee_id == wanted))
+            .map(|(payment_id, entry)| (payment_id.clone(), entry.clone()))
+            .collect();
+        drop(guard);
+        rows.sort_by(|a, b| b.0.0.cmp(&a.0.0));
+        rows.truncate(limit as usize);
         Ok(rows)
     }
 
@@ -526,7 +562,7 @@ mod tests {
         FIXTURE_JKT, FixedTipOracle, fixture_registry, valid_request,
     };
     use crate::prepare::{PreparedTxCache, propose};
-    use crate::types::PaymentId;
+    use crate::types::{PayeeId, PaymentId, Zatoshis};
 
     const UNKNOWN_CHAIN: ChainStatusView = ChainStatusView {
         visible_tip_height: None,
@@ -548,6 +584,8 @@ mod tests {
             reorg_count: 0,
             last_reorged_at: None,
             expiry_height: None,
+            payee_id: PayeeId("test-payee".to_owned()),
+            amount_zat: Zatoshis(50_000),
         }
     }
 
@@ -562,6 +600,8 @@ mod tests {
             reorg_count: 0,
             last_reorged_at: None,
             expiry_height: None,
+            payee_id: PayeeId("test-payee".to_owned()),
+            amount_zat: Zatoshis(50_000),
         }
     }
 

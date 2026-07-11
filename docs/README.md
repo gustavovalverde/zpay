@@ -35,6 +35,7 @@ The docs are organised by lifecycle, not by topic:
 | [0011](adrs/0011-zcash-x402-exact-binding.md) | Zcash x402 exact binding | Accepted | Facilitator surface |
 | [0012](adrs/0012-testkit-agent-payment-client.md) | Testkit owns agent payment client fixtures | Accepted | Dev and test client infrastructure |
 | [0013](adrs/0013-shared-dpop-primitives.md) | Shared DPoP primitives | Accepted | DPoP verification |
+| [0014](adrs/0014-operator-payments-console.md) | Operator payments console boundary | Accepted | Operator surface, settlement ledger schema |
 
 ## Architecture index
 
@@ -63,6 +64,15 @@ The docs are organised by lifecycle, not by topic:
 
 ## Proposals index
 
-Empty at scaffold time. See the upstream-asks list in
-[product-requirements.md §Cross-project asks](product-requirements.md#cross-project-asks)
-for the proposals that will land here.
+| # | Title | Upstream |
+|---|-------|----------|
+| [0001](proposals/0001-zally-payment-request-to-uri.md) | zally `PaymentRequest::to_uri()` | zally |
+| [0002](proposals/0002-zinder-zip311-verifier.md) | zinder ZIP-311 verifier | zinder |
+| [0003](proposals/0003-agent-wallet-production-architecture.md) | Agent wallet production architecture | zally |
+| [0003](proposals/0003-fauzec-bearer-captcha-mode.md) | fauzec `CaptchaMode::Bearer` | fauzec |
+| [0004](proposals/0004-zexplorer-per-txid-watch.md) | zexplorer per-txid watch route | zexplorer |
+| [0005](proposals/0005-zentity-mcp-zcash-purchase.md) | zentity MCP `purchase` tool `scheme: "zcash"` | zentity |
+| [0006](proposals/0006-zally-zip311-disclosure-production.md) | zally ZIP-311 payment-disclosure production | zally |
+
+See also the upstream-asks list in
+[product-requirements.md §Cross-project asks](product-requirements.md#cross-project-asks).

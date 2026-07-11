@@ -127,6 +127,7 @@ Operational surface (ops listener):
 | `GET /healthz` | Process liveness, `{"status":"alive"}`. Also mounted on the main listener. |
 | `GET /readyz` | Dependency readiness (chain plane plus store), 200 or 503. |
 | `GET /metrics` | Prometheus text format. |
+| `GET /payments` | Operator payments console (see [ADR-0014](../adrs/0014-operator-payments-console.md)). |
 
 Dev demo surface (`zpay-demo`, loopback only by default):
 
@@ -136,10 +137,13 @@ Dev demo surface (`zpay-demo`, loopback only by default):
 | `GET /demo/v1/wallet` | Demo wallet address, balances, funding posture, and network. |
 | `POST /demo/v1/faucet-claims` | Optional fauzec claim for first-run funding. |
 | `GET /demo/v1/faucet-claims/{request_id}` | Fauzec claim status. |
+| `GET /demo/v1/payments` | List payments made this session, most recent first. |
 | `POST /demo/v1/payments` | Prepare a zpay checkout in `checkout` or `autopay` mode. |
 | `POST /demo/v1/payments/{payment_id}/settle` | Sign and settle the prepared demo payment. |
 | `GET /demo/v1/payments/{payment_id}` | Enriched demo payment status. |
 | `GET /demo/v1/payments/{payment_id}/events` | SSE stream of enriched demo payment status. |
+| `POST /demo/v1/verify` | Proxy to zpay's ZIP-311 disclosure verify. |
+| `GET /demo/v1/console/payments` | Proxy to zpay's ops-listener operator console. |
 
 The demo route surface is not a production zpay runtime API. Browser clients
 call only this gateway; the gateway holds demo-only wallet state, DPoP keys,

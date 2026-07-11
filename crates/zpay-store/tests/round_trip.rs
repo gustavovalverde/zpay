@@ -222,6 +222,10 @@ async fn idempotency_clash_returns_integrity_violation() -> TestResult {
 }
 
 fn accepted_ledger_entry(transaction_id: &str) -> SettlementLedgerEntry {
+    accepted_ledger_entry_for_payee(transaction_id, "aether-ai")
+}
+
+fn accepted_ledger_entry_for_payee(transaction_id: &str, payee_id: &str) -> SettlementLedgerEntry {
     SettlementLedgerEntry {
         broadcast_outcome: BroadcastOutcome::Accepted {
             transaction_id: transaction_id.to_owned(),
@@ -232,6 +236,8 @@ fn accepted_ledger_entry(transaction_id: &str) -> SettlementLedgerEntry {
         reorg_count: 0,
         last_reorged_at: None,
         expiry_height: Some(2_000_000),
+        payee_id: PayeeId(payee_id.to_owned()),
+        amount_zat: Zatoshis(50_000),
     }
 }
 
@@ -371,6 +377,8 @@ async fn success_kind_transactions_skips_failure_outcomes() -> TestResult {
                 reorg_count: 0,
                 last_reorged_at: None,
                 expiry_height: None,
+                payee_id: PayeeId("aether-ai".to_owned()),
+                amount_zat: Zatoshis(50_000),
             },
         )
         .await?;
@@ -378,5 +386,51 @@ async fn success_kind_transactions_skips_failure_outcomes() -> TestResult {
     let rows = ledger.success_kind_transactions().await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].payment_id, PaymentId("ok".to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_recent_orders_most_recent_first_and_filters_by_payee() -> TestResult {
+    let (_temp, _, ledger) = fresh_stores().await?;
+    ledger
+        .record(
+            PaymentId("01AAA".to_owned()),
+            accepted_ledger_entry_for_payee("tx-a", "aether-ai"),
+        )
+        .await?;
+    ledger
+        .record(
+            PaymentId("01CCC".to_owned()),
+            accepted_ledger_entry_for_payee("tx-c", "signal-api"),
+        )
+        .await?;
+    ledger
+        .record(
+            PaymentId("01BBB".to_owned()),
+            accepted_ledger_entry_for_payee("tx-b", "aether-ai"),
+        )
+        .await?;
+
+    let all = ledger.list_recent(10, None).await?;
+    assert_eq!(
+        all.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
+        vec!["01CCC".to_owned(), "01BBB".to_owned(), "01AAA".to_owned()],
+        "most recent (highest ULID) first",
+    );
+
+    let bounded = ledger.list_recent(2, None).await?;
+    assert_eq!(bounded.len(), 2);
+
+    let filtered = ledger
+        .list_recent(10, Some(&PayeeId("aether-ai".to_owned())))
+        .await?;
+    assert_eq!(
+        filtered.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
+        vec!["01BBB".to_owned(), "01AAA".to_owned()],
+    );
+    for (_, entry) in &filtered {
+        assert_eq!(entry.payee_id, PayeeId("aether-ai".to_owned()));
+        assert_eq!(entry.amount_zat, Zatoshis(50_000));
+    }
     Ok(())
 }

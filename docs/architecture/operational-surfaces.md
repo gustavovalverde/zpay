@@ -123,10 +123,16 @@ access-token `jti` is reserved.
 | `/healthz` | GET | 200, `{"status":"alive"}` | Liveness; answers whenever the process runs. |
 | `/readyz` | GET | 200 or 503 with the JSON above | Dependency readiness. |
 | `/metrics` | GET | 200, Prometheus text (`text/plain; version=0.0.4; charset=utf-8`) | Metrics for scraping. |
+| `/payments` | GET | 200, JSON payments list + rate-limit snapshot | Operator payments console (see [ADR-0014](../adrs/0014-operator-payments-console.md)); accepts `?limit=` (default 50, max 200) and `?payee_id=`. |
 
 `/healthz` is also mounted on the main listener so a platform health probe
 (Railway, Kubernetes, an ALB) that reaches only the public port gets a 200
 from a healthy process.
+
+`/payments` is the first ops-listener route that carries payment content, not
+only aggregate health data. The ops listener's existing "private by
+deployment, not by code" contract (never expose it publicly) now protects
+payment confidentiality as well as liveness data.
 
 ## Metrics
 
@@ -247,10 +253,13 @@ Routes:
 | `/demo/v1/wallet` | GET | Demo wallet address, balances, funding posture, and network. |
 | `/demo/v1/faucet-claims` | POST | Submit a fauzec claim for the demo wallet. |
 | `/demo/v1/faucet-claims/{request_id}` | GET | Poll a fauzec claim. |
+| `/demo/v1/payments` | GET | List payments made this session, most recent first. |
 | `/demo/v1/payments` | POST | Prepare a checkout through zpay. |
 | `/demo/v1/payments/{payment_id}/settle` | POST | Sign and settle using the stored payment mode. |
 | `/demo/v1/payments/{payment_id}` | GET | Enriched payment status for the UI. |
 | `/demo/v1/payments/{payment_id}/events` | GET | SSE status stream for the UI. |
+| `/demo/v1/verify` | POST | Proxy to zpay's ZIP-311 disclosure verify. |
+| `/demo/v1/console/payments` | GET | Proxy to zpay's ops-listener `GET /payments` operator console. |
 
 Configuration:
 

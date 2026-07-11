@@ -5,7 +5,7 @@ use libsql::params;
 use zpay_core::broadcast::BroadcastOutcome;
 use zpay_core::status::{SettlementLedgerEntry, SettlementLedgerStore, SuccessKindRow};
 use zpay_core::store::StoreError;
-use zpay_core::types::PaymentId;
+use zpay_core::types::{PayeeId, PaymentId, Zatoshis};
 
 use crate::connection::StoreConnection;
 
@@ -48,8 +48,8 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                     payment_id, broadcast_outcome_kind, transaction_id, upstream_message, \
                     settled_at_unix_seconds, confirmation_count, mined_block_height, \
                     last_confirmation_check_at_unix_seconds, reorg_count, last_reorged_at, \
-                    expiry_height\
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) \
+                    expiry_height, payee_id, amount_zat\
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) \
                 ON CONFLICT(payment_id) DO UPDATE SET \
                     broadcast_outcome_kind = excluded.broadcast_outcome_kind, \
                     transaction_id = excluded.transaction_id, \
@@ -60,7 +60,9 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                     last_confirmation_check_at_unix_seconds = NULL, \
                     reorg_count = excluded.reorg_count, \
                     last_reorged_at = excluded.last_reorged_at, \
-                    expiry_height = excluded.expiry_height",
+                    expiry_height = excluded.expiry_height, \
+                    payee_id = excluded.payee_id, \
+                    amount_zat = excluded.amount_zat",
                 params![
                     payment_id.0,
                     kind,
@@ -72,6 +74,8 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                     reorg_count,
                     entry.last_reorged_at,
                     expiry_height,
+                    entry.payee_id.0.clone(),
+                    i64::try_from(entry.amount_zat.0).unwrap_or(i64::MAX),
                 ],
             )
             .await
@@ -88,7 +92,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             .query(
                 "SELECT broadcast_outcome_kind, transaction_id, upstream_message, \
                     settled_at_unix_seconds, confirmation_count, mined_block_height, \
-                    reorg_count, last_reorged_at, expiry_height \
+                    reorg_count, last_reorged_at, expiry_height, payee_id, amount_zat \
                 FROM settlement_ledger WHERE payment_id = ?",
                 params![payment_id.0.clone()],
             )
@@ -101,7 +105,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
         else {
             return Ok(None);
         };
-        Ok(Some(row_to_settlement_ledger_entry(&row)?))
+        Ok(Some(row_to_settlement_ledger_entry(&row, 0)?))
     }
 
     async fn entry_count(&self) -> Result<usize, StoreError> {
@@ -143,6 +147,50 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
                 transaction_id,
                 mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
             });
+        }
+        Ok(collected)
+    }
+
+    async fn list_recent(
+        &self,
+        limit: u32,
+        payee_id: Option<&PayeeId>,
+    ) -> Result<Vec<(PaymentId, SettlementLedgerEntry)>, StoreError> {
+        const COLUMNS: &str = "payment_id, broadcast_outcome_kind, transaction_id, upstream_message, \
+            settled_at_unix_seconds, confirmation_count, mined_block_height, \
+            reorg_count, last_reorged_at, expiry_height, payee_id, amount_zat";
+        let limit_i64 = i64::from(limit);
+        let mut rows = if let Some(payee_id) = payee_id {
+            self.connection
+                .query(
+                    &format!(
+                        "SELECT {COLUMNS} FROM settlement_ledger \
+                        WHERE payee_id = ? ORDER BY payment_id DESC LIMIT ?"
+                    ),
+                    params![payee_id.0.clone(), limit_i64],
+                )
+                .await
+        } else {
+            self.connection
+                .query(
+                    &format!("SELECT {COLUMNS} FROM settlement_ledger ORDER BY payment_id DESC LIMIT ?"),
+                    params![limit_i64],
+                )
+                .await
+        }
+        .map_err(|error| StoreConnection::to_store_error(&error))?;
+
+        let mut collected = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| StoreConnection::to_store_error(&error))?
+        {
+            let payment_id: String = row.get(0).map_err(|err| StoreError::RowMalformed {
+                reason: format!("payment_id read failed: {err}"),
+            })?;
+            let entry = row_to_settlement_ledger_entry(&row, 1)?;
+            collected.push((PaymentId(payment_id), entry));
         }
         Ok(collected)
     }
@@ -276,33 +324,49 @@ fn encode_broadcast_outcome(
     }
 }
 
-fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerEntry, StoreError> {
-    let kind: String = row.get(0).map_err(|err| StoreError::RowMalformed {
+fn row_to_settlement_ledger_entry(
+    row: &libsql::Row,
+    offset: i32,
+) -> Result<SettlementLedgerEntry, StoreError> {
+    let kind: String = row.get(offset).map_err(|err| StoreError::RowMalformed {
         reason: format!("broadcast_outcome_kind read failed: {err}"),
     })?;
-    let transaction_id: Option<String> = row.get(1).map_err(|err| StoreError::RowMalformed {
-        reason: format!("transaction_id read failed: {err}"),
-    })?;
-    let upstream_message: Option<String> = row.get(2).map_err(|err| StoreError::RowMalformed {
-        reason: format!("upstream_message read failed: {err}"),
-    })?;
-    let settled_at_unix_seconds: i64 = row.get(3).map_err(|err| StoreError::RowMalformed {
-        reason: format!("settled_at_unix_seconds read failed: {err}"),
-    })?;
-    let confirmation_count: Option<i64> = row.get(4).map_err(|err| StoreError::RowMalformed {
-        reason: format!("confirmation_count read failed: {err}"),
-    })?;
-    let mined_block_height: Option<i64> = row.get(5).map_err(|err| StoreError::RowMalformed {
-        reason: format!("mined_block_height read failed: {err}"),
-    })?;
-    let reorg_count: i64 = row.get(6).map_err(|err| StoreError::RowMalformed {
+    let transaction_id: Option<String> =
+        row.get(offset + 1).map_err(|err| StoreError::RowMalformed {
+            reason: format!("transaction_id read failed: {err}"),
+        })?;
+    let upstream_message: Option<String> =
+        row.get(offset + 2).map_err(|err| StoreError::RowMalformed {
+            reason: format!("upstream_message read failed: {err}"),
+        })?;
+    let settled_at_unix_seconds: i64 =
+        row.get(offset + 3).map_err(|err| StoreError::RowMalformed {
+            reason: format!("settled_at_unix_seconds read failed: {err}"),
+        })?;
+    let confirmation_count: Option<i64> =
+        row.get(offset + 4).map_err(|err| StoreError::RowMalformed {
+            reason: format!("confirmation_count read failed: {err}"),
+        })?;
+    let mined_block_height: Option<i64> =
+        row.get(offset + 5).map_err(|err| StoreError::RowMalformed {
+            reason: format!("mined_block_height read failed: {err}"),
+        })?;
+    let reorg_count: i64 = row.get(offset + 6).map_err(|err| StoreError::RowMalformed {
         reason: format!("reorg_count read failed: {err}"),
     })?;
-    let last_reorged_at: Option<i64> = row.get(7).map_err(|err| StoreError::RowMalformed {
-        reason: format!("last_reorged_at read failed: {err}"),
+    let last_reorged_at: Option<i64> =
+        row.get(offset + 7).map_err(|err| StoreError::RowMalformed {
+            reason: format!("last_reorged_at read failed: {err}"),
+        })?;
+    let expiry_height: Option<i64> =
+        row.get(offset + 8).map_err(|err| StoreError::RowMalformed {
+            reason: format!("expiry_height read failed: {err}"),
+        })?;
+    let payee_id: String = row.get(offset + 9).map_err(|err| StoreError::RowMalformed {
+        reason: format!("payee_id read failed: {err}"),
     })?;
-    let expiry_height: Option<i64> = row.get(8).map_err(|err| StoreError::RowMalformed {
-        reason: format!("expiry_height read failed: {err}"),
+    let amount_zat: i64 = row.get(offset + 10).map_err(|err| StoreError::RowMalformed {
+        reason: format!("amount_zat read failed: {err}"),
     })?;
 
     let broadcast_outcome = match kind.as_str() {
@@ -338,5 +402,7 @@ fn row_to_settlement_ledger_entry(row: &libsql::Row) -> Result<SettlementLedgerE
         reorg_count: u32::try_from(reorg_count).unwrap_or(u32::MAX),
         last_reorged_at,
         expiry_height: expiry_height.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
+        payee_id: PayeeId(payee_id),
+        amount_zat: Zatoshis(u64::try_from(amount_zat).unwrap_or(0)),
     })
 }

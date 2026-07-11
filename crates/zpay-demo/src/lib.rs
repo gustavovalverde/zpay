@@ -42,6 +42,7 @@ use zally_wallet::{
     PaymentRequest, ProposalPlan, SyncDriver, SyncDriverOptions, SyncHandle, Wallet,
 };
 use zpay_core::prepare::{PROTOCOL_MEMO_BYTE_COUNT, PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE};
+use zpay_core::verify::{VerifyRequest, VerifyResponse};
 use zpay_testkit::{
     AccessTokenError, AccessTokenGrant, DpopError, DpopKey, ResourceInfo, X402PcztPayment,
     X402SettleResponse, X402VerifyResponse, ZspendSignCall, ZspendSignError,
@@ -279,7 +280,10 @@ fn router(state: DemoState) -> Router {
             "/demo/v1/faucet-claims/{request_id}",
             get(faucet_claim_route),
         )
-        .route("/demo/v1/payments", post(create_payment_route))
+        .route(
+            "/demo/v1/payments",
+            get(payments_route).post(create_payment_route),
+        )
         .route("/demo/v1/payments/{payment_id}", get(payment_route))
         .route(
             "/demo/v1/payments/{payment_id}/settle",
@@ -288,6 +292,11 @@ fn router(state: DemoState) -> Router {
         .route(
             "/demo/v1/payments/{payment_id}/events",
             get(payment_events_route),
+        )
+        .route("/demo/v1/verify", post(verify_route))
+        .route(
+            "/demo/v1/console/payments",
+            get(console_payments_route),
         )
         .with_state(state)
 }
@@ -336,6 +345,10 @@ impl DemoState {
             .get(payment_id)
             .cloned()
             .ok_or_else(|| DemoError::not_found("payment_unknown", "This payment is unknown"))
+    }
+
+    fn payment_ids(&self) -> Vec<String> {
+        self.payments.lock().keys().cloned().collect()
     }
 
     fn set_stage_override(&self, payment_id: &str, stage: Option<DemoStage>) {
@@ -448,6 +461,22 @@ async fn create_payment_route(
     };
     state.payments.lock().insert(payment_id.clone(), stored);
     payment_snapshot(&state, &payment_id).await.map(Json)
+}
+
+async fn payments_route(State(state): State<DemoState>) -> Result<Json<Vec<PaymentBody>>, DemoError> {
+    let ids = payment_ids_most_recent_first(state.payment_ids());
+    let mut payments = Vec::with_capacity(ids.len());
+    for payment_id in ids {
+        payments.push(payment_snapshot(&state, &payment_id).await?);
+    }
+    Ok(Json(payments))
+}
+
+/// `payment_id` is a ULID (lexicographically time-sortable), so a plain descending
+/// string sort orders payments most-recent-first without a separate timestamp column.
+fn payment_ids_most_recent_first(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort_by(|a, b| b.cmp(a));
+    ids
 }
 
 async fn payment_route(
@@ -652,6 +681,70 @@ async fn call_prepare(state: &DemoState, dpop_key: &DpopKey) -> Result<PreparedP
         .json()
         .await
         .map_err(|err| DemoError::unavailable("prepare_malformed", err.to_string()))
+}
+
+async fn verify_route(
+    State(state): State<DemoState>,
+    Json(body): Json<VerifyRequest>,
+) -> Result<Json<VerifyResponse>, DemoError> {
+    call_verify(&state, body).await.map(Json)
+}
+
+async fn call_verify(state: &DemoState, body: VerifyRequest) -> Result<VerifyResponse, DemoError> {
+    let verify_url = format!(
+        "{}/zpay/v1/verify",
+        state.config.zpay_url.trim_end_matches('/')
+    );
+    let response = state
+        .client
+        .post(verify_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| DemoError::unavailable("zpay_unavailable", err.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(DemoError::unavailable(
+            "disclosure_verify_failed",
+            format!("zpay /verify returned {status}: {body_text}"),
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|err| DemoError::unavailable("disclosure_verify_malformed", err.to_string()))
+}
+
+async fn console_payments_route(
+    State(state): State<DemoState>,
+) -> Result<Json<ConsolePaymentsBody>, DemoError> {
+    call_console_payments(&state).await.map(Json)
+}
+
+async fn call_console_payments(state: &DemoState) -> Result<ConsolePaymentsBody, DemoError> {
+    let url = format!(
+        "{}/payments",
+        state.config.zpay_ops_url.trim_end_matches('/')
+    );
+    let response = state
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| DemoError::unavailable("zpay_unavailable", err.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(DemoError::unavailable(
+            "console_payments_failed",
+            format!("zpay ops /payments returned {status}: {body_text}"),
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|err| DemoError::unavailable("console_payments_malformed", err.to_string()))
 }
 
 async fn settle_checkout(
@@ -1424,15 +1517,13 @@ struct PaymentStatusBody {
     settled: bool,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct BroadcastOutcomeBody {
-    #[allow(
-        dead_code,
-        reason = "status JSON mirrors zpay broadcast outcome; runtime reads transaction_id and tests read kind"
-    )]
     kind: String,
     #[serde(default)]
     transaction_id: Option<String>,
+    #[serde(default)]
+    upstream_message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1445,6 +1536,36 @@ struct PrepareRequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence_pack_hash: Option<Vec<u8>>,
     idempotency_key: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConsolePaymentRow {
+    payment_id: String,
+    payee_id: String,
+    amount_zat: u64,
+    broadcast_outcome: BroadcastOutcomeBody,
+    #[serde(default)]
+    confirmation_count: Option<u32>,
+    #[serde(default)]
+    mined_block_height: Option<u64>,
+    #[serde(default)]
+    reorg_count: u32,
+    settled_at_unix_seconds: i64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConsoleRateLimitsBody {
+    per_jkt_per_minute: u32,
+    per_ip_per_minute: u32,
+    tracked_jkt_count: usize,
+    tracked_ip_count: usize,
+    limited_total_count: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConsolePaymentsBody {
+    payments: Vec<ConsolePaymentRow>,
+    rate_limits: ConsoleRateLimitsBody,
 }
 
 #[cfg(test)]
@@ -1586,8 +1707,8 @@ mod tests {
         DEFAULT_ZEXPLORER_TX_URL, DEFAULT_ZINDER_URL, DEFAULT_ZPAY_OPS_URL, DEFAULT_ZPAY_URL,
         DEFAULT_ZSPEND_AUDIENCE, DEFAULT_ZSPEND_URL, DemoConfig, DemoStage, PaymentBody,
         PaymentMode, PaymentStatusBody, SettlementResponseBody, is_settled,
-        load_or_create_issuer_encoding_key, parse_demo_network, stage_from_status,
-        zpay_outcome_to_submit_outcome,
+        load_or_create_issuer_encoding_key, parse_demo_network, payment_ids_most_recent_first,
+        stage_from_status, zpay_outcome_to_submit_outcome,
     };
     use jsonwebtoken::Algorithm;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -1615,6 +1736,7 @@ mod tests {
             broadcast_outcome: Some(BroadcastOutcomeBody {
                 kind: "accepted".to_owned(),
                 transaction_id: Some("00".repeat(32)),
+                upstream_message: None,
             }),
             confirmation_count: Some(10),
             mined_block_height: Some(4100),
@@ -1734,6 +1856,7 @@ mod tests {
             broadcast_outcome: BroadcastOutcomeBody {
                 kind: "accepted".to_owned(),
                 transaction_id: Some("11".repeat(32)),
+                upstream_message: None,
             },
         };
 
@@ -1749,6 +1872,7 @@ mod tests {
             broadcast_outcome: BroadcastOutcomeBody {
                 kind: "duplicate".to_owned(),
                 transaction_id: Some("22".repeat(32)),
+                upstream_message: None,
             },
         };
 
@@ -1764,9 +1888,28 @@ mod tests {
             broadcast_outcome: BroadcastOutcomeBody {
                 kind: "rejected".to_owned(),
                 transaction_id: None,
+                upstream_message: None,
             },
         };
 
         assert!(zpay_outcome_to_submit_outcome(&outcome).is_err());
+    }
+
+    #[test]
+    fn payment_ids_sort_most_recent_first() {
+        let ids = vec![
+            "01JAAA0000000000000000000".to_owned(),
+            "01JCCC0000000000000000000".to_owned(),
+            "01JBBB0000000000000000000".to_owned(),
+        ];
+
+        assert_eq!(
+            payment_ids_most_recent_first(ids),
+            vec![
+                "01JCCC0000000000000000000".to_owned(),
+                "01JBBB0000000000000000000".to_owned(),
+                "01JAAA0000000000000000000".to_owned(),
+            ]
+        );
     }
 }

@@ -544,6 +544,7 @@ the proposals in [docs/proposals/](proposals/) until the upstream accepts.
 | zinder | ZIP-311 verifier inside the existing `explorer.payment_disclosure.verify_v1` capability | Drafted in PRD-42 Phase 2 |
 | zexplorer | `POST /api/v1/{network}/transactions/{txid}/watch` route | Drafted in PRD-42 Phase 2 |
 | zentity | MCP `purchase` tool `scheme: "zcash"` branch | Drafted in PRD-42 Phase 6 |
+| zally | ZIP-311 payment-disclosure production (`Wallet::disclose_payment`) | Drafted in [Proposal-0006](proposals/0006-zally-zip311-disclosure-production.md) |
 
 ## Out of Scope
 

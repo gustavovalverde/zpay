@@ -24,6 +24,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         2,
         include_str!("../migrations/0002_reorg_aware_settlement.sql"),
     ),
+    (
+        3,
+        include_str!("../migrations/0003_settlement_ledger_payee_and_amount.sql"),
+    ),
 ];
 
 /// Apply every migration whose version is greater than the
