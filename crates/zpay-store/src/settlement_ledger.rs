@@ -384,7 +384,27 @@ fn row_to_settlement_ledger_entry(
             reason: format!("amount_zat read failed: {err}"),
         })?;
 
-    let broadcast_outcome = match kind.as_str() {
+    let broadcast_outcome = decode_broadcast_outcome(&kind, transaction_id, upstream_message)?;
+
+    Ok(SettlementLedgerEntry {
+        broadcast_outcome,
+        settled_at_unix_seconds,
+        confirmation_count: confirmation_count.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
+        mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
+        reorg_count: u32::try_from(reorg_count).unwrap_or(u32::MAX),
+        last_reorged_at,
+        expiry_height: expiry_height.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
+        payee_id: PayeeId(payee_id),
+        amount_zat: Zatoshis(u64::try_from(amount_zat).unwrap_or(0)),
+    })
+}
+
+fn decode_broadcast_outcome(
+    kind: &str,
+    transaction_id: Option<String>,
+    upstream_message: Option<String>,
+) -> Result<BroadcastOutcome, StoreError> {
+    let broadcast_outcome = match kind {
         "accepted" => BroadcastOutcome::Accepted {
             transaction_id: transaction_id.ok_or_else(|| StoreError::RowMalformed {
                 reason: "accepted row missing transaction_id".to_owned(),
@@ -408,16 +428,5 @@ fn row_to_settlement_ledger_entry(
             });
         }
     };
-
-    Ok(SettlementLedgerEntry {
-        broadcast_outcome,
-        settled_at_unix_seconds,
-        confirmation_count: confirmation_count.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
-        mined_block_height: mined_block_height.map(|raw| u64::try_from(raw).unwrap_or(0)),
-        reorg_count: u32::try_from(reorg_count).unwrap_or(u32::MAX),
-        last_reorged_at,
-        expiry_height: expiry_height.map(|raw| u32::try_from(raw).unwrap_or(u32::MAX)),
-        payee_id: PayeeId(payee_id),
-        amount_zat: Zatoshis(u64::try_from(amount_zat).unwrap_or(0)),
-    })
+    Ok(broadcast_outcome)
 }

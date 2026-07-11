@@ -51,7 +51,6 @@ echo "[test-payee-override] starting container $NAME with bind-mounted override"
 docker run --rm -d \
   --name "$NAME" \
   -p "$PORT:8080" \
-  -e ZPAY_VERIFY__NETWORK=testnet \
   -v "$TEMP_DIR/payees.toml:/etc/zpay/payees.toml:ro" \
   "$IMAGE" >/dev/null
 

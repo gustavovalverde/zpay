@@ -25,13 +25,11 @@ parking_lot.workspace = true
 pin-project-lite.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower-http = { workspace = true, features = ["cors"] }
 tracing.workspace = true
-url.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
 zally-core.workspace = true
 zpay-core.workspace = true
@@ -42,6 +40,7 @@ p256 = { workspace = true, features = ["pkcs8", "pem"] }
 rand_core = { version = "0.6", features = ["std"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+zcash-payment-disclosure.workspace = true
 # Pull in zpay-core's in-memory stores for the SSE handler integration
 # tests; the production wire path uses the libSQL stores via
 # `zpay-runtime`, so the in_memory feature is opt-in here.

@@ -61,6 +61,8 @@ When the order conflicts, DX wins.
 | `PayeeId` | Operator-assigned identifier for the party accepting a payment. |
 | `WatchId` | Identifier returned by the confirmation oracle for a per-txid subscription. |
 | `EvidencePackHash` | 32-byte SHA-256 over zentity's `(policy_hash, proof_set_hash)` pair. |
+| `RecipientReconciliation` | ZIP-311 product-policy verdict: `match`, `mismatch`, or `not_checked`. Independent from proof validity. |
+| `MessageReconciliation` | ZIP-311 expected-message verdict: `match`, `mismatch`, or `not_checked`. Checked only after proof validity authenticates the message. |
 
 ### Wire surface (HTTP)
 
@@ -287,8 +289,8 @@ At wire boundaries, typed errors map to HTTP status codes via a single
   v5 and v6 (NU6.3/Ironwood) through zally; see
   [ADR-0006](../adrs/0006-facilitator-trust-boundary.md).
 - ZIP-321 payment URIs (parsed and emitted via zally).
-- ZIP-311 payment disclosures (local verifier in `zpay-core`; see
-  [ADR-0007](../adrs/0007-local-zip311-verifier.md)).
+- ZIP-311 Draft1 Sapling payment disclosures (Zally-owned verifier composed
+  in `zpay-core`; see [ADR-0015](../adrs/0015-zip311-draft1-verification.md)).
 - x402 v2 facilitator envelope: `/supported`, `/verify`, `/settle`, official
   JSON field names, and `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`,
   `PAYMENT-RESPONSE` header codecs.

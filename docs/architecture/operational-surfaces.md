@@ -173,12 +173,6 @@ zpay reads configuration from `ZPAY_*` environment variables, with `__` as
 the nested-field separator. There is no TOML config layer for the runtime
 itself; the only file input is the payee registry (`ZPAY_PAYEES__CONFIG_PATH`).
 
-### Required
-
-| Var | Description |
-|-----|-------------|
-| `ZPAY_VERIFY__NETWORK` | `mainnet` or `testnet`. No default; an unset or blank value fails startup with `VerifyNetworkMissing`. Pins the SLIP-44 coin type personalizing the ZIP-311 `BLAKE2b` digest the local verifier reconstructs. Regtest deployments pin to `testnet` (regtest carries no distinct SLIP-44 number). See [ADR-0007](../adrs/0007-local-zip311-verifier.md). |
-
 ### Networking and stores
 
 | Var | Default | Description |
@@ -186,8 +180,7 @@ itself; the only file input is the payee registry (`ZPAY_PAYEES__CONFIG_PATH`).
 | `ZPAY_SERVER__BIND_ADDR` | `127.0.0.1:8080` | Main HTTP listener. Invalid value fails startup. |
 | `ZPAY_OPS__BIND_ADDR` | `127.0.0.1:9295` | Ops listener. Invalid value fails startup. |
 | `ZPAY_NETWORK` | `regtest` | `mainnet`, `testnet`, or `regtest`. |
-| `ZPAY_CHAIN_SOURCE_URL` | none | zinder gRPC endpoint. Unset disables broadcast (`/settle` returns 502) and settlement reconciliation. |
-| `ZPAY_EXPLORER_URL` | none | zinder explorer-plane gRPC endpoint for ZIP-311 disclosure fetch. Unset makes `/verify` report `chain_presence: oracle_unavailable`. |
+| `ZPAY_CHAIN_SOURCE_URL` | none | zinder gRPC endpoint. Unset disables broadcast (`/settle` returns 502), settlement reconciliation, and mined transaction fetch for `/verify`. |
 | `ZPAY_PAYEES__CONFIG_PATH` | none | TOML payee registry. Unset starts with an empty registry. A read or parse failure fails startup. |
 | `ZPAY_STORE__BACKEND` | `libsql` | `libsql` or `memory`. Any other value fails startup. |
 | `ZPAY_STORE__URL` | `file:./zpay.libsql` | libSQL connection URL. `file:<path>` for local SQLite, `libsql://<host>` for Turso. |

@@ -1027,10 +1027,12 @@ fn payment_disclosure_profile(
     match recipient {
         PaymentRecipient::SaplingAddress { .. } => Ok(PaymentDisclosureProfile::Zip311Draft1),
         PaymentRecipient::UnifiedAddress { .. } => Ok(PaymentDisclosureProfile::ZallyIronwood),
-        _ => Err(DemoError::rejected(
-            "disclosure_profile_unsupported",
-            "payment recipient has no supported disclosure profile",
-        )),
+        PaymentRecipient::TransparentAddress { .. } | PaymentRecipient::TexAddress { .. } | _ => {
+            Err(DemoError::rejected(
+                "disclosure_profile_unsupported",
+                "payment recipient has no supported disclosure profile",
+            ))
+        }
     }
 }
 

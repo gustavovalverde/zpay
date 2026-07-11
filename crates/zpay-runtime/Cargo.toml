@@ -26,13 +26,11 @@ clap = { workspace = true, features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-arc-swap = "1.7.1"
 futures.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml.workspace = true
-tonic.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -40,7 +38,7 @@ async-trait.workspace = true
 zally-chain = { workspace = true, features = ["zinder"] }
 zally-core.workspace = true
 zinder-client.workspace = true
-zinder-proto.workspace = true
+zcash_proofs.workspace = true
 zpay-core = { workspace = true, features = ["in_memory"] }
 zpay-store.workspace = true
 zpay-x402.workspace = true

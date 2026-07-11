@@ -2,33 +2,36 @@
 
 | Field | Value |
 | ----- | ----- |
-| Status | Proposed |
+| Status | Implemented |
 | Consumer | zpay |
 | Upstream | zally |
-| Pinned at | rev `3d2b8234e068fb81c4729f54ca4b13b34e763e1f` |
+| Pinned at | rev `6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85` |
 | Related | [ADR-0007: Local ZIP-311 verifier](../adrs/0007-local-zip311-verifier.md), [facilitator-plane.md](../architecture/facilitator-plane.md#verify), [zally#6](https://github.com/gustavovalverde/zally/issues/6) |
 
 ## Context
 
-zpay-core runs a local ZIP-311 payment-disclosure verifier (`POST /zpay/v1/verify`, see ADR-0007) that checks `cryptographic_verdict`, `chain_presence`, and `amount_reconciliation` for a disclosure a payer's wallet produces after a spend. `zally-wallet` at the pinned rev has no ZIP-311 disclosure-producing capability: a wallet built on `zally-wallet`, including zpay's own demo wallet (`zpay-demo`), cannot generate the `disclosure_payload_hex` bytes `/verify` expects.
+zpay-core verifies wallet-produced payment disclosures through
+`POST /zpay/v1/verify`. Producing those disclosures belongs in Zally because
+the wallet owns the spending keys and retained transaction material.
 
-The gap surfaced while building zpay's demo receipts view: the "verify this payment" action calls the real endpoint, but only with an empty disclosure, which always returns a non-fabricated but uninformative `cryptographic_verdict: malformed`. There is no way to demonstrate a real `valid` verdict end-to-end without this capability.
+## Resolution
 
-## Ask
-
-Add a disclosure-producing method to `zally-wallet`, mirroring the shape ZIP-311 defines (per-spend witness data, BLAKE2b-digested):
+Zally now incubates the experimental `zcash-payment-disclosure` crate and
+exposes disclosure production through `zally-wallet`:
 
 ```rust
 impl Wallet {
-    /// Produce a ZIP-311 payment disclosure for a settled spend.
-    ///
-    /// Proves the caller controls the spending key for the given transaction's
-    /// relevant notes and outputs, without revealing the full viewing key.
-    pub async fn disclose_payment(&self, txid: TxId) -> Result<PaymentDisclosure, WalletError>;
+    pub async fn export_payment_disclosure(
+        &self,
+        plan: ExportPaymentDisclosurePlan,
+    ) -> Result<PaymentDisclosure, WalletError>;
 }
 ```
 
-The exact signature and `PaymentDisclosure` wire shape are upstream's call; zpay-core's `disclosure_payload_hex` only needs the serialized bytes.
+The plan binds the network-tagged recipient, transaction id, amount, message,
+and explicit profile. ZIP-311 Draft1 covers Sapling evidence. Zally's Ironwood
+extension covers the post-NU6.3 Orchard-based transaction format while the ZIP
+remains a draft.
 
 ## Why this lives in zally, not zpay
 
@@ -36,12 +39,15 @@ The exact signature and `PaymentDisclosure` wire shape are upstream's call; zpay
 
 ## Compatibility
 
-Additive. No existing callers depend on the absence of this method.
+Additive. Existing wallet proposal, signing, and submission callers are
+unchanged.
 
 ## Acceptance
 
-- `Wallet::disclose_payment(txid) -> Result<PaymentDisclosure, WalletError>` exists on the public surface.
-- A disclosure produced by this method, hex-encoded, verifies as `cryptographic_verdict: valid` against zpay-core's `LocalPaymentDisclosureVerifier` for a spend that method actually made.
-- Documented with a doc link to ZIP-311.
-
-Once accepted: zally bumps its workspace `rev`; zpay bumps the pinned rev, wires `zpay-demo`'s wallet to call `disclose_payment` after a successful settle, and updates the demo receipts view's verify flow to send the real disclosure instead of an empty one.
+- `Wallet::export_payment_disclosure` is public and requires a retained
+  finalized PCZT.
+- The exported bytes verify through Zpay's five-axis verification contract.
+- Zpay's demo wallet retains the disclosure with the settled payment and the
+  receipts UI submits it to the payment-scoped verification route.
+- Draft1 Sapling and Zally Ironwood profiles have separate codec, production,
+  verification, and integration coverage.

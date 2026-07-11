@@ -14,7 +14,10 @@
 
 zinder advertises the capability `explorer.payment_disclosure.verify_v1` (`zinder/services/zinder-explorer/src/grpc/adapter.rs:~565`) and exposes the gRPC method `ExplorerQuery::VerifyPaymentDisclosure`, but the actual ZIP-311 verifier is not bundled. The capability is gated off by default and returns `UNAVAILABLE` until an operator opts in; the opt-in currently triggers an unimplemented branch.
 
-zpay's `core::verify::DisclosureVerdict` flow depends on this capability. For shielded payments, ZIP-311 disclosure verification is the only proof-of-receipt primitive that does not require the merchant to hold a viewing key.
+At the time of this proposal, zpay's `core::verify::DisclosureVerdict` flow
+depended on this capability. ADR-0007 moved cryptography into zpay, and
+ADR-0015 later delegated the format semantics to Zally while retaining Zinder
+only as the mined transaction-context source.
 
 ## Ask
 

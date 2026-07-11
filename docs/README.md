@@ -36,6 +36,7 @@ The docs are organised by lifecycle, not by topic:
 | [0012](adrs/0012-testkit-agent-payment-client.md) | Testkit owns agent payment client fixtures | Accepted | Dev and test client infrastructure |
 | [0013](adrs/0013-shared-dpop-primitives.md) | Shared DPoP primitives | Accepted | DPoP verification |
 | [0014](adrs/0014-operator-payments-console.md) | Operator payments console boundary | Accepted | Operator surface, settlement ledger schema |
+| [0015](adrs/0015-zip311-draft1-verification.md) | Payment-disclosure verification uses Zally and Zinder | Accepted | Verify plane |
 
 ## Architecture index
 

@@ -22,8 +22,9 @@ zpay depends on:
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
 Pin: workspace `Cargo.toml` pins one git rev for every zally crate,
-currently `3d2b823` (chain-plane transaction expiry parser). Bumps land in their
-own PR.
+currently `6a8a7a4`. This revision provides payment-disclosure production and
+verification for ZIP-311 Draft1 Sapling and the Zally Ironwood extension, in
+addition to the chain-plane transaction expiry parser.
 
 ## zinder
 
@@ -44,10 +45,10 @@ their own PR.
 Wallet deployments that claim Ironwood subtree-root coverage must observe the
 `wallet.read.subtree_roots_ironwood_v1` capability from zinder `ServerInfo`.
 
-The broadcast endpoint is `ZPAY_CHAIN_SOURCE_URL`; the disclosure-fetch
-explorer plane is `ZPAY_EXPLORER_URL`. Both point at a zinder deployment;
-there is no separate fallback oracle. zpay reaches zinder directly in every
-supported deployment (see [ADR-0003](../adrs/0003-zinder-as-chain-plane.md)).
+`ZPAY_CHAIN_SOURCE_URL` is the single zinder endpoint for broadcast, chain
+observation, tip reads, and disclosure transaction fetch. There is no separate
+fallback oracle. zpay reaches zinder directly in every supported deployment
+(see [ADR-0003](../adrs/0003-zinder-as-chain-plane.md)).
 
 **Store schema.** The pinned zinder is at artifact schema version 12
 (`CURRENT_ARTIFACT_SCHEMA_VERSION`). A zinder store written below schema 12 is

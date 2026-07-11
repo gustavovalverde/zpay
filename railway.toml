@@ -6,13 +6,11 @@
 #
 # ── Required secrets / config ────────────────────────────────────────────
 #   ZPAY_NETWORK=testnet                     # mainnet | testnet | regtest
-#   ZPAY_VERIFY__NETWORK=testnet             # mainnet | testnet (ADR-0007; no default, fail-loud)
 #   ZPAY_EXPECTED_HOST=zpay.up.railway.app   # DPoP htu pin; flip to pay.zentity.xyz once DNS lands
 #   ZPAY_EXPECTED_SCHEME=https
 #
 # ── Chain plane (zinder cross-service wiring) ────────────────────────────
 #   ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
-#   ZPAY_EXPLORER_URL=http://zinder.railway.internal:9067
 #
 # ── Persistence (libSQL on a Railway volume) ─────────────────────────────
 #   ZPAY_STORE__BACKEND=libsql

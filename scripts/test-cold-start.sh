@@ -49,7 +49,6 @@ echo "[test-cold-start] starting container $NAME from $IMAGE (no volume)"
 # so this probe exercises the baked-in `aether-demo` payee. Production
 # stacks must NOT set this; the runbook spells out the contract.
 docker run --rm -d --name "$NAME" -p "$PORT:8080" \
-  -e ZPAY_VERIFY__NETWORK=testnet \
   -e ZPAY_ALLOW_DEMO_PAYEE=1 \
   "$IMAGE" >/dev/null
 

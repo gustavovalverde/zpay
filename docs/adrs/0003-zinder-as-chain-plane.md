@@ -2,7 +2,7 @@
 
 | Field | Value |
 | ----- | ----- |
-| Status | Accepted |
+| Status | Accepted; disclosure verification amended by [ADR-0015](0015-zip311-draft1-verification.md) |
 | Product | zpay |
 | Domain | Chain plane, broadcast and confirmation oracle |
 | Related | [ADR-0001](0001-workspace-and-crate-boundaries.md), [Upstream platform binding](../architecture/upstream-platform-binding.md), [PRD-42 Decision 4](https://github.com/gustavovalverde/zentity/blob/main/docs/plans/prd-42-zcash-agentic-payments-cross-stack.md) |
@@ -13,7 +13,7 @@ zpay needs three chain-plane primitives:
 
 - Broadcast a raw transaction and receive a typed outcome.
 - Subscribe to confirmation events for a known txid.
-- Verify a ZIP-311 payment disclosure.
+- Fetch exact mined transaction context for payment-disclosure verification.
 
 Candidates:
 
@@ -27,8 +27,7 @@ Candidates:
 4. **zinder.** Next-generation Zcash indexer. Direct Zebra client (no
    lightwalletd dependency). Ships `BroadcastTransaction` typed RPC,
    `ChainEvents` and `MempoolEvents` server-streams with cursor-resumable
-   replay, `VerifyPaymentDisclosure` wired (verifier pending), typed
-   capability strings.
+   replay, exact transaction reads, and typed capability strings.
 
 zinder is the most aligned with zpay's needs because zinder's typed
 `BroadcastTransactionResponse` (`accepted | duplicate | invalid_encoding |
@@ -60,9 +59,9 @@ directly reachable.**
 - Fallback: when `ZPAY_CHAIN_SOURCE_URL` is unset or unreachable,
   the oracle calls zexplorer's `POST /api/v1/{network}/transactions/{txid}/watch`
   (delivered to zpay's own `/x402/v2/internal/watch-callback` endpoint).
-- ZIP-311 disclosure verification calls zinder's
-  `ExplorerQuery::VerifyPaymentDisclosure` RPC; zpay does not bundle a
-  ZIP-311 verifier of its own.
+- Payment-disclosure verification runs in-process using Zally's experimental
+  verifier. Zinder supplies the exact mined transaction bytes and height
+  through `RemoteChainIndex::transaction_by_id`.
 
 ## Rationale
 

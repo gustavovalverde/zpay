@@ -1314,11 +1314,21 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 [[package]]
 name = "equihash"
 version = "0.3.0"
-source = "git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2#8e6864a3c67cab3c64a052dd20f83c553662e8b2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "306286e8dcc39ab3dfceb74c792ce8baffdab90591321d3ffaae64829734c37f"
 dependencies = [
  "blake2b_simd",
  "corez",
  "document-features",
+]
+
+[[package]]
+name = "equihash"
+version = "0.3.0"
+source = "git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2#8e6864a3c67cab3c64a052dd20f83c553662e8b2"
+dependencies = [
+ "blake2b_simd",
+ "corez",
 ]
 
 [[package]]
@@ -1346,6 +1356,15 @@ dependencies = [
  "hashbag",
  "left-right",
  "smallvec",
+]
+
+[[package]]
+name = "f4jumble"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d42773cb15447644d170be20231a3268600e0c4cea8987d013b93ac973d3cf7"
+dependencies = [
+ "blake2b_simd",
 ]
 
 [[package]]
@@ -3429,10 +3448,10 @@ dependencies = [
  "serde",
  "serde_with",
  "zcash_note_encryption",
- "zcash_primitives",
- "zcash_protocol",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0-pre.0",
 ]
 
 [[package]]
@@ -6430,7 +6449,7 @@ dependencies = [
 [[package]]
 name = "zally-chain"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6440,16 +6459,16 @@ dependencies = [
  "tokio",
  "zally-core",
  "zcash_client_backend",
- "zcash_primitives",
- "zcash_protocol",
- "zinder-client",
- "zinder-core",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
+ "zinder-client 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
 ]
 
 [[package]]
 name = "zally-core"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6458,13 +6477,13 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "uuid",
- "zcash_protocol",
+ "zcash_protocol 0.10.0-pre.0",
 ]
 
 [[package]]
 name = "zally-keys"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "age",
  "async-trait",
@@ -6481,28 +6500,31 @@ dependencies = [
 [[package]]
 name = "zally-pczt"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "orchard",
  "pczt",
  "postcard",
+ "rand 0.8.6",
  "sapling-crypto",
  "secp256k1",
  "serde",
  "thiserror 2.0.18",
  "zally-core",
  "zally-keys",
+ "zcash-payment-disclosure",
  "zcash_keys",
+ "zcash_note_encryption",
  "zcash_proofs",
- "zcash_protocol",
- "zcash_transparent",
+ "zcash_protocol 0.10.0-pre.0",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
 ]
 
 [[package]]
 name = "zally-storage"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "async-trait",
  "orchard",
@@ -6521,18 +6543,18 @@ dependencies = [
  "zcash_client_backend",
  "zcash_client_sqlite",
  "zcash_keys",
- "zcash_primitives",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
  "zcash_proofs",
- "zcash_protocol",
+ "zcash_protocol 0.10.0-pre.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
 ]
 
 [[package]]
 name = "zally-testkit"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6551,7 +6573,7 @@ dependencies = [
 [[package]]
 name = "zally-wallet"
 version = "0.1.0"
-source = "git+https://github.com/gustavovalverde/zally?rev=3d2b8234e068fb81c4729f54ca4b13b34e763e1f#3d2b8234e068fb81c4729f54ca4b13b34e763e1f"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
 dependencies = [
  "futures-util",
  "hex",
@@ -6565,13 +6587,36 @@ dependencies = [
  "zally-keys",
  "zally-pczt",
  "zally-storage",
- "zcash_address",
+ "zcash-payment-disclosure",
+ "zcash_address 0.13.0-pre.0",
  "zcash_client_backend",
  "zcash_keys",
- "zcash_protocol",
- "zcash_transparent",
+ "zcash_protocol 0.10.0-pre.0",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
  "zip321",
+]
+
+[[package]]
+name = "zcash-payment-disclosure"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zally?rev=6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85#6a8a7a4a3fafce33b188df5eb5c30ba2c627bd85"
+dependencies = [
+ "bellman",
+ "blake2b_simd",
+ "bls12_381",
+ "ff",
+ "jubjub",
+ "nonempty",
+ "orchard",
+ "pasta_curves",
+ "rand_core 0.6.4",
+ "redjubjub",
+ "sapling-crypto",
+ "thiserror 2.0.18",
+ "zcash_note_encryption",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
 ]
 
 [[package]]
@@ -6582,9 +6627,23 @@ dependencies = [
  "bech32 0.11.1",
  "bs58",
  "corez",
- "f4jumble",
- "zcash_encoding",
- "zcash_protocol",
+ "f4jumble 0.1.1 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
+]
+
+[[package]]
+name = "zcash_address"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a854b28c07dba372f4410ea8ad62b4bf7d5c2bf8be32fc4b31bc0db6521a975"
+dependencies = [
+ "bech32 0.11.1",
+ "bs58",
+ "corez",
+ "f4jumble 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0",
 ]
 
 [[package]]
@@ -6624,14 +6683,14 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "which 8.0.4",
- "zcash_address",
- "zcash_encoding",
+ "zcash_address 0.13.0-pre.0",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
  "zcash_keys",
  "zcash_note_encryption",
- "zcash_primitives",
- "zcash_protocol",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
  "zip321",
 ]
@@ -6671,15 +6730,26 @@ dependencies = [
  "time",
  "tracing",
  "uuid",
- "zcash_address",
+ "zcash_address 0.13.0-pre.0",
  "zcash_client_backend",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
  "zcash_keys",
- "zcash_primitives",
- "zcash_protocol",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
+]
+
+[[package]]
+name = "zcash_encoding"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1440921903cdb86133fb9e2fe800be488015db2939a30bedb413078a1acb0306"
+dependencies = [
+ "corez",
+ "hex",
+ "nonempty",
 ]
 
 [[package]]
@@ -6725,10 +6795,10 @@ dependencies = [
  "secrecy 0.8.0",
  "subtle",
  "tracing",
- "zcash_address",
- "zcash_encoding",
- "zcash_protocol",
- "zcash_transparent",
+ "zcash_address 0.13.0-pre.0",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
+ "zcash_transparent 0.9.0-pre.0",
  "zip32",
 ]
 
@@ -6748,14 +6818,15 @@ dependencies = [
 [[package]]
 name = "zcash_primitives"
 version = "0.29.0-pre.0"
-source = "git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2#8e6864a3c67cab3c64a052dd20f83c553662e8b2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba7bfe66975658f44dba87d535f9ebb9fb4c9c0c4fecca3f5c40cbe1583dece6"
 dependencies = [
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
  "corez",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
+ "equihash 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ff",
  "hex",
  "incrementalmerkletree",
@@ -6768,11 +6839,41 @@ dependencies = [
  "sapling-crypto",
  "secp256k1",
  "sha2 0.10.9",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_note_encryption",
- "zcash_protocol",
+ "zcash_protocol 0.10.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0",
+]
+
+[[package]]
+name = "zcash_primitives"
+version = "0.29.0-pre.0"
+source = "git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2#8e6864a3c67cab3c64a052dd20f83c553662e8b2"
+dependencies = [
+ "blake2b_simd",
+ "block-buffer 0.11.0-rc.3",
+ "corez",
+ "crypto-common 0.2.0-rc.1",
+ "document-features",
+ "equihash 0.3.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "ff",
+ "hex",
+ "incrementalmerkletree",
+ "jubjub",
+ "memuse",
+ "nonempty",
+ "orchard",
+ "rand_core 0.6.4",
+ "redjubjub",
+ "sapling-crypto",
+ "secp256k1",
+ "sha2 0.10.9",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_note_encryption",
+ "zcash_protocol 0.10.0-pre.0",
+ "zcash_script",
+ "zcash_transparent 0.9.0-pre.0",
 ]
 
 [[package]]
@@ -6793,7 +6894,7 @@ dependencies = [
  "sapling-crypto",
  "tracing",
  "xdg",
- "zcash_primitives",
+ "zcash_primitives 0.29.0-pre.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
 ]
 
 [[package]]
@@ -6805,7 +6906,20 @@ dependencies = [
  "document-features",
  "hex",
  "memuse",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+]
+
+[[package]]
+name = "zcash_protocol"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2973d210e74ebd81adc50828fbbb284ab6aaa099308097c42c47dc63cf3420fc"
+dependencies = [
+ "corez",
+ "document-features",
+ "hex",
+ "memuse",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6850,9 +6964,34 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "subtle",
- "zcash_address",
- "zcash_encoding",
- "zcash_protocol",
+ "zcash_address 0.13.0-pre.0",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash.git?rev=8e6864a3c67cab3c64a052dd20f83c553662e8b2)",
+ "zcash_protocol 0.10.0-pre.0",
+ "zcash_script",
+ "zcash_spec",
+ "zip32",
+]
+
+[[package]]
+name = "zcash_transparent"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72e0f8c142bed366ed5886dcfa8772ec90b5420cc127e6cdb76b6744c53a287b"
+dependencies = [
+ "bip32",
+ "bs58",
+ "corez",
+ "document-features",
+ "getset",
+ "hex",
+ "nonempty",
+ "ripemd 0.1.3",
+ "secp256k1",
+ "sha2 0.10.9",
+ "subtle",
+ "zcash_address 0.13.0",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0",
  "zcash_script",
  "zcash_spec",
  "zip32",
@@ -6877,7 +7016,7 @@ dependencies = [
  "derive-getters",
  "dirs",
  "ed25519-zebra",
- "equihash",
+ "equihash 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "group",
  "halo2_proofs",
@@ -6910,14 +7049,14 @@ dependencies = [
  "tracing",
  "uint 0.10.0",
  "x25519-dalek",
- "zcash_address",
- "zcash_encoding",
+ "zcash_address 0.13.0",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_history",
  "zcash_note_encryption",
- "zcash_primitives",
- "zcash_protocol",
+ "zcash_primitives 0.29.0-pre.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0",
  "zcash_script",
- "zcash_transparent",
+ "zcash_transparent 0.9.0",
 ]
 
 [[package]]
@@ -7039,6 +7178,27 @@ dependencies = [
 [[package]]
 name = "zinder-client"
 version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.14.6",
+ "tonic-types",
+ "tracing",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-derive 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-source 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-store 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+]
+
+[[package]]
+name = "zinder-client"
+version = "0.1.0"
 source = "git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9#c604ac3d260b4e65219dbeb6062d01d213d65ea9"
 dependencies = [
  "arc-swap",
@@ -7050,11 +7210,24 @@ dependencies = [
  "tonic 0.14.6",
  "tonic-types",
  "tracing",
- "zinder-core",
- "zinder-derive",
- "zinder-proto",
- "zinder-source",
- "zinder-store",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-derive 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-source 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-store 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+]
+
+[[package]]
+name = "zinder-core"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "zcash_address 0.13.0",
+ "zcash_protocol 0.10.0",
 ]
 
 [[package]]
@@ -7066,8 +7239,22 @@ dependencies = [
  "hex",
  "sha2 0.10.9",
  "thiserror 2.0.18",
- "zcash_address",
- "zcash_protocol",
+ "zcash_address 0.13.0",
+ "zcash_protocol 0.10.0",
+]
+
+[[package]]
+name = "zinder-derive"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "prost 0.14.4",
+ "rust-rocksdb",
+ "thiserror 2.0.18",
+ "tracing",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-store 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
 ]
 
 [[package]]
@@ -7079,9 +7266,23 @@ dependencies = [
  "rust-rocksdb",
  "thiserror 2.0.18",
  "tracing",
- "zinder-core",
- "zinder-proto",
- "zinder-store",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-store 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+]
+
+[[package]]
+name = "zinder-proto"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "prost 0.14.4",
+ "prost-build",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tonic-types",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
 ]
 
 [[package]]
@@ -7095,7 +7296,37 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tonic-types",
- "zinder-core",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+]
+
+[[package]]
+name = "zinder-source"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "jsonrpsee",
+ "metrics",
+ "parking_lot",
+ "secrecy 0.10.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "tracing",
+ "zebra-chain",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
 ]
 
 [[package]]
@@ -7124,8 +7355,31 @@ dependencies = [
  "tonic 0.14.6",
  "tracing",
  "zebra-chain",
- "zinder-core",
- "zinder-proto",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+]
+
+[[package]]
+name = "zinder-store"
+version = "0.1.0"
+source = "git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4#8d7cd03f228ba294cf2296f85196c0b3901dd0e4"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.4.3",
+ "hmac 0.12.1",
+ "metrics",
+ "parking_lot",
+ "prost 0.14.4",
+ "rust-rocksdb",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic 0.14.6",
+ "tonic-types",
+ "tracing",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=8d7cd03f228ba294cf2296f85196c0b3901dd0e4)",
 ]
 
 [[package]]
@@ -7147,8 +7401,8 @@ dependencies = [
  "tonic 0.14.6",
  "tonic-types",
  "tracing",
- "zinder-core",
- "zinder-proto",
+ "zinder-core 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
+ "zinder-proto 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
 ]
 
 [[package]]
@@ -7172,8 +7426,8 @@ dependencies = [
  "base64 0.22.1",
  "nom",
  "percent-encoding",
- "zcash_address",
- "zcash_protocol",
+ "zcash_address 0.13.0-pre.0",
+ "zcash_protocol 0.10.0-pre.0",
 ]
 
 [[package]]
@@ -7188,14 +7442,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "blake2b_simd",
  "hex",
  "orchard",
  "parking_lot",
  "pczt",
- "ripemd 0.1.3",
  "sapling-crypto",
- "secp256k1",
  "serde",
  "serde_json",
  "sha2 0.11.0-pre.4",
@@ -7206,8 +7457,11 @@ dependencies = [
  "zally-chain",
  "zally-core",
  "zally-pczt",
- "zcash_address",
+ "zcash-payment-disclosure",
+ "zcash_address 0.13.0-pre.0",
  "zcash_keys",
+ "zcash_protocol 0.10.0-pre.0",
+ "zip32",
 ]
 
 [[package]]
@@ -7258,7 +7512,6 @@ dependencies = [
  "jsonwebtoken",
  "reqwest",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7277,7 +7530,6 @@ dependencies = [
 name = "zpay-runtime"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "async-trait",
  "axum 0.8.9",
  "clap",
@@ -7290,14 +7542,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
- "tonic 0.14.6",
  "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
  "zally-chain",
  "zally-core",
- "zinder-client",
- "zinder-proto",
+ "zcash_proofs",
+ "zinder-client 0.1.0 (git+https://github.com/gustavovalverde/zinder?rev=c604ac3d260b4e65219dbeb6062d01d213d65ea9)",
  "zpay-core",
  "zpay-store",
  "zpay-x402",
@@ -7348,16 +7599,15 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
- "sha2 0.11.0-pre.4",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tracing",
- "url",
  "zally-chain",
  "zally-core",
+ "zcash-payment-disclosure",
  "zpay-core",
  "zpay-dpop",
 ]

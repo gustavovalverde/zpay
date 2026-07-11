@@ -227,9 +227,7 @@ fn is_valid_zat_amount(amount_zat: &str) -> bool {
 fn has_valid_recipient_prefix(network: &str, pay_to: &str) -> bool {
     match network {
         ZCASH_MAINNET_NETWORK => {
-            pay_to.starts_with("u1")
-                || pay_to.starts_with("zu1")
-                || pay_to.starts_with("zs1")
+            pay_to.starts_with("u1") || pay_to.starts_with("zu1") || pay_to.starts_with("zs1")
         }
         ZCASH_TESTNET_NETWORK => {
             pay_to.starts_with("utest1")

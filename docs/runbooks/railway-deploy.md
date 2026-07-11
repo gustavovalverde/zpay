@@ -28,14 +28,12 @@ invalid (fail-loud per ADR-0007).
 | Variable | Required? | Example | Notes |
 | --- | --- | --- | --- |
 | `ZPAY_NETWORK` | yes | `testnet` | `mainnet` \| `testnet` \| `regtest` |
-| `ZPAY_VERIFY__NETWORK` | yes | `testnet` | `mainnet` \| `testnet`; pins ZIP-311 BLAKE2b digest personalization. No default. |
 | `ZPAY_EXPECTED_HOST` | yes | `zpay.up.railway.app` | DPoP `htu` host pin. Flip to `pay.zentity.xyz` once DNS lands. |
 | `ZPAY_EXPECTED_SCHEME` | yes (prod) | `https` | Defaults to `https` when `ZPAY_EXPECTED_HOST` is set. |
 | `ZPAY_STORE__BACKEND` | yes | `libsql` | Only `libsql` and `memory` recognised. |
 | `ZPAY_STORE__URL` | yes | `file:/var/lib/zpay/zpay.libsql` | Use a `file:` URL for the mounted volume; `libsql://…` for Turso. |
 | `ZPAY_PAYEES__CONFIG_PATH` | yes | `/etc/zpay/payees.toml` | The image bakes a placeholder file here; production overrides via bind-mount or custom image. |
-| `ZPAY_CHAIN_SOURCE_URL` | yes (settle) | `http://zinder.railway.internal:9067` | Internal DNS provided by Railway. Without it, `/settle` returns 502. |
-| `ZPAY_EXPLORER_URL` | yes (verify) | `http://zinder.railway.internal:9067` | Same shape. Without it, `/verify` reports `chain_presence: oracle_unavailable`. |
+| `ZPAY_CHAIN_SOURCE_URL` | yes | `http://zinder.railway.internal:9067` | Internal DNS provided by Railway. Used for settle, lifecycle observation, and disclosure transaction fetch. |
 | `ZPAY_FINALITY_DEPTH` | optional | `3` | Default 3; bump for mainnet. |
 | `ZPAY_STORE__AUTH_TOKEN` | optional | `<turso-token>` | Turso only. |
 | `ZPAY_STATIC_TIP_FALLBACK` | optional | `4000000` | Only meaningful without a tip oracle. |
@@ -64,7 +62,6 @@ explorer plane on a different port:
 
 ```
 ZPAY_CHAIN_SOURCE_URL=http://zinder.railway.internal:9067
-ZPAY_EXPLORER_URL=http://zinder.railway.internal:9067
 ```
 
 Private networking carries plaintext gRPC; there is no TLS termination

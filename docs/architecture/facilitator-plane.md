@@ -149,27 +149,29 @@ snapshot that is not yet settled keeps the stream open.
 
 ## Verify
 
-Input `VerifyRequest`: `{ txid, expected_amount_zat, disclosure_payload_hex }`.
+Input `VerifyRequest`:
+`{ txid, expected_amount_zat, expected_pay_to, expected_disclosure_message_hex,
+disclosure_payload_hex }`.
 
-zpay runs a local ZIP-311 verifier (`zpay-core`; see
-[ADR-0007](../adrs/0007-local-zip311-verifier.md)), fed by a
-`DisclosureFetcher` backed by zinder's explorer plane (`ZPAY_EXPLORER_URL`).
+zpay runs the Zally-owned Draft1 and Zally Ironwood verifier in-process
+(`zpay-core`; see [ADR-0015](../adrs/0015-zip311-draft1-verification.md)). A
+`DisclosureFetcher` reads the exact mined transaction bytes and height from
+zinder through `ZPAY_CHAIN_SOURCE_URL`.
 
-Output `VerifyResponse` carries three independent axes plus reserved
-reconciliation fields:
+Output `VerifyResponse` carries five independent axes:
 
 - `cryptographic_verdict`: `valid`, `invalid_signature`, `malformed`, or
   `inconclusive`.
 - `inconclusive_reason` (present only when inconclusive): `unsupported_pool`,
-  `unknown_version`, or `prevout_unresolved`.
+  `unknown_version`, `prevout_unresolved`, or `transaction_unavailable`.
 - `chain_presence`: `mined`, `not_found`, or `oracle_unavailable`.
-- `amount_reconciliation`: `match`, `mismatch`, or `not_checked` (every
-  response is `not_checked` today; reconciliation lands with a follow-on
-  slice).
-- `transaction_id`, and the reserved `payment_id` and `disclosed_value_zat`.
+- `amount_reconciliation`: `match`, `mismatch`, or `not_checked`.
+- `recipient_reconciliation`: `match`, `mismatch`, or `not_checked`.
+- `message_reconciliation`: `match`, `mismatch`, or `not_checked`.
+- `transaction_id`, `payment_id`, and `disclosed_value_zat`.
 
 A caller reads success as `cryptographic_verdict == valid` and
-`chain_presence == mined`.
+`chain_presence == mined`, with all reconciliation axes equal to `match`.
 
 ## Typed errors
 
@@ -189,8 +191,9 @@ Each `zpay-core` module returns its own typed error enum.
 | `Storage(StoreError)` | inherits |
 
 `PrepareError`: `PayeeUnknown`, `SchemeNetworkUnsupported`,
-`ExpiryHeightInvalid`, `TipOracle`, `Storage`. `VerifyError`: `PayloadInvalid`
-(the in-band verdicts flow through `VerifyResponse`, not this enum).
+`ExpiryHeightInvalid`, `TipOracle`, `Storage`. `VerifyError`: `PayloadInvalid`,
+`ExpectedPayToInvalid`, `ExpectedDisclosureMessageInvalid` (the in-band
+verdicts flow through `VerifyResponse`, not this enum).
 `OracleError`: `Unavailable`, `ResponseMalformed`.
 
 At the wire boundary each error renders as an `application/problem+json`

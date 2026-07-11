@@ -36,7 +36,8 @@ HTTP service that agents can pay against with one header swap.
 - [ZIP-317](https://zips.z.cash/zip-0317): conventional fees. zpay defers
   fee selection to zally.
 - [ZIP-311](https://zips.z.cash/zip-0311): payment disclosures. zpay calls
-  zinder's `VerifyPaymentDisclosure` to confirm receipt for shielded payments.
+  Zally's experimental verifier in-process and fetches the exact mined
+  transaction context from zinder.
 - [ZIP-316](https://zips.z.cash/zip-0316): unified addresses. The only
   recipient form zpay's `accepts[]` advertises.
 - [ZIP-225](https://zips.z.cash/zip-0225): v5 transaction format. Required
@@ -107,9 +108,9 @@ above the 98-byte budget needs an ADR.
 asks `Wallet::propose` for a proposal, which calls the ZIP-317 fee policy.
 
 **ZIP-311 disclosures** are the proof-of-receipt primitive for shielded
-payments. zpay calls zinder's `VerifyPaymentDisclosure` RPC; the verifier
-itself lives inside zinder (see [zpay/docs/proposals/](proposals/) for the
-upstream ask).
+payments. zpay verifies Zally-produced Draft1 Sapling and Zally Ironwood
+disclosures in-process. Zinder supplies the exact mined transaction bytes and
+height used as verification context.
 
 **ZIP-225 + ZIP-244** lock zpay to v5 transactions and v5 txids. v4 is not
 supported on any surface.
@@ -227,12 +228,17 @@ Capability: `zpay.v1.accepts`, `zpay.v1.prepare`, `zpay.v1.settle`,
 
 #### R-FAC-5. Verify a payment disclosure
 
-Now: nothing exists.
+Now: `/zpay/v1/verify` verifies ZIP-311 Draft1 Sapling evidence in-process,
+fetches mined transaction context from zinder, and reconciles recipient,
+amount, and the merchant's expected disclosure message independently from
+proof validity.
 Why it belongs in zpay: shielded payments require ZIP-311 disclosure to
 prove a specific recipient received a specific amount.
-Proposed change: `POST /zpay/v1/verify` accepts
-`{ txid, expected_amount_zat, expected_pay_to, disclosure_payload }`,
-delegates to zinder's `VerifyPaymentDisclosure`, returns a typed verdict.
+Shipped contract: `POST /zpay/v1/verify` accepts
+`{ txid, expected_amount_zat, expected_pay_to,
+expected_disclosure_message_hex, disclosure_payload_hex }`,
+uses Zally's experimental payment-disclosure crate, and returns a typed
+five-axis verdict.
 Capability: `zpay.v1.verify`.
 
 ### MPP facilitator (R-MPP-*)
@@ -448,9 +454,9 @@ observes a confirmed testnet ZEC payment.
 ### M2: Confirmation oracle and verify (Phase 4 continued)
 
 R-FAC-4, R-FAC-5, R-BCAST-2, R-CACHE-2.
-**Exit**: shielded payment confirmed via zinder's ZIP-311 verifier; the
-oracle's zexplorer fallback proven against a deployment without local
-zinder.
+**Exit**: a wallet-produced shielded payment disclosure verifies in-process
+against transaction context fetched from zinder, and the confirmation oracle
+is proven against the configured chain plane.
 
 ### M3: Compliance binding (Phase 6 of PRD-42)
 
@@ -541,10 +547,10 @@ the proposals in [docs/proposals/](proposals/) until the upstream accepts.
 |---|---|---|
 | fauzec | `CaptchaMode::Bearer` variant for agent-callable claims | Drafted in [PRD-42 Phase 1](https://github.com/gustavovalverde/zentity/blob/main/docs/plans/prd-42-zcash-agentic-payments-cross-stack.md) |
 | zally | `PaymentRequest::to_uri()` method | Drafted in PRD-42 Phase 2 |
-| zinder | ZIP-311 verifier inside the existing `explorer.payment_disclosure.verify_v1` capability | Drafted in PRD-42 Phase 2 |
+| zinder | Exact mined transaction bytes and height for disclosure verification | Implemented through `RemoteChainIndex::transaction_by_id` |
 | zexplorer | `POST /api/v1/{network}/transactions/{txid}/watch` route | Drafted in PRD-42 Phase 2 |
 | zentity | MCP `purchase` tool `scheme: "zcash"` branch | Drafted in PRD-42 Phase 6 |
-| zally | ZIP-311 payment-disclosure production (`Wallet::disclose_payment`) | Drafted in [Proposal-0006](proposals/0006-zally-zip311-disclosure-production.md) |
+| zally | ZIP-311 Draft1 and Ironwood payment-disclosure production and verification | Implemented in rev `6a8a7a4`; see [Proposal-0006](proposals/0006-zally-zip311-disclosure-production.md) |
 
 ## Out of Scope
 
