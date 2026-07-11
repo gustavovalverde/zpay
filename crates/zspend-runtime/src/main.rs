@@ -1905,8 +1905,13 @@ fn read_signing_config(bind_addr: SocketAddr) -> Result<SigningConfig, StartupEr
         name: "ZSPEND_AUDIENCE",
     })?;
     let jwks_file = optional_env("ZSPEND_JWKS_FILE").map(PathBuf::from);
-    let public_base =
-        optional_env("ZSPEND_PUBLIC_URL").unwrap_or_else(|| format!("http://{bind_addr}"));
+    let public_base = optional_env("ZSPEND_PUBLIC_URL").unwrap_or_else(|| {
+        tracing::warn!(
+            "ZSPEND_PUBLIC_URL unset; DPoP htu canonicalization uses http://{bind_addr}. \
+             Set this in production."
+        );
+        format!("http://{bind_addr}")
+    });
     let public_sign_url = format!("{}/v1/payments/sign", public_base.trim_end_matches('/'));
     let leeway_seconds = env_u64_or("ZSPEND_LEEWAY_SECONDS", 60);
     Ok(SigningConfig {
