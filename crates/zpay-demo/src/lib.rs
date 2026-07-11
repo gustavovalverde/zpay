@@ -29,6 +29,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, interval_at, timeout};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, warn};
 use zally_chain::{ChainSource, ChainSourceError, ZinderChainSource, ZinderRemoteOptions};
 #[cfg(test)]
@@ -100,6 +101,7 @@ pub struct DemoConfig {
     zspend_audience: String,
     token_ttl_seconds: u64,
     min_funded_zat: u64,
+    static_dir: Option<PathBuf>,
 }
 
 impl DemoConfig {
@@ -137,6 +139,7 @@ impl DemoConfig {
             zspend_audience: env_string("ZPAY_DEMO_ZSPEND_AUDIENCE", DEFAULT_ZSPEND_AUDIENCE),
             token_ttl_seconds: env_u64("ZPAY_DEMO_TOKEN_TTL_SECONDS", DEFAULT_TOKEN_TTL_SECONDS)?,
             min_funded_zat: env_u64("ZPAY_DEMO_MIN_FUNDED_ZAT", DEFAULT_MIN_FUNDED_ZAT)?,
+            static_dir: env_path("ZPAY_DEMO_STATIC_DIR"),
         })
     }
 }
@@ -284,7 +287,8 @@ pub async fn serve(config: DemoConfig) -> Result<(), DemoError> {
 }
 
 fn router(state: DemoState) -> Router {
-    Router::new()
+    let static_dir = state.config.static_dir.clone();
+    let router = Router::new()
         .route("/demo/v1/readiness", get(readiness_route))
         .route("/demo/v1/wallet", get(wallet_route))
         .route("/demo/v1/faucet-claims", post(create_faucet_claim_route))
@@ -309,8 +313,20 @@ fn router(state: DemoState) -> Router {
             "/demo/v1/payments/{payment_id}/verify",
             post(verify_payment_route),
         )
-        .route("/demo/v1/console/payments", get(console_payments_route))
-        .with_state(state)
+        .route("/demo/v1/console/payments", get(console_payments_route));
+
+    // Only set when running the built frontend behind this gateway (e.g. the
+    // Railway image); local dev serves the Vite app separately and proxies
+    // /demo/v1/* to this process instead.
+    let router = match static_dir {
+        Some(dir) => {
+            let index = ServeFile::new(dir.join("index.html"));
+            router.fallback_service(ServeDir::new(dir).not_found_service(index))
+        }
+        None => router,
+    };
+
+    router.with_state(state)
 }
 
 impl DemoState {
@@ -1946,6 +1962,7 @@ mod tests {
             zspend_audience: DEFAULT_ZSPEND_AUDIENCE.to_owned(),
             token_ttl_seconds: DEFAULT_TOKEN_TTL_SECONDS,
             min_funded_zat: DEFAULT_MIN_FUNDED_ZAT,
+            static_dir: None,
         };
 
         let issuer = load_or_create_issuer_encoding_key(&config)?;
