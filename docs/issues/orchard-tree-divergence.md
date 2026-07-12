@@ -1,5 +1,15 @@
 # Orchard commitment-tree divergence blocks wallet spends
 
+> **Resolved.** The frozen root was proven byte-for-byte identical to the
+> depth-32 root over zinder's three backfilled Orchard subtree caps: the
+> defect was the root read introduced in zally `65069ed` (computing over
+> backfilled caps spanning unscanned positions), fixed in `04edf80`,
+> hardened by `aab23a8`, and closed at the backfill seam by `0b35587`.
+> Full evidence and reproduction record:
+> [zally#7](https://github.com/gustavovalverde/zally/issues/7). The
+> analysis below predates that finding; its candidate mechanisms 1 and 2
+> are refuted and 3 is inverted by the proof.
+
 ## Summary
 
 A testnet wallet holding legacy Orchard notes cannot spend. Sync aborts with `WalletError::TreeRootsDiverged`: the wallet's Orchard note-commitment-tree root never tracks the chain, while its Sapling tree tracks correctly. Without a converged Orchard tree the wallet cannot build a valid anchor, so every Orchard spend is rejected before it is signed.
