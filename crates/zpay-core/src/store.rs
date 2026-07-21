@@ -61,4 +61,13 @@ pub enum StoreError {
         /// Operator-facing reason. Does not include row contents.
         reason: String,
     },
+    /// Persisted rows violate an invariant required by the current schema.
+    /// Retry posture: `requires_operator`.
+    #[error("store schema invariant {invariant:?} violated by {violating_rows} row(s)")]
+    SchemaInvariantViolation {
+        /// Stable invariant name suitable for operator diagnostics.
+        invariant: &'static str,
+        /// Number of persisted rows that violate the invariant.
+        violating_rows: u64,
+    },
 }

@@ -30,7 +30,7 @@ impl DisclosureFetcher for ZinderTransactionFetcher {
             })?;
         let mined = match status {
             TxStatus::Mined(mined) => mined,
-            TxStatus::NotFound | TxStatus::InMempool(_) | TxStatus::ConflictingChain => {
+            TxStatus::NotFound | TxStatus::InMempool(_) => {
                 return Err(FetchError::NotFound);
             }
             _ => {

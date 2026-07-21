@@ -97,7 +97,8 @@ or disabled in dev, and the wallet sync snapshot is fresh:
     "phase": "waiting",
     "sync_status": "at_tip",
     "scanned_height": 4152766,
-    "safe_chain_tip_height": 4152766,
+    "visible_tip_height": 4152766,
+    "settled_tip_height": 4152763,
     "lag_blocks": 0,
     "snapshot_age_seconds": 2,
     "freshness": "fresh",
@@ -108,8 +109,8 @@ or disabled in dev, and the wallet sync snapshot is fresh:
 ```
 
 `wallet_sync.freshness` is `fresh` only when the zally `SyncDriver` phase is
-`syncing` or `waiting`, the snapshot network matches the signer network, both
-heights are known, `lag_blocks` is within `ZSPEND_WALLET_SYNC_MAX_LAG_BLOCKS`,
+`syncing` or `waiting`, the snapshot network matches the signer network, all
+heights are known, `lag_blocks` to the visible tip is within `ZSPEND_WALLET_SYNC_MAX_LAG_BLOCKS`,
 and `snapshot_age_seconds` is within
 `ZSPEND_WALLET_SYNC_STALE_AFTER_SECONDS`. A stale, recovering, parked, closing,
 or closed sync driver makes `/readyz` return 503 and makes
@@ -154,7 +155,8 @@ carry bounded label sets so cardinality stays fixed.
 | `zspend_wallet_sync_fresh` | gauge | none |
 | `zspend_wallet_sync_lag_blocks` | gauge | none |
 | `zspend_wallet_sync_scanned_height` | gauge | none |
-| `zspend_wallet_sync_safe_chain_tip_height` | gauge | none |
+| `zspend_wallet_sync_visible_tip_height` | gauge | none |
+| `zspend_wallet_sync_settled_tip_height` | gauge | none |
 
 The chain gauges resample every 15 seconds from the shared chain view,
 independent of the confirmation poll, so a stalled poll loop still shows a
@@ -220,14 +222,14 @@ their DPoP-bound prepare and settle contract. Because verification and
 settlement both run PCZT extraction, the runtime must have Sapling verifying
 parameters available at the `zcash_proofs` default location. The Docker image
 sets `HOME=/opt/zpay-home`; compose mounts
-`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}` at both
+`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}` at both
 `/opt/zpay-home/.zcash-params` and `/home/zpay/.zcash-params`.
 
 ### Dev-only
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `ZPAY_ALLOW_DEMO_PAYEE` | off | Truthy (`1`, `true`, `yes`) bypasses the placeholder-receiver boot gate for dev and compose stacks. Emits a `WARN` per offending payee. Never set in production. |
+| `ZPAY_ALLOW_DEMO_PAYEE` | off | Truthy (`1`, `true`, `yes`) bypasses the placeholder-receiver boot gate for local development. Emits a `WARN` per offending payee. Never set in production. |
 | `RUST_LOG` | `zpay=info` | `tracing-subscriber` env filter. |
 
 ### Demo UI gateway
@@ -265,7 +267,7 @@ Configuration:
 | `ZPAY_DEMO_ZPAY_OPS_URL` | `http://127.0.0.1:9295` | zpay ops listener for readiness. |
 | `ZPAY_DEMO_ZSPEND_URL` | `http://127.0.0.1:8090` | zspend listener used by the gateway. |
 | `ZPAY_DEMO_ZSPEND_PUBLIC_URL` | `ZPAY_DEMO_ZSPEND_URL` | URL encoded into zspend DPoP proofs. |
-| `ZPAY_DEMO_ZINDER_URL` | `http://127.0.0.1:19101` | zinder gRPC endpoint for the demo wallet. |
+| `ZPAY_DEMO_ZINDER_URL` | `http://127.0.0.1:19102` | zinder native WalletQuery endpoint for the demo wallet. |
 | `ZPAY_DEMO_WALLET_DIR` | `.tmp/zpay-demo/wallet` | Local wallet seed and storage directory. |
 | `ZPAY_DEMO_BIRTHDAY_HEIGHT` | zinder visible tip minus 500 blocks | Optional demo wallet birthday override. Leave unset for fresh demo wallets. |
 | `ZPAY_DEMO_PAYEE_ID` | `aether-demo` | zpay payee used for prepare. |

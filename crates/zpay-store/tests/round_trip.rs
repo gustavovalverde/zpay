@@ -280,6 +280,26 @@ async fn settlement_ledger_round_trip() -> TestResult {
 }
 
 #[tokio::test]
+async fn duplicate_ledger_outcome_round_trips_its_transaction_id() -> TestResult {
+    let (_temp, _, ledger) = fresh_stores().await?;
+    let payment_id = PaymentId("pid-duplicate".to_owned());
+    let transaction_id = "ab".repeat(32);
+    let mut entry = accepted_ledger_entry(&transaction_id);
+    entry.broadcast_outcome = BroadcastOutcome::Duplicate {
+        transaction_id: transaction_id.clone(),
+    };
+
+    ledger.record(payment_id.clone(), entry).await?;
+    let found = ledger.find(&payment_id).await?.ok_or("ledger find miss")?;
+
+    assert_eq!(
+        found.broadcast_outcome.transaction_id(),
+        Some(transaction_id.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn downgrade_on_reorg_returns_mined_row_to_broadcast() -> TestResult {
     let (_temp, _, ledger) = fresh_stores().await?;
     let payment_id = PaymentId("reorg-pid".to_owned());

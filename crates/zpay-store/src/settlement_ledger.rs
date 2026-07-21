@@ -120,8 +120,7 @@ impl SettlementLedgerStore for LibsqlSettlementLedgerStore {
             .query(
                 "SELECT payment_id, transaction_id, mined_block_height \
                 FROM settlement_ledger \
-                WHERE broadcast_outcome_kind IN ('accepted', 'duplicate') \
-                  AND transaction_id IS NOT NULL",
+                WHERE broadcast_outcome_kind IN ('accepted', 'duplicate')",
                 params![],
             )
             .await
@@ -302,8 +301,8 @@ fn encode_broadcast_outcome(
         BroadcastOutcome::Accepted { transaction_id } => {
             ("accepted", Some(transaction_id.clone()), None)
         }
-        BroadcastOutcome::Duplicate { upstream_message } => {
-            ("duplicate", None, Some(upstream_message.clone()))
+        BroadcastOutcome::Duplicate { transaction_id } => {
+            ("duplicate", Some(transaction_id.clone()), None)
         }
         BroadcastOutcome::InvalidEncoding { upstream_message } => {
             ("invalid_encoding", None, Some(upstream_message.clone()))
@@ -411,7 +410,9 @@ fn decode_broadcast_outcome(
             })?,
         },
         "duplicate" => BroadcastOutcome::Duplicate {
-            upstream_message: upstream_message.unwrap_or_default(),
+            transaction_id: transaction_id.ok_or_else(|| StoreError::RowMalformed {
+                reason: "duplicate row missing transaction_id".to_owned(),
+            })?,
         },
         "invalid_encoding" => BroadcastOutcome::InvalidEncoding {
             upstream_message: upstream_message.unwrap_or_default(),

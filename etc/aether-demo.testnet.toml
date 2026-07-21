@@ -1,14 +1,11 @@
 # Railway test-deployment payee config for the `aether-demo` payee.
 #
 # `pay_to` is fauzec's donation address: a real, testnet-only address
-# already live and receiving funds through the faucet stack. Unlike
-# etc/aether-demo.toml's placeholder, this passes the boot-time
-# placeholder-receiver gate without ZPAY_ALLOW_DEMO_PAYEE.
+# already live and receiving funds through the faucet stack.
 #
 # This file is the reviewable source of truth for the zpay Railway
 # service's ZPAY_PAYEES_TOML variable (see docs/runbooks/railway-deploy.md);
-# it is not baked into the image, so any consumer of the plain Dockerfile
-# still gets etc/aether-demo.toml's gated placeholder.
+# Compose mounts this exact file for local testnet acceptance.
 
 [payees."aether-demo"]
 accepts = [

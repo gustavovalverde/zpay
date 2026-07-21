@@ -436,7 +436,7 @@ impl SettlementLedgerStore for SettlementLedger {
 ///   -> [`PaymentStatus::Final`].
 /// - `mined_block_height` known and `confirmation_count >= 1` (below
 ///   finality) -> [`PaymentStatus::Mined`].
-/// - unmined and the visible tip has passed the row's `expiry_height` ->
+/// - unmined and the visible tip has reached the row's `expiry_height` ->
 ///   [`PaymentStatus::Expired`].
 /// - unmined otherwise -> [`PaymentStatus::Broadcast`].
 ///
@@ -520,7 +520,7 @@ where
 ///
 /// A mined row is `Final` at or above finality depth and `Mined` below
 /// it, and is `settled` once its height is at or below the settled tip.
-/// An unmined row is `Expired` when the visible tip has passed its
+/// An unmined row is `Expired` when the visible tip has reached its
 /// `expiry_height` (the reorged-out or never-mined window has lapsed) and
 /// `Broadcast` otherwise.
 fn classify_success_row(
@@ -785,8 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unmined_row_lapses_to_expired_once_tip_passes_expiry_height()
-    -> Result<(), &'static str> {
+    async fn unmined_row_lapses_to_expired_at_expiry_height() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("lapse-id".to_owned());
@@ -797,25 +796,19 @@ mod tests {
             .await
             .map_err(|_| "record failed")?;
 
-        let within = ChainStatusView {
+        let at_expiry = ChainStatusView {
             visible_tip_height: Some(2_000_000),
             settled_tip_height: Some(1_999_900),
         };
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH, within)
-                .await
-                .map_err(|_| "lookup failed")?;
-        assert_eq!(snapshot.status, PaymentStatus::Broadcast);
-        assert!(!snapshot.stream_closed());
-
-        let past = ChainStatusView {
-            visible_tip_height: Some(2_000_001),
-            settled_tip_height: Some(1_999_901),
-        };
-        let snapshot =
-            lookup_payment_status(&payment_id, &store, &ledger, DEFAULT_FINALITY_DEPTH, past)
-                .await
-                .map_err(|_| "lookup failed")?;
+        let snapshot = lookup_payment_status(
+            &payment_id,
+            &store,
+            &ledger,
+            DEFAULT_FINALITY_DEPTH,
+            at_expiry,
+        )
+        .await
+        .map_err(|_| "lookup failed")?;
         assert_eq!(snapshot.status, PaymentStatus::Expired);
         assert!(
             snapshot.stream_closed(),
@@ -891,7 +884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downgraded_row_lapses_to_expired_when_tip_passes_expiry() -> Result<(), &'static str> {
+    async fn downgraded_row_lapses_to_expired_at_expiry() -> Result<(), &'static str> {
         let store = PreparedTxCache::new();
         let ledger = SettlementLedger::new();
         let payment_id = PaymentId("reorg-then-lapse".to_owned());
@@ -908,7 +901,7 @@ mod tests {
                 .map_err(|_| "downgrade failed")?
         );
         let past = ChainStatusView {
-            visible_tip_height: Some(2_000_011),
+            visible_tip_height: Some(2_000_010),
             settled_tip_height: Some(1_999_900),
         };
         let snapshot =

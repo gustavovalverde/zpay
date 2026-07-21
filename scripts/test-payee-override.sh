@@ -4,7 +4,7 @@
 #
 # Validates the production payee-configuration override path:
 # bind-mounting a custom payees.toml over /etc/zpay/payees.toml
-# replaces the baked-in `aether-demo` placeholder.
+# replaces the image's default `aether-demo` registry.
 #
 # The probe covers:
 #
@@ -12,12 +12,12 @@
 #      reflect the override payee count).
 #   2. GET /zpay/v1/accepts for the overridden payee id returns the override's
 #      pay_to and amount_zat.
-#   3. The baked-in `aether-demo` payee is replaced (returns 404)
+#   3. The default `aether-demo` payee is replaced (returns 404)
 #      because the override REPLACES the file, it does not merge.
 #   4. Wiring is bind-mount (read-only), not env-var, mirroring how
 #      Railway would inject the file via a volume secret.
 #
-# This is the production-readiness counterpart to the bake-in default
+# This is the production-readiness counterpart to the image default
 # that ships in etc/aether-demo.toml.
 
 set -euo pipefail
@@ -37,7 +37,7 @@ cleanup() {
 trap cleanup EXIT
 
 OVERRIDE_PAYEE_ID="override-test-$$"
-OVERRIDE_PAY_TO="utest1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+OVERRIDE_PAY_TO="utest10t56q4744d9ygg4l7uku7wzgp4kqhxpdajuf8vrgqn7pj6rpecpjfg3f56z95vkvc79tm3kqem0mx27dwp9arkkft56v9duyluqdw5az"
 OVERRIDE_AMOUNT=42
 
 cat > "$TEMP_DIR/payees.toml" <<EOF
@@ -46,11 +46,12 @@ accepts = [
   { scheme = "zcash", network = "testnet", pay_to = "$OVERRIDE_PAY_TO", amount_zat = $OVERRIDE_AMOUNT, max_validity_seconds = 900 },
 ]
 EOF
+chmod 0444 "$TEMP_DIR/payees.toml"
 
 echo "[test-payee-override] starting container $NAME with bind-mounted override"
 docker run --rm -d \
   --name "$NAME" \
-  -p "$PORT:8080" \
+  -p "127.0.0.1:$PORT:8080" \
   -v "$TEMP_DIR/payees.toml:/etc/zpay/payees.toml:ro" \
   "$IMAGE" >/dev/null
 
@@ -103,12 +104,12 @@ if [[ "$AMOUNT_FROM_RESPONSE" != "$OVERRIDE_AMOUNT" ]]; then
 fi
 echo "[test-payee-override] ok: /zpay/v1/accepts amount_zat reflects override"
 
-echo "[test-payee-override] confirming baked-in aether-demo is REPLACED, not merged"
+echo "[test-payee-override] confirming default aether-demo is REPLACED, not merged"
 BAKED_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$URL/zpay/v1/accepts?payee_id=aether-demo")"
 if [[ "$BAKED_STATUS" != "404" ]]; then
-  echo "[test-payee-override] FAIL: baked-in aether-demo should 404 when override file is mounted (got $BAKED_STATUS)"
+  echo "[test-payee-override] FAIL: default aether-demo should 404 when override file is mounted (got $BAKED_STATUS)"
   exit 1
 fi
-echo "[test-payee-override] ok: baked-in payee returns 404 (override replaced it)"
+echo "[test-payee-override] ok: default payee returns 404 (override replaced it)"
 
 echo "[test-payee-override] PASS"

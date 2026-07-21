@@ -28,8 +28,8 @@ pub enum BroadcastOutcome {
     /// Transaction already known to the network. Caller treats this as
     /// idempotent success.
     Duplicate {
-        /// Upstream-supplied human-readable message; safe to log.
-        upstream_message: String,
+        /// Hex-encoded ZIP-244 transaction id derived from the submitted bytes.
+        transaction_id: String,
     },
     /// Transaction bytes did not parse.
     InvalidEncoding {
@@ -49,16 +49,14 @@ pub enum BroadcastOutcome {
 }
 
 impl BroadcastOutcome {
-    /// Returns the transaction id reported by an `Accepted` outcome, or
-    /// `None` for every other variant.
+    /// Returns the transaction id bound to a successful outcome.
     #[must_use]
     pub fn transaction_id(&self) -> Option<&str> {
         match self {
-            Self::Accepted { transaction_id } => Some(transaction_id.as_str()),
-            Self::Duplicate { .. }
-            | Self::InvalidEncoding { .. }
-            | Self::Rejected { .. }
-            | Self::Unknown { .. } => None,
+            Self::Accepted { transaction_id } | Self::Duplicate { transaction_id } => {
+                Some(transaction_id.as_str())
+            }
+            Self::InvalidEncoding { .. } | Self::Rejected { .. } | Self::Unknown { .. } => None,
         }
     }
 
@@ -87,7 +85,13 @@ impl BroadcastOutcome {
                 transaction_id: tx_id.to_rpc_hex(),
             },
             zally_chain::SubmitOutcome::Duplicate { tx_id } => Self::Duplicate {
-                upstream_message: format!("already in mempool: {}", tx_id.to_rpc_hex()),
+                transaction_id: tx_id.to_rpc_hex(),
+            },
+            zally_chain::SubmitOutcome::Rejected {
+                reason: zally_chain::RejectionReason::InvalidEncoding,
+                detail,
+            } => Self::InvalidEncoding {
+                upstream_message: detail,
             },
             zally_chain::SubmitOutcome::Rejected { reason, detail } => Self::Rejected {
                 upstream_message: format!("{reason:?}: {detail}"),
@@ -119,11 +123,11 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_outcome_is_success_but_has_no_txid() {
+    fn duplicate_outcome_is_success_and_exposes_transaction_id() {
         let outcome = BroadcastOutcome::Duplicate {
-            upstream_message: "already in mempool".to_owned(),
+            transaction_id: "abcd".to_owned(),
         };
-        assert_eq!(outcome.transaction_id(), None);
+        assert_eq!(outcome.transaction_id(), Some("abcd"));
         assert!(outcome.is_success());
     }
 

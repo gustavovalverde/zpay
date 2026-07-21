@@ -59,3 +59,5 @@ ring = "0.17"
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
 zally-testkit.workspace = true
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true

@@ -33,19 +33,13 @@ services:
       ZPAY_STORE__BACKEND: libsql
       ZPAY_STORE__URL: file:/var/lib/zpay/zpay.libsql
       ZPAY_PAYEES__CONFIG_PATH: /etc/zpay/payees.toml
-      # Dev-only: bypass the placeholder-payee boot gate so the
-      # baked-in `aether-demo` payee can run in compose stacks.
-      # Railway and any other production deploy MUST NOT set this;
-      # the runtime refuses to start otherwise (see ADR-0007 and
-      # docs/runbooks/railway-deploy.md).
-      ZPAY_ALLOW_DEMO_PAYEE: "1"
-      # Testnet zinder/lightwalletd gRPC endpoint used by the broadcast
+      # Testnet zinder native WalletQuery endpoint used by the broadcast
       # plane, tip oracle, and confirmation oracle. The default points
       # at the in-network `zinder-query` alias on the shared
       # `z3-testnet` network; bring up the zinder-testnet stack first
       # (`docker compose -f /path/to/zinder/compose.yml up -d`) or
-      # override with your own zinder/lightwalletd endpoint.
-      ZPAY_CHAIN_SOURCE_URL: ${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9101}
+      # override with your own native WalletQuery endpoint.
+      ZPAY_CHAIN_SOURCE_URL: ${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9102}
       # zpay extracts signed PCZTs for `/x402/v2/verify` and `/x402/v2/settle`.
       # Sapling verification parameters must be available through the default
       # zcash_proofs location, just like zspend's local prover.
@@ -58,14 +52,9 @@ services:
       ZPAY_DPOP_KEY_SEED: ${ZPAY_DPOP_KEY_SEED:-dev-only-aether-bff-dpop-seed-do-not-use-in-prod-stable-48chars}
     volumes:
       - zpay-data:/var/lib/zpay
-      # Override the baked-in payees.toml by bind-mounting a host file
-      # here. The default file inside the image lists only `aether-demo`
-      # with a placeholder receiver. The local override below points
-      # `aether-demo` at a real parseable testnet unified address so
-      # the end-to-end probe walks past zspend's ZIP-321 parse.
-      - ./etc/aether-demo.local.toml:/etc/zpay/payees.toml:ro
-      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/opt/zpay-home/.zcash-params:ro
-      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/home/zpay/.zcash-params:ro
+      - ./etc/aether-demo.testnet.toml:/etc/zpay/payees.toml:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}:/opt/zpay-home/.zcash-params:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}:/home/zpay/.zcash-params:ro
     restart: unless-stopped
     networks:
       - zcash-x402-demo
@@ -112,18 +101,18 @@ services:
       # at that height. Subsequent boots reuse the existing row and do not
       # contact this endpoint. Defaults to the in-network `zinder-query` alias
       # on the `z3-testnet` network shared with zpay.
-      ZSPEND_CHAIN_SOURCE_URL: ${ZSPEND_CHAIN_SOURCE_URL:-http://zinder-query:9101}
+      ZSPEND_CHAIN_SOURCE_URL: ${ZSPEND_CHAIN_SOURCE_URL:-http://zinder-query:9102}
       # Optional overrides; see crates/zspend-runtime/src/main.rs.
       # ZSPEND_MAX_AMOUNT_ZAT: "100000000"
       ZSPEND_AUDIENCE: ${ZSPEND_AUDIENCE:-urn:zpay:zspend:local-dev}
       ZSPEND_JWKS_FILE: ${ZSPEND_JWKS_FILE:-}
       ZSPEND_PUBLIC_URL: ${ZSPEND_PUBLIC_URL:-http://127.0.0.1:8090}
-      # Pinned to a height well below zinder's safe_tip so the
+      # Pinned to a height well below zinder's settled tip so the
       # first-boot tree_state_at(birthday - 1) lookup hits an
-      # already-indexed checkpoint. zinder's safe_tip lags the actual
-      # tip by ~100 blocks; chain_tip() returns the actual tip, so
+      # already-indexed checkpoint. zinder's settled tip lags the visible
+      # tip by the configured reorg window, so
       # without this override the bootstrap queries tree state past
-      # safe_tip and zinder returns ServiceUnavailable.
+      # the settled tip and zinder returns ServiceUnavailable.
       ZSPEND_BIRTHDAY_HEIGHT: ${ZSPEND_BIRTHDAY_HEIGHT:-4050200}
     volumes:
       - zspend-data:/var/lib/zspend
@@ -134,8 +123,8 @@ services:
       # at both candidate locations so the binary resolves them whether
       # `home::home_dir()` returns the `HOME` env value or the
       # `/etc/passwd` pwent for uid 10001.
-      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/opt/zspend-home/.zcash-params:ro
-      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}:/home/zspend/.zcash-params:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}:/opt/zspend-home/.zcash-params:ro
+      - ${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}:/home/zspend/.zcash-params:ro
     restart: unless-stopped
     networks:
       - zcash-x402-demo
@@ -154,7 +143,7 @@ networks:
   zcash-x402-demo:
     external: true
   # External: owned by the zinder-testnet stack. zpay joins it so the
-  # in-network `zinder-query` alias resolves for the indexer gRPC
+  # in-network `zinder-query` alias resolves for the native WalletQuery
   # endpoint.
   z3-testnet:
     external: true

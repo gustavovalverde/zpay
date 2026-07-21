@@ -117,11 +117,13 @@ No librustzcash change is required for this divergence. The scan emits and appen
 
 **Reported wallet root.** `78bdaf718b1d566946420dbc7d755c35e31587d600767d6cda46154429b77403`, constant across scanned heights. It does not equal the birthday Orchard frontier above in either byte order, and it is not the canonical empty Orchard tree root.
 
-**Reproduction.**
+**Historical reproduction.** These commands and ports describe the
+pre-cutover deployment captured by this resolved incident. They are evidence,
+not current WalletQuery operating instructions.
 
 1. Fetch a compact block carrying the Orchard actions and confirm the pool contents:
-   `grpcurl -plaintext 127.0.0.1:19101 zinder.v1.wallet.WalletQuery/CompactBlock -d '{"height":4056276}'`, base64-decode `payloadBytes`, then `protoc --decode=cash.z.wallet.sdk.rpc.CompactBlock` and count `actions` (Orchard, field 6) versus `outputs` (Sapling, field 5).
+   `grpcurl -plaintext 127.0.0.1:19102 zinder.v1.wallet.WalletQuery/CompactBlock -d '{"height":4056276}'`, base64-decode `payloadBytes`, then `protoc --decode=cash.z.wallet.sdk.rpc.CompactBlock` and count `actions` (Orchard, field 6) versus `outputs` (Sapling, field 5).
 2. Fetch the Orchard frontier at scan start:
-   `grpcurl -plaintext 127.0.0.1:19101 zinder.v1.wallet.WalletQuery/TreeStateAtHeight -d '{"height":4050200}'`, base64-decode `payloadBytes`, read `orchard.commitments.finalRoot`.
+   `grpcurl -plaintext 127.0.0.1:19102 zinder.v1.wallet.WalletQuery/TreeStateAtHeight -d '{"height":4050200}'`, base64-decode `payloadBytes`, read `orchard.commitments.finalRoot`.
 3. Cross-check against consensus with zebra `z_gettreestate` at the same heights (zebra returns roots in reversed byte order).
 4. Sync the wallet from the birthday and read the Orchard root via `commitment_tree_roots`; observe it frozen while Sapling advances.
