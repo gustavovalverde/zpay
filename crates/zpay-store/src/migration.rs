@@ -28,6 +28,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         3,
         include_str!("../migrations/0003_settlement_ledger_payee_and_amount.sql"),
     ),
+    (
+        4,
+        include_str!("../migrations/0004_settlement_outcome_columns.sql"),
+    ),
 ];
 
 /// Apply every migration whose version is greater than the
@@ -38,7 +42,9 @@ const MIGRATIONS: &[(u32, &str)] = &[
 /// Returns [`StoreError::Unavailable`] when the underlying libSQL
 /// connection rejects a statement, and [`StoreError::MigrationPending`]
 /// when the persisted schema version is newer than what this binary
-/// understands (rollbacks are not supported).
+/// understands (rollbacks are not supported). Returns
+/// [`StoreError::SchemaInvariantViolation`] when persisted settlement rows
+/// cannot be represented by the current outcome-column contract.
 pub async fn run_migrations(connection: &StoreConnection) -> Result<(), StoreError> {
     // Version 1 creates the bookkeeping table every later step reads, and
     // is idempotent, so it runs unconditionally.
@@ -54,9 +60,13 @@ pub async fn run_migrations(connection: &StoreConnection) -> Result<(), StoreErr
 
     for (version, sql) in &MIGRATIONS[1..] {
         if *version > applied {
+            if *version == 4 {
+                validate_settlement_outcome_columns(connection).await?;
+            }
             apply_migration(connection, sql).await?;
         }
     }
+    validate_settlement_outcome_columns(connection).await?;
 
     tracing::info!(
         event = "zpay_store_migrations_applied",
@@ -64,6 +74,50 @@ pub async fn run_migrations(connection: &StoreConnection) -> Result<(), StoreErr
         migration_table = MIGRATION_TABLE,
         "libsql schema migrations applied",
     );
+    Ok(())
+}
+
+const SETTLEMENT_OUTCOME_COLUMNS_INVARIANT: &str = "settlement_outcome_columns_v4";
+
+async fn validate_settlement_outcome_columns(
+    connection: &StoreConnection,
+) -> Result<(), StoreError> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM settlement_ledger WHERE CASE \
+                WHEN broadcast_outcome_kind IN ('accepted', 'duplicate') THEN \
+                    transaction_id IS NULL OR upstream_message IS NOT NULL \
+                WHEN broadcast_outcome_kind IN ('invalid_encoding', 'rejected', 'unknown') THEN \
+                    transaction_id IS NOT NULL OR upstream_message IS NULL \
+                ELSE 1 \
+            END",
+            params![],
+        )
+        .await
+        .map_err(|err| StoreError::Unavailable {
+            reason: format!("settlement outcome invariant query failed: {err}"),
+        })?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| StoreError::Unavailable {
+            reason: format!("settlement outcome invariant row read failed: {err}"),
+        })?
+        .ok_or_else(|| StoreError::Unavailable {
+            reason: "settlement outcome invariant query returned no count".to_owned(),
+        })?;
+    let violating_rows: i64 = row.get(0).map_err(|err| StoreError::RowMalformed {
+        reason: format!("settlement outcome invariant count is not an integer: {err}"),
+    })?;
+    let violating_rows = u64::try_from(violating_rows).map_err(|_| StoreError::RowMalformed {
+        reason: "settlement outcome invariant count is negative".to_owned(),
+    })?;
+    if violating_rows != 0 {
+        return Err(StoreError::SchemaInvariantViolation {
+            invariant: SETTLEMENT_OUTCOME_COLUMNS_INVARIANT,
+            violating_rows,
+        });
+    }
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 //!
 //! [`ChainStatusView`] carries the two heights the status projection
 //! needs: the visible tip (for expiry-lapse) and the settled tip (the
-//! reorg-window scan ceiling, below which a mined payment is immutable).
+//! reorg-window settlement watermark).
 //! [`ChainStatusCache`] is the process-wide holder the background chain
 //! tasks refresh and the wire handlers read without a chain round-trip.
 
@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ChainStatusView {
     /// Best visible tip height, or `None` before the first chain read.
     pub visible_tip_height: Option<u64>,
-    /// Reorg-window scan ceiling: heights at or below this are immutable.
+    /// Reorg-window settlement watermark used by payment finality policy.
     /// `None` before the first chain read.
     pub settled_tip_height: Option<u64>,
 }
@@ -37,15 +37,15 @@ impl ChainStatusView {
         }
     }
 
-    /// Returns `true` when `expiry_height` is strictly below the visible
-    /// tip, meaning an unmined payment's settle window has lapsed.
+    /// Returns `true` when the visible tip reaches `expiry_height`, meaning
+    /// the next mineable block is already outside the transaction's window.
     ///
     /// A `None` visible tip yields `false`: an unknown chain view never
     /// expires a payment.
     #[must_use]
     pub const fn is_lapsed_at(&self, expiry_height: u64) -> bool {
         match self.visible_tip_height {
-            Some(tip) => tip > expiry_height,
+            Some(tip) => tip >= expiry_height,
             None => false,
         }
     }
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_and_lapsed_thresholds_are_inclusive_and_strict() {
+    fn settled_and_lapsed_thresholds_are_inclusive() {
         let view = ChainStatusView {
             visible_tip_height: Some(200),
             settled_tip_height: Some(100),
@@ -139,7 +139,8 @@ mod tests {
         assert!(view.is_settled_at(99));
         assert!(!view.is_settled_at(101));
         assert!(view.is_lapsed_at(199));
-        assert!(!view.is_lapsed_at(200));
+        assert!(view.is_lapsed_at(200));
+        assert!(!view.is_lapsed_at(201));
     }
 
     #[test]

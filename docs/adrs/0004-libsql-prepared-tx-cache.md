@@ -48,9 +48,8 @@ two-phase write and risks divergence.
 inside one zpay-store crate. SQLite file in local dev; Turso embedded
 replica or remote Turso in production.**
 
-Shipped schema (after the 2026-05-26 reconciliation and the 2026-06-03
-DPoP-binding migration; see the revision history for the redesigns
-that landed each column):
+Shipped schema (see the revision history for the migrations that landed each
+column and invariant):
 
 - `prepared_tx (payment_id TEXT PRIMARY KEY, payee_id TEXT NOT NULL,
   network TEXT NOT NULL, scheme TEXT NOT NULL, recipient_unified_address
@@ -70,9 +69,12 @@ that landed each column):
   TEXT NOT NULL, transaction_id TEXT, upstream_message TEXT,
   settled_at_unix_seconds INTEGER NOT NULL, confirmation_count INTEGER,
   mined_block_height INTEGER, last_confirmation_check_at_unix_seconds
-  INTEGER)`. Append-only; rows are mutated only by the confirmation
-  oracle as it updates `confirmation_count`, `mined_block_height`, and
-  `last_confirmation_check_at_unix_seconds`.
+  INTEGER, reorg_count INTEGER NOT NULL, last_reorged_at INTEGER,
+  expiry_height INTEGER, payee_id TEXT NOT NULL, amount_zat INTEGER NOT
+  NULL)`. The `settlement_outcome_columns_v4` check requires Accepted and
+  Duplicate rows to carry a transaction ID and no upstream message; failure
+  rows carry an upstream message and no transaction ID. Rows are mutated by
+  the confirmation and reorg paths as chain state changes.
 - `bearer_key_hash (key_hash BLOB PRIMARY KEY, label TEXT,
   created_at_unix_seconds INTEGER, revoked_at_unix_seconds INTEGER)`
 
@@ -323,3 +325,18 @@ store and the wallet's ledger share neither a schema nor a connection.
 A `libsql://` remote URL requires `ZSPEND_LEDGER_AUTH_TOKEN`; startup fails
 closed with a typed error rather than opening an unauthenticated connection
 when the token is missing. A file-backed URL ignores the token.
+
+### 2026-07-21: Schema version 4 enforces settlement outcome columns
+
+Migration `0004_settlement_outcome_columns.sql` rebuilds
+`settlement_ledger` with the named `settlement_outcome_columns_v4` check.
+Accepted and Duplicate are success outcomes and must carry a non-null
+`transaction_id` with a null `upstream_message`. InvalidEncoding, Rejected,
+and Unknown are failure outcomes and must carry a non-null
+`upstream_message` with a null `transaction_id`.
+
+The migration runner validates existing rows before rebuilding the table. A
+schema-v3 database containing an outcome that violates this contract fails
+startup with `StoreError::SchemaInvariantViolation`; the runner does not
+synthesize a transaction ID, rewrite the outcome, or delete the row. Once
+version 4 is installed, the SQL check rejects invalid inserts and updates.

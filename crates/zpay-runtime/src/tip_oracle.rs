@@ -2,8 +2,8 @@
 //!
 //! Two concrete strategies:
 //!
-//! - [`ZinderTipOracle`] reads the current tip via zinder's
-//!   `latest_block` RPC. Production deployments wire this.
+//! - [`ZinderTipOracle`] reads the visible tip from zinder's current
+//!   chain epoch. Production deployments wire this.
 //! - [`StaticTipOracle`] returns a configurable fixed height and logs a
 //!   WARN on every call. Demo / dev deployments without a chain plane
 //!   wire this so `/prepare` still produces a deterministic
@@ -15,7 +15,7 @@ use zinder_client::{ChainIndex, IndexerError, RemoteChainIndex};
 use zpay_core::tip::{ChainTipOracle, TipError};
 use zpay_core::types::PaymentNetwork;
 
-/// Production chain-tip oracle backed by zinder's `WalletQuery.LatestBlock`.
+/// Production chain-tip oracle backed by zinder's current chain epoch.
 pub(crate) struct ZinderTipOracle {
     chain: RemoteChainIndex,
 }
@@ -28,12 +28,12 @@ impl ZinderTipOracle {
 
 impl ChainTipOracle for ZinderTipOracle {
     async fn current_tip(&self, _network: PaymentNetwork) -> Result<u32, TipError> {
-        let block = self
+        let epoch = self
             .chain
-            .latest_block(None)
+            .current_epoch()
             .await
             .map_err(|err| map_indexer_error(&err))?;
-        Ok(block.height.value())
+        Ok(epoch.visible_tip_height.value())
     }
 }
 

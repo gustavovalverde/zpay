@@ -27,7 +27,7 @@ Local services:
 
 - a Zcash testnet zinder endpoint is running.
 - zpay can reach that zinder endpoint from wherever zpay runs.
-- Sapling parameters exist at `${HOME}/.local/share/ZcashParams`, or
+- Sapling parameters exist at `${HOME}/.zcash-params`, or
   `ZCASH_PARAMS_HOST_DIR` points to them.
   Both zpay and zspend mount this directory. zpay needs the files for
   `/x402/v2/verify` and `/x402/v2/settle` because PCZT extraction loads
@@ -37,8 +37,8 @@ The examples below use these variables. The defaults match common localhost
 ports, but any machine can override them.
 
 ```bash
-export ZINDER_GRPC_URL="${ZINDER_GRPC_URL:-http://127.0.0.1:19101}"
-export ZINDER_GRPC_TARGET="${ZINDER_GRPC_TARGET:-127.0.0.1:19101}"
+export ZINDER_GRPC_URL="${ZINDER_GRPC_URL:-http://127.0.0.1:19102}"
+export ZINDER_GRPC_TARGET="${ZINDER_GRPC_TARGET:-127.0.0.1:19102}"
 export ZPAY_URL="${ZPAY_URL:-http://127.0.0.1:8080}"
 export ZPAY_OPS_URL="${ZPAY_OPS_URL:-http://127.0.0.1:9295}"
 export HARNESS_WALLET_DIR="${HARNESS_WALLET_DIR:-.tmp/zpay-e2e/harness-wallet}"
@@ -52,7 +52,7 @@ Confirm zinder is reachable:
 ```bash
 grpcurl -plaintext -d '{}' \
   "$ZINDER_GRPC_TARGET" \
-  zinder.v1.wallet.WalletQuery.LatestBlock \
+  zinder.v1.wallet.WalletQuery/ServerInfo \
   | jq .
 ```
 
@@ -62,8 +62,8 @@ Choose a recent wallet birthday so the first sync is fast:
 LATEST_HEIGHT=$(
   grpcurl -plaintext -d '{}' \
     "$ZINDER_GRPC_TARGET" \
-    zinder.v1.wallet.WalletQuery.LatestBlock \
-    | jq -r '.latestBlock.height'
+    zinder.v1.wallet.WalletQuery/VisibleTipBlock \
+    | jq -r '.visibleTipBlock.height'
 )
 
 export BIRTHDAY_HEIGHT="${BIRTHDAY_HEIGHT:-$((LATEST_HEIGHT - 500))}"
@@ -81,14 +81,14 @@ Set the chain URL to the endpoint zpay can reach from its own runtime. This may
 be different from the host URL used by `grpcurl` and `zpay-e2e`.
 
 ```bash
-export ZPAY_CHAIN_SOURCE_URL="${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9101}"
+export ZPAY_CHAIN_SOURCE_URL="${ZPAY_CHAIN_SOURCE_URL:-http://zinder-query:9102}"
 ```
 
 Common values:
 
-- `http://zinder-query:9101` when zpay and zinder share a Docker network with
+- `http://zinder-query:9102` when zpay and zinder share a Docker network with
   the `zinder-query` service alias.
-- `http://host.docker.internal:19101` when zpay runs in Docker Desktop and
+- `http://host.docker.internal:19102` when zpay runs in Docker Desktop and
   zinder is exposed on the host.
 - `$ZINDER_GRPC_URL` when zpay runs directly on the host.
 

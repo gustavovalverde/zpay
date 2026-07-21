@@ -1,19 +1,18 @@
 //! Production [`ConfirmationOracle`] backed by `zinder-client::RemoteChainIndex`.
 //!
 //! Resolves a hex-encoded ZIP-244 transaction id back to a typed
-//! confirmation outcome by combining `transaction_by_id` (placement) with
-//! `latest_block` (current chain tip).
+//! confirmation outcome from the placement and confirmation count bound to
+//! the transaction lookup's chain epoch.
 //!
-//! Mirrors the [`ZinderSubmitter`][super::zinder_submitter] module:
-//! the channel is opened lazily and HTTP/2 keepalive plus tonic 0.14's
-//! channel-self-heal pattern are inherited from `RemoteChainIndex`.
+//! The channel is opened lazily; HTTP/2 keepalive and tonic's channel
+//! self-healing are inherited from `RemoteChainIndex`.
 
 use zally_core::TxId;
 use zinder_client::{ChainIndex, IndexerError, RemoteChainIndex, TransactionId, TxStatus};
 use zpay_core::chain_status::ChainStatusView;
 use zpay_core::oracle::{ConfirmationOracle, ConfirmationOutcome, OracleError};
 
-/// Production confirmation oracle backed by zinder's `WalletQuery.TransactionById`.
+/// Production confirmation oracle backed by zinder's `WalletQuery.Transaction`.
 pub(crate) struct ZinderConfirmationOracle {
     chain: RemoteChainIndex,
 }
@@ -38,45 +37,32 @@ impl ConfirmationOracle for ZinderConfirmationOracle {
         match status {
             TxStatus::Mined(mined) => {
                 let block_height: u64 = u64::from(mined.location.block_height.value());
-                let block = self
-                    .chain
-                    .latest_block(None)
-                    .await
-                    .map_err(|err| map_indexer_error(&err))?;
-                let tip_height: u64 = u64::from(block.height.value());
-                // saturating_sub guards against the rare case where the
-                // reorg has retracted the tip below the tx height between
-                // our two reads.
-                let confirmation_count = confirmation_count(block_height, tip_height);
                 Ok(ConfirmationOutcome::Mined {
                     block_height,
-                    confirmation_count,
+                    confirmation_count: mined.chain_context.confirmations,
                 })
             }
             TxStatus::InMempool(_) => Ok(ConfirmationOutcome::InMempool),
-            TxStatus::ConflictingChain => Ok(ConfirmationOutcome::ConflictingChain),
+            TxStatus::NotFound => Ok(ConfirmationOutcome::NotFound),
             #[allow(
                 clippy::wildcard_enum_match_arm,
-                reason = "TxStatus is #[non_exhaustive]; NotFound is the safe default for the explicit NotFound variant and any future additions"
+                reason = "TxStatus is non-exhaustive; future variants fail closed until this consumer defines their confirmation semantics"
             )]
-            TxStatus::NotFound | _ => Ok(ConfirmationOutcome::NotFound),
+            _ => Err(OracleError::ResponseMalformed {
+                reason: "zinder returned an unsupported transaction status".to_owned(),
+            }),
         }
     }
 
     async fn chain_status(&self) -> Result<ChainStatusView, OracleError> {
-        let visible_tip = self
+        let epoch = self
             .chain
-            .latest_block(None)
-            .await
-            .map_err(|err| map_indexer_error(&err))?;
-        let settled_tip = self
-            .chain
-            .latest_safe_block(None)
+            .current_epoch()
             .await
             .map_err(|err| map_indexer_error(&err))?;
         Ok(ChainStatusView {
-            visible_tip_height: Some(u64::from(visible_tip.height.value())),
-            settled_tip_height: Some(u64::from(settled_tip.height.value())),
+            visible_tip_height: Some(u64::from(epoch.visible_tip_height.value())),
+            settled_tip_height: Some(u64::from(epoch.settled_tip_height.value())),
         })
     }
 }
@@ -95,18 +81,9 @@ fn decode_rpc_transaction_id(transaction_id_hex: &str) -> Result<TransactionId, 
     Ok(TransactionId::from_bytes(*tx_id.as_bytes()))
 }
 
-fn confirmation_count(block_height: u64, visible_tip_height: u64) -> u32 {
-    u32::try_from(
-        visible_tip_height
-            .saturating_sub(block_height)
-            .saturating_add(1),
-    )
-    .unwrap_or(u32::MAX)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{confirmation_count, decode_rpc_transaction_id};
+    use super::decode_rpc_transaction_id;
 
     #[test]
     fn decodes_rpc_txid_before_querying_zinder() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,15 +98,5 @@ mod tests {
 
         assert_eq!(decoded.as_bytes(), internal_bytes);
         Ok(())
-    }
-
-    #[test]
-    fn confirmation_count_uses_visible_tip_inclusive_depth() {
-        assert_eq!(confirmation_count(4_152_902, 4_152_953), 52);
-    }
-
-    #[test]
-    fn confirmation_count_saturates_when_tip_retracts_below_tx_height() {
-        assert_eq!(confirmation_count(4_152_902, 4_152_901), 1);
     }
 }

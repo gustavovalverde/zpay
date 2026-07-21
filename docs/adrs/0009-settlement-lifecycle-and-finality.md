@@ -26,8 +26,8 @@ Two properties have to coexist in the status a caller reads:
   from the chain plane's own reorg-window accounting.
 
 zinder exposes both a visible tip and a settled tip, where the settled tip
-is the reorg-window scan ceiling: any block at or below it is immutable
-(ADR-0003). zpay's job is to project those two heights, plus its own ledger,
+is the server-derived reorg-window settlement watermark (ADR-0003). zpay's
+job is to project those two heights, plus its own ledger,
 into a status a caller can trust and to make every regression observable.
 
 The prepared row is removed on a successful settle, so the ledger has to
@@ -81,11 +81,11 @@ Downgrades fire from two independent sources, each labeled on the
   reports as `NotFound`, `ConflictingChain`, or back in the mempool after
   having been mined (`downgrade_on_reorg`).
 
-### An unmined payment past its expiry height lapses to `Expired`
+### An unmined payment lapses to `Expired` at its expiry height
 
 The prepared `expiry_height` is carried onto the ledger at settle time
-(migration 0002). An unmined success-kind row whose `expiry_height` is
-strictly below the visible tip (`ChainStatusView::is_lapsed_at`) projects to
+(migration 0002). An unmined success-kind row whose `expiry_height` is at or
+below the visible tip (`ChainStatusView::is_lapsed_at`) projects to
 `Expired`, which is terminal. This covers a broadcast that was reorged out
 and never re-mined, and a payment that never confirmed. A prepared-but-never-
 settled row whose wall-clock TTL passed also reads `Expired`.
@@ -138,7 +138,7 @@ Positive:
 - Every regression is observable through `reorg_count`, `last_reorged_at`,
   and the `zpay_reorg_downgrades_total{source}` counter.
 - A payment that reorgs out and never re-mines does not hang; it lapses to
-  the terminal `Expired` once the visible tip passes its expiry height.
+  the terminal `Expired` once the visible tip reaches its expiry height.
 
 Negative:
 

@@ -272,7 +272,8 @@ struct WalletSyncSnapshot {
     phase: WalletSyncPhase,
     sync_status: WalletSyncScanStatus,
     scanned_height: Option<BlockHeight>,
-    safe_chain_tip_height: Option<BlockHeight>,
+    visible_tip_height: Option<BlockHeight>,
+    settled_tip_height: Option<BlockHeight>,
     lag_blocks: Option<u32>,
     last_fault: Option<WalletSyncFault>,
     published_at_ms: u64,
@@ -285,7 +286,8 @@ impl From<SyncSnapshot> for WalletSyncSnapshot {
             phase: WalletSyncPhase::from(&snapshot.phase),
             sync_status: WalletSyncScanStatus::from(&snapshot.sync_status),
             scanned_height: snapshot.scanned_height,
-            safe_chain_tip_height: snapshot.safe_chain_tip_height,
+            visible_tip_height: snapshot.visible_tip_height,
+            settled_tip_height: snapshot.settled_tip_height,
             lag_blocks: snapshot.lag_blocks,
             last_fault: snapshot.last_fault.map(WalletSyncFault::from),
             published_at_ms: snapshot.published_at_ms,
@@ -723,7 +725,8 @@ fn wallet_sync_readiness(state: &AppState) -> (serde_json::Value, bool) {
         "phase": sync_phase_label(snapshot.phase),
         "sync_status": sync_status_label(snapshot.sync_status),
         "scanned_height": snapshot.scanned_height.map(zally_core::BlockHeight::as_u32),
-        "safe_chain_tip_height": snapshot.safe_chain_tip_height.map(zally_core::BlockHeight::as_u32),
+        "visible_tip_height": snapshot.visible_tip_height.map(zally_core::BlockHeight::as_u32),
+        "settled_tip_height": snapshot.settled_tip_height.map(zally_core::BlockHeight::as_u32),
         "lag_blocks": snapshot.lag_blocks,
         "snapshot_age_seconds": snapshot_age_seconds,
         "freshness": if is_fresh { "fresh" } else { "stale" },
@@ -753,7 +756,8 @@ fn is_wallet_sync_fresh(
         return false;
     };
     snapshot.scanned_height.is_some()
-        && snapshot.safe_chain_tip_height.is_some()
+        && snapshot.visible_tip_height.is_some()
+        && snapshot.settled_tip_height.is_some()
         && lag_blocks <= max_lag_blocks
 }
 
@@ -771,8 +775,11 @@ fn record_wallet_sync_metrics(
     if let Some(height) = snapshot.scanned_height {
         metrics::gauge!("zspend_wallet_sync_scanned_height").set(f64::from(height.as_u32()));
     }
-    if let Some(height) = snapshot.safe_chain_tip_height {
-        metrics::gauge!("zspend_wallet_sync_safe_chain_tip_height").set(f64::from(height.as_u32()));
+    if let Some(height) = snapshot.visible_tip_height {
+        metrics::gauge!("zspend_wallet_sync_visible_tip_height").set(f64::from(height.as_u32()));
+    }
+    if let Some(height) = snapshot.settled_tip_height {
+        metrics::gauge!("zspend_wallet_sync_settled_tip_height").set(f64::from(height.as_u32()));
     }
 }
 
@@ -1637,7 +1644,10 @@ fn load_jwks(path: Option<&PathBuf>) -> Result<JwkSet, StartupError> {
 )]
 fn map_wallet_err(err: &zally_wallet::WalletError) -> ProblemResponse {
     match err {
-        zally_wallet::WalletError::TargetExpiryStale { target, chain_tip } => ProblemResponse {
+        zally_wallet::WalletError::TargetExpiryStale {
+            target,
+            visible_tip,
+        } => ProblemResponse {
             status: StatusCode::CONFLICT,
             body: ProblemDetail::not_retryable(
                 ProblemKind::TargetExpiryStale,
@@ -1646,7 +1656,7 @@ fn map_wallet_err(err: &zally_wallet::WalletError) -> ProblemResponse {
                     "caller-supplied target_expiry_height={} is at or below the wallet's \
                      observed tip={}; request a fresh /prepare and retry",
                     u32::from(*target),
-                    u32::from(*chain_tip),
+                    u32::from(*visible_tip),
                 ),
             ),
         },
@@ -2415,7 +2425,8 @@ mod tests {
             phase: WalletSyncPhase::Waiting,
             sync_status: WalletSyncScanStatus::AtTip,
             scanned_height: Some(height),
-            safe_chain_tip_height: Some(height),
+            visible_tip_height: Some(height),
+            settled_tip_height: Some(height),
             lag_blocks: Some(0),
             last_fault: None,
             published_at_ms: super::unix_now_ms(),
@@ -2424,13 +2435,14 @@ mod tests {
 
     fn stale_wallet_sync(network: Network, height: u32) -> WalletSyncState {
         let scanned_height = BlockHeight::from(height);
-        let safe_chain_tip_height = BlockHeight::from(height.saturating_add(10));
+        let visible_tip_height = BlockHeight::from(height.saturating_add(10));
         WalletSyncState::new(WalletSyncSnapshot {
             network,
             phase: WalletSyncPhase::Parked,
             sync_status: WalletSyncScanStatus::CatchingUp,
             scanned_height: Some(scanned_height),
-            safe_chain_tip_height: Some(safe_chain_tip_height),
+            visible_tip_height: Some(visible_tip_height),
+            settled_tip_height: Some(scanned_height),
             lag_blocks: Some(10),
             last_fault: None,
             published_at_ms: super::unix_now_ms(),
@@ -2447,7 +2459,8 @@ mod tests {
             phase,
             sync_status: WalletSyncScanStatus::AtTip,
             scanned_height: Some(BlockHeight::from(100)),
-            safe_chain_tip_height: Some(BlockHeight::from(100)),
+            visible_tip_height: Some(BlockHeight::from(100)),
+            settled_tip_height: Some(BlockHeight::from(100)),
             lag_blocks,
             last_fault: None,
             published_at_ms: 0,

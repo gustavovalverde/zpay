@@ -5,17 +5,11 @@
 # this file by bind-mounting their own at /etc/zpay/payees.toml
 # (see docker-compose.yml's `volumes:` block).
 #
-# `pay_to` is a placeholder; real deployments either substitute a
-# real testnet/mainnet unified address here or set the payee receiver
-# in their override file. The bridge-mount demo does not settle, so
-# the placeholder is non-load-bearing for the headphones scenario.
-#
-# Because this `pay_to` is still the baked-in placeholder, the runtime
-# refuses to start unless ZPAY_ALLOW_DEMO_PAYEE=1 is set. The compose
-# stack sets that flag for the demo; production deploys must replace
-# the address below and leave ZPAY_ALLOW_DEMO_PAYEE unset.
+# The tracked testnet receiver makes this default usable by the complete
+# settlement flow. Production deployments replace this file with their own
+# payee registry.
 
 [payees."aether-demo"]
 accepts = [
-  { scheme = "zcash", network = "testnet", pay_to = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq", amount_zat = 1, max_validity_seconds = 1800 },
+  { scheme = "zcash", network = "testnet", pay_to = "utest10t56q4744d9ygg4l7uku7wzgp4kqhxpdajuf8vrgqn7pj6rpecpjfg3f56z95vkvc79tm3kqem0mx27dwp9arkkft56v9duyluqdw5az", amount_zat = 1, max_validity_seconds = 1800 },
 ]

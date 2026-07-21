@@ -27,7 +27,7 @@ pub use settlement_ledger::LibsqlSettlementLedgerStore;
 pub use zpay_core::store::StoreError;
 
 /// Schema version produced by applying every file in `migrations/`.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Name of the bookkeeping table that records applied migrations.
 pub const MIGRATION_TABLE: &str = "zpay_schema_migrations";

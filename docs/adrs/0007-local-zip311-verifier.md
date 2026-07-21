@@ -101,7 +101,7 @@ Negative:
 
 - Wire shape changes for any caller that previously checked the fused `Verdict`. The migration is mechanical (three field checks instead of one) but every caller must update.
 - `zpay-core` gains `blake2b_simd`, `secp256k1`, `ripemd`, and `sha2` dependencies. The compile-time cost is real but bounded (these are all small, no-std-clean crates).
-- The local verifier currently surfaces `chain_presence: "oracle_unavailable"` more often than the zinder-backed verifier did. The follow-on slice that translates `WalletQuery.TransactionById` + `TransparentOutputsByOutpoint` into a `DisclosedTransaction` is what closes that gap.
+- The local verifier currently surfaces `chain_presence: "oracle_unavailable"` more often than the zinder-backed verifier did. The follow-on slice that translates `WalletQuery.Transaction` + `TransparentOutputsByOutpoint` into a `DisclosedTransaction` is what closes that gap.
 
 Neutral:
 

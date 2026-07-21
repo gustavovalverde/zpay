@@ -66,7 +66,7 @@ bounded reverted range, and its store may be inconsistent. This is a
 chain-plane recovery, not a zpay one:
 
 1. Follow zinder's own store-reset runbook: wipe the zinder store and resync
-   against Zebra. A store written below artifact schema 12 must be wiped and
+   against Zebra. A store written below artifact schema 20 must be wiped and
    resynced regardless (see
    [upstream-platform-binding.md](../architecture/upstream-platform-binding.md)).
 2. zpay needs no reset. Once zinder is resynced and reachable, the startup

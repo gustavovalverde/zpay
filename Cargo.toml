@@ -64,9 +64,10 @@ orchard = "0.15.0-pre.2"
 sapling = { package = "sapling-crypto", version = "0.7" }
 zcash_keys = { version = "0.15.0-pre.0", features = ["orchard", "sapling", "transparent-inputs"], git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
 zcash_address = { version = "=0.13.0-pre.0", git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
-zcash-payment-disclosure = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
+zcash-payment-disclosure = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
 zcash_proofs = { version = "0.29.0-pre.0", git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
 zcash_protocol = { version = "=0.10.0-pre.0", git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
+zcash_primitives = { version = "=0.29.0-pre.0", git = "https://github.com/zcash/librustzcash.git", rev = "8e6864a3c67cab3c64a052dd20f83c553662e8b2" }
 zip32 = "0.2.1"
 
 # Internal crates: pinned by version and path so downstream consumers can vendor
@@ -86,15 +87,14 @@ zspend-runtime = { version = "0.1.0", path = "crates/zspend-runtime" }
 # has no access to the sibling directory on disk) and `cargo` clones resolve
 # from the same source as local dev. Bump `rev` when promoting an upstream
 # change into zpay.
-zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1", features = ["zinder"] }
-zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
-zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
-zally-pczt = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
-zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
-zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1" }
-zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "0b35587b5a34a8dc0ca485dc62fbfbe505bf23f1", features = ["zinder"] }
-zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
-zinder-proto = { git = "https://github.com/gustavovalverde/zinder", rev = "c604ac3d260b4e65219dbeb6062d01d213d65ea9" }
+zally-chain = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605", features = ["zinder"] }
+zally-core = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
+zally-keys = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
+zally-pczt = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
+zally-storage = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
+zally-testkit = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605" }
+zally-wallet = { git = "https://github.com/gustavovalverde/zally", rev = "345b3701264f8734d5fa36367decb83c3b4dd605", features = ["zinder"] }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder", rev = "2a4b982a58ada389eeb7da55ae9adb2452ac8232", default-features = false, features = ["remote"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

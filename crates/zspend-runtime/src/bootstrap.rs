@@ -167,14 +167,15 @@ async fn resolve_birthday(
         );
         return BlockHeight::from(height);
     }
-    match chain.chain_tip().await {
-        Ok(tip) => {
+    match chain.current_epoch().await {
+        Ok(epoch) => {
+            let settled_tip = epoch.settled_tip().height;
             tracing::info!(
-                birthday_source = "chain_tip",
-                birthday_height = tip.as_u32(),
-                "chain tip resolved as wallet birthday",
+                birthday_source = "settled_tip",
+                birthday_height = settled_tip.as_u32(),
+                "settled chain tip resolved as wallet birthday",
             );
-            tip
+            settled_tip
         }
         Err(err) => {
             let fallback = default_birthday(network);
@@ -182,7 +183,7 @@ async fn resolve_birthday(
                 birthday_source = "default_fallback",
                 birthday_height = fallback,
                 reason = %err,
-                "chain tip unreachable; using network-default birthday",
+                "current chain epoch unreachable; using network-default birthday",
             );
             BlockHeight::from(fallback)
         }
@@ -319,7 +320,7 @@ mod tests {
         let chain = MockChainSource::new(network);
         chain
             .handle()
-            .fail_chain_tip_next(1, || ChainSourceError::Unavailable {
+            .fail_current_epoch_next(1, || ChainSourceError::Unavailable {
                 reason: "chain plane unreachable".to_owned(),
             });
         let resolved = resolve_birthday(network, None, &chain).await;
@@ -332,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_birthday_prefers_env_override_over_chain_tip()
+    async fn resolve_birthday_prefers_env_override_over_settled_tip()
     -> Result<(), Box<dyn std::error::Error>> {
         let network = Network::regtest();
         let mock = MockChainSource::new(network);

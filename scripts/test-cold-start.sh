@@ -6,7 +6,7 @@
 # empty volume (the Railway-deploy and first-time-developer paths):
 #
 #   1. Schema migrations apply from version 0; `zpay_schema_migrations`
-#      ends at version 1.
+#      ends at the current schema version.
 #   2. The /zpay/v1/prepare endpoint accepts a request and returns a
 #      ZIP-321 URI on a freshly migrated database.
 #   3. The container reports healthy.
@@ -45,11 +45,7 @@ DPOP_KEYFILE="$TEMP_DIR/dpop-key.pem"
 python3 "$SCRIPT_DIR/mint-dpop-proof.py" --init "$DPOP_KEYFILE"
 
 echo "[test-cold-start] starting container $NAME from $IMAGE (no volume)"
-# ZPAY_ALLOW_DEMO_PAYEE=1 bypasses the placeholder-receiver boot gate
-# so this probe exercises the baked-in `aether-demo` payee. Production
-# stacks must NOT set this; the runbook spells out the contract.
-docker run --rm -d --name "$NAME" -p "$PORT:8080" \
-  -e ZPAY_ALLOW_DEMO_PAYEE=1 \
+docker run --rm -d --name "$NAME" -p "127.0.0.1:$PORT:8080" \
   "$IMAGE" >/dev/null
 
 echo "[test-cold-start] waiting healthy (up to 60s)"

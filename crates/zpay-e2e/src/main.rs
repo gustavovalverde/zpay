@@ -55,7 +55,7 @@ struct Cli {
     #[arg(
         long,
         env = "ZPAY_E2E_ZINDER_URL",
-        default_value = "http://127.0.0.1:19101"
+        default_value = "http://127.0.0.1:19102"
     )]
     zinder_url: String,
     /// zpay-runtime base URL (the `/zpay/v1/*` routes are appended).
@@ -109,17 +109,6 @@ enum Command {
         /// Payee id registered in zpay's accepts registry.
         #[arg(long, default_value = "aether-ai")]
         payee_id: String,
-        /// Unified address the prepared tx will pay. May be the same
-        /// wallet's second u-address; the harness only cares that the
-        /// tx broadcasts successfully. Informational: the registry's
-        /// `pay_to` is the authoritative target.
-        #[arg(long)]
-        recipient_address: Option<String>,
-        /// Amount in zatoshis used to gate the wallet's balance before
-        /// prepare. Informational: the registry's `amount_zat` is the
-        /// authoritative value that flows through the URI.
-        #[arg(long, default_value_t = 10_000)]
-        amount_zat: u64,
         /// Lifecycle state zpay must observe before the command exits.
         #[arg(long, value_enum, default_value_t = SettlementCompletion::Mined)]
         settlement_completion: SettlementCompletion,
@@ -273,8 +262,6 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
         }
         Command::Run {
             payee_id,
-            recipient_address,
-            amount_zat,
             settlement_completion,
             poll_seconds,
         } => {
@@ -284,8 +271,6 @@ async fn run_command(context: HarnessContext, command: Command) -> Result<(), Ha
                 &chain,
                 &zpay_url,
                 payee_id,
-                recipient_address,
-                amount_zat,
                 settlement_completion,
                 poll_seconds,
                 network,
@@ -399,7 +384,7 @@ async fn shield_funds(
     );
     let send_outcome = wallet.shield_transparent_funds(plan).await?;
     info!(
-        tx_id = %hex::encode(send_outcome.tx_id().as_bytes()),
+        tx_id = %send_outcome.tx_id(),
         broadcast_at_height = send_outcome.broadcast.broadcast_at_height.as_u32(),
         "shielding tx broadcast",
     );
@@ -419,16 +404,10 @@ async fn open_or_bootstrap_wallet(
     let storage = Sqlite::new(SqliteOptions::for_network(network, db_path.clone()));
 
     if bootstrap_needed {
-        // First run for this wallet directory: generate a mnemonic and
-        // seal it before opening the account. Log the mnemonic once so
-        // the operator can back it up before depositing TAZ.
-        let (wallet, account_id, mnemonic) = Wallet::builder(network, sealing, storage)
+        let (wallet, account_id, _) = Wallet::builder(network, sealing, storage)
             .create(chain, birthday)
             .await?;
-        warn!(
-            mnemonic = mnemonic.as_phrase(),
-            "fresh wallet created; back up this mnemonic before depositing TAZ",
-        );
+        warn!("fresh wallet created with sealed wallet material");
         return Ok((wallet, account_id));
     }
     let pair = Wallet::builder(network, sealing, storage)
@@ -448,8 +427,6 @@ async fn run_flow(
     chain: &ZinderChainSource,
     zpay_url: &str,
     payee_id: String,
-    recipient_address: Option<String>,
-    amount_zat: u64,
     settlement_completion: SettlementCompletion,
     poll_seconds: u64,
     network: Network,
@@ -463,6 +440,19 @@ async fn run_flow(
         "sync complete",
     );
 
+    let zpay_dpop_key = Arc::new(
+        zpay_testkit::DpopKey::generate().map_err(|err| HarnessError::Jwt(err.to_string()))?,
+    );
+    let prepared = call_prepare(zpay_url, &payee_id, network_label, &zpay_dpop_key).await?;
+    let target = prepared_payment_target(&prepared, network)?;
+    info!(
+        payment_id = %prepared.payment_id,
+        recipient = %target.recipient.encoded(),
+        amount_zat = target.amount.as_u64(),
+        expiry_height = prepared.expiry_height,
+        "prepared payment received from zpay",
+    );
+
     let balance = wallet.get_account_balance(account_id).await?;
     info!(
         sapling_zat = balance.sapling_zat.as_u64(),
@@ -472,48 +462,17 @@ async fn run_flow(
         "account balance after sync",
     );
     let spendable = balance.total_zat().as_u64();
-    if spendable < amount_zat + 5_000 {
+    if spendable < target.amount.as_u64().saturating_add(5_000) {
         warn!(
             spendable_zat = spendable,
-            requested_zat = amount_zat,
+            requested_zat = target.amount.as_u64(),
             "wallet does not have enough spendable balance; fund the address printed by the `address` subcommand and retry",
         );
         return Err(HarnessError::InsufficientFunds {
             spendable_zat: spendable,
-            requested_zat: amount_zat,
+            requested_zat: target.amount.as_u64(),
         });
     }
-
-    let recipient = if let Some(addr) = recipient_address {
-        addr
-    } else {
-        let ua = wallet
-            .derive_next_address_with_transparent(account_id)
-            .await?;
-        ua.encode(&network.to_parameters())
-    };
-    info!(recipient = %recipient, "recipient unified address (informational; registry-resolved pay_to is authoritative)");
-
-    // zpay owns the expiry math: it calls its tip oracle and adds
-    // DEFAULT_EXPIRY_DELTA_BLOCKS (40, matching zally's wallet
-    // DEFAULT_TX_EXPIRY_DELTA). The harness used to pre-compute this
-    // and pass it in; commit C removed that knob because zally's
-    // chosen expiry must equal whatever zpay returned.
-    let chain_tip_height = outcome.scanned_to_height.as_u32();
-    info!(
-        chain_tip_height,
-        informational_expiry = chain_tip_height.saturating_add(41),
-        "wallet-side tip for orientation only; zpay's tip oracle is authoritative for expiry_height",
-    );
-    let zpay_dpop_key = Arc::new(
-        zpay_testkit::DpopKey::generate().map_err(|err| HarnessError::Jwt(err.to_string()))?,
-    );
-    let prepared = call_prepare(zpay_url, &payee_id, network_label, &zpay_dpop_key).await?;
-    info!(
-        payment_id = %prepared.payment_id,
-        expiry_height = prepared.expiry_height,
-        "prepared row received from zpay",
-    );
 
     let memo = memo_from_protocol_prefix(&prepared.memo_bytes)?;
     let submitter = ZpaySettleSubmitter::new(
@@ -522,23 +481,12 @@ async fn run_flow(
         chain.network(),
         Arc::clone(&zpay_dpop_key),
     );
-    let plan = SendPaymentPlan::conventional(
-        account_id,
-        IdempotencyKey::try_from(prepared.payment_id.as_str())
-            .map_err(|err| HarnessError::Idempotency(err.to_string()))?,
-        PaymentRecipient::UnifiedAddress {
-            encoded: recipient.clone(),
-            network,
-        },
-        Zatoshis::try_from(amount_zat).map_err(|err| HarnessError::Zat(err.to_string()))?,
-        &submitter,
-    )
-    .with_memo(memo);
+    let plan = send_plan_for_prepared_payment(account_id, &prepared, target, memo, &submitter)?;
 
     info!("invoking wallet.send_payment with custom zpay submitter");
     let send_outcome = wallet.send_payment(plan).await?;
     info!(
-        tx_id = %hex::encode(send_outcome.tx_id().as_bytes()),
+        tx_id = %send_outcome.tx_id(),
         broadcast_at_height = send_outcome.broadcast.broadcast_at_height.as_u32(),
         "send_payment returned",
     );
@@ -551,6 +499,53 @@ async fn run_flow(
     )
     .await?;
     Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PreparedPaymentTarget {
+    recipient: PaymentRecipient,
+    amount: Zatoshis,
+}
+
+fn send_plan_for_prepared_payment<'submitter>(
+    account_id: AccountId,
+    prepared: &PreparedPayment,
+    target: PreparedPaymentTarget,
+    memo: Memo,
+    submitter: &'submitter dyn Submitter,
+) -> Result<SendPaymentPlan<'submitter>, HarnessError> {
+    Ok(SendPaymentPlan::conventional(
+        account_id,
+        IdempotencyKey::try_from(prepared.payment_id.as_str())
+            .map_err(|err| HarnessError::Idempotency(err.to_string()))?,
+        target.recipient,
+        target.amount,
+        submitter,
+    )
+    .with_memo(memo)
+    .with_target_expiry_height(BlockHeight::from(prepared.expiry_height)))
+}
+
+fn prepared_payment_target(
+    prepared: &PreparedPayment,
+    network: Network,
+) -> Result<PreparedPaymentTarget, HarnessError> {
+    let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
+    let [payment] = parsed.payments() else {
+        return Err(HarnessError::PaymentCount {
+            count: parsed.payments().len(),
+        });
+    };
+    if prepared.amount_zat != payment.amount.as_u64() {
+        return Err(HarnessError::PreparedAmountMismatch {
+            response_amount_zat: prepared.amount_zat,
+            uri_amount_zat: payment.amount.as_u64(),
+        });
+    }
+    Ok(PreparedPaymentTarget {
+        recipient: payment.recipient.clone(),
+        amount: payment.amount,
+    })
 }
 
 struct AgentRunInputs<'a> {
@@ -676,11 +671,7 @@ fn build_agent_authorization(
     prepared: &PreparedPayment,
     network: Network,
 ) -> Result<PaymentAuthorization, HarnessError> {
-    let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
-    let payment = parsed
-        .payments()
-        .first()
-        .ok_or(HarnessError::PaymentMissing)?;
+    let payment = prepared_payment_target(prepared, network)?;
     let reference = chain_reference(network);
     let recipient_caip10 = format!("zcash:{}:{}", reference, payment.recipient.encoded());
     let mut authorization = PaymentAuthorization {
@@ -712,11 +703,7 @@ fn build_x402_facilitator_request(
     prepared: &PreparedPayment,
     pczt_base64: &str,
 ) -> Result<FacilitatorRequest, HarnessError> {
-    let parsed = PaymentRequest::from_uri(&prepared.payment_uri, network)?;
-    let payment = parsed
-        .payments()
-        .first()
-        .ok_or(HarnessError::PaymentMissing)?;
+    let payment = prepared_payment_target(prepared, network)?;
     let recipient = payment.recipient.encoded();
     let resource = ResourceInfo {
         url: format!(
@@ -1088,47 +1075,82 @@ impl Submitter for ZpaySettleSubmitter {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(SubmitterError::Unavailable {
-                reason: format!("zpay /settle returned {status}: {text}"),
-            });
+            return map_settle_http_failure(status, &text);
         }
-        let outcome: SettlementResponseData =
-            response
-                .json()
-                .await
-                .map_err(|err| SubmitterError::Unavailable {
-                    reason: err.to_string(),
-                })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| SubmitterError::Unavailable {
+                reason: err.to_string(),
+            })?;
+        let outcome = parse_settle_success_body(&body)?;
         zpay_outcome_to_submit_outcome(&outcome)
     }
+}
+
+fn map_settle_http_failure(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<SubmitOutcome, SubmitterError> {
+    let problem = serde_json::from_str::<ProblemResponseBody>(body).map_err(|_error| {
+        SubmitterError::UnsupportedResponse {
+            response: "zpay problem response",
+        }
+    })?;
+    if problem.retryable {
+        return Err(SubmitterError::Unavailable {
+            reason: format!("{}: {}", problem.kind, problem.detail),
+        });
+    }
+    if status.is_client_error() {
+        return Err(SubmitterError::RequestRejected {
+            reason: format!("{}: {}", problem.kind, problem.detail),
+        });
+    }
+
+    Err(SubmitterError::UnsupportedResponse {
+        response: "non-retryable zpay server error",
+    })
+}
+
+fn parse_settle_success_body(body: &str) -> Result<SettlementResponseData, SubmitterError> {
+    serde_json::from_str(body).map_err(|_error| SubmitterError::UnsupportedResponse {
+        response: "zpay settlement response JSON",
+    })
 }
 
 fn zpay_outcome_to_submit_outcome(
     outcome: &SettlementResponseData,
 ) -> Result<SubmitOutcome, SubmitterError> {
-    let tx_id_hex = outcome
-        .broadcast_outcome
-        .transaction_id
-        .clone()
-        .unwrap_or_default();
-    let tx_id_bytes = decode_txid(&tx_id_hex)?;
-    let tx_id = TxId::from_bytes(tx_id_bytes);
-    // Commit A renamed the broadcast outcome's serde tag to `kind`.
     match outcome.broadcast_outcome.kind.as_str() {
-        "accepted" => Ok(SubmitOutcome::Accepted { tx_id }),
-        "duplicate" => Ok(SubmitOutcome::Duplicate { tx_id }),
-        kind => Err(SubmitterError::Unavailable {
-            reason: format!("zpay broadcast outcome was non-success: {kind}"),
+        "accepted" => Ok(SubmitOutcome::Accepted {
+            tx_id: response_transaction_id(outcome)?,
+        }),
+        "duplicate" => Ok(SubmitOutcome::Duplicate {
+            tx_id: response_transaction_id(outcome)?,
+        }),
+        "rejected" => Ok(SubmitOutcome::Rejected {
+            reason: zally_chain::RejectionReason::Unknown,
+            detail: outcome
+                .broadcast_outcome
+                .upstream_message
+                .clone()
+                .unwrap_or_else(|| "zpay rejected the transaction".to_owned()),
+        }),
+        _ => Err(SubmitterError::UnsupportedResponse {
+            response: "zpay BroadcastOutcome.kind",
         }),
     }
 }
 
-fn decode_txid(tx_id_hex: &str) -> Result<[u8; 32], SubmitterError> {
-    let bytes = hex::decode(tx_id_hex).map_err(|err| SubmitterError::Unavailable {
-        reason: format!("zpay broadcast outcome txid not hex: {err}"),
-    })?;
-    bytes.try_into().map_err(|_| SubmitterError::Unavailable {
-        reason: "zpay broadcast outcome txid was not 32 bytes".to_owned(),
+fn response_transaction_id(outcome: &SettlementResponseData) -> Result<TxId, SubmitterError> {
+    let tx_id_hex = outcome
+        .broadcast_outcome
+        .transaction_id
+        .as_deref()
+        .unwrap_or_default();
+    TxId::from_rpc_hex(tx_id_hex).map_err(|_error| SubmitterError::UnsupportedResponse {
+        response: "zpay success transaction_id",
     })
 }
 
@@ -1149,19 +1171,9 @@ struct PrepareRequestBody {
 #[derive(Debug, Deserialize)]
 struct PreparedPayment {
     payment_id: String,
-    #[serde(default)]
-    #[allow(
-        dead_code,
-        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
-    )]
     payment_uri: String,
     memo_bytes: Vec<u8>,
     expiry_height: u32,
-    #[serde(default)]
-    #[allow(
-        dead_code,
-        reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
-    )]
     amount_zat: u64,
 }
 
@@ -1190,7 +1202,7 @@ struct SettlementResponseData {
 
 #[derive(Debug, Deserialize)]
 struct BroadcastOutcomeBody {
-    /// Discriminator name: matches Commit A's `kind` serde tag.
+    /// Broadcast-outcome discriminator.
     kind: String,
     transaction_id: Option<String>,
     #[serde(default)]
@@ -1199,6 +1211,13 @@ struct BroadcastOutcomeBody {
         reason = "wire-shape mirror of zpay response; not all fields are read by the harness"
     )]
     upstream_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProblemResponseBody {
+    kind: String,
+    detail: String,
+    retryable: bool,
 }
 
 /// Wire types for `/zpay/v1/payments/{payment_id}`.
@@ -1268,8 +1287,15 @@ enum HarnessError {
     SignedBytes(String),
     #[error("x402 lifecycle status mismatch: {0}")]
     LifecycleStatus(String),
-    #[error("prepared payment URI carried no payment")]
-    PaymentMissing,
+    #[error("prepared payment URI carried {count} payments; exactly one is required")]
+    PaymentCount { count: usize },
+    #[error(
+        "prepared amount mismatch: response amount_zat={response_amount_zat}, URI amount_zat={uri_amount_zat}"
+    )]
+    PreparedAmountMismatch {
+        response_amount_zat: u64,
+        uri_amount_zat: u64,
+    },
     #[error("zexplorer check failed for {url}: {status}")]
     ZexplorerFailed {
         url: String,
@@ -1300,7 +1326,19 @@ enum HarnessError {
 
 #[cfg(test)]
 mod tests {
-    use super::{PaymentStatusData, SettlementCompletion};
+    use std::sync::Arc;
+
+    use super::{
+        BroadcastOutcomeBody, HarnessError, PaymentStatusData, PreparedPayment,
+        SettlementCompletion, SettlementResponseData, ZpaySettleSubmitter, map_settle_http_failure,
+        memo_from_protocol_prefix, parse_settle_success_body, prepared_payment_target,
+        send_plan_for_prepared_payment, zpay_outcome_to_submit_outcome,
+    };
+    use zally_chain::SubmitterError;
+    use zally_core::{AccountId, BlockHeight, Network};
+    use zpay_core::prepare::PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE;
+
+    const TESTNET_RECIPIENT: &str = "utest10t56q4744d9ygg4l7uku7wzgp4kqhxpdajuf8vrgqn7pj6rpecpjfg3f56z95vkvc79tm3kqem0mx27dwp9arkkft56v9duyluqdw5az";
 
     fn payment_status(
         status: &str,
@@ -1334,5 +1372,179 @@ mod tests {
         assert!(SettlementCompletion::Mined.is_observed(&settled_payment));
         assert!(SettlementCompletion::Final.is_observed(&settled_payment));
         assert!(SettlementCompletion::Settled.is_observed(&settled_payment));
+    }
+
+    #[test]
+    fn prepared_uri_selects_the_authoritative_recipient_and_amount()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let prepared = PreparedPayment {
+            payment_id: "payment-id".to_owned(),
+            payment_uri: format!("zcash:{TESTNET_RECIPIENT}?amount=0.00000001"),
+            memo_bytes: Vec::new(),
+            expiry_height: 4_200_000,
+            amount_zat: 1,
+        };
+
+        let target = prepared_payment_target(&prepared, Network::Testnet)?;
+
+        assert_eq!(target.recipient.encoded(), TESTNET_RECIPIENT);
+        assert_eq!(target.amount.as_u64(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_response_amount_must_match_its_uri() {
+        let prepared = PreparedPayment {
+            payment_id: "payment-id".to_owned(),
+            payment_uri: format!("zcash:{TESTNET_RECIPIENT}?amount=0.00000001"),
+            memo_bytes: Vec::new(),
+            expiry_height: 4_200_000,
+            amount_zat: 2,
+        };
+
+        let outcome = prepared_payment_target(&prepared, Network::Testnet);
+
+        assert!(matches!(
+            outcome,
+            Err(HarnessError::PreparedAmountMismatch {
+                response_amount_zat: 2,
+                uri_amount_zat: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn prepared_expiry_is_pinned_on_the_wallet_send_plan() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let prepared = PreparedPayment {
+            payment_id: "payment-id".to_owned(),
+            payment_uri: format!("zcash:{TESTNET_RECIPIENT}?amount=0.00000001"),
+            memo_bytes: vec![0xff; PROTOCOL_MEMO_BYTE_COUNT_NO_EVIDENCE],
+            expiry_height: 4_200_000,
+            amount_zat: 1,
+        };
+        let target = prepared_payment_target(&prepared, Network::Testnet)?;
+        let memo = memo_from_protocol_prefix(&prepared.memo_bytes)?;
+        let dpop_key = Arc::new(zpay_testkit::DpopKey::generate()?);
+        let submitter = ZpaySettleSubmitter::new(
+            "http://127.0.0.1:1".to_owned(),
+            prepared.payment_id.clone(),
+            Network::Testnet,
+            dpop_key,
+        );
+
+        let plan = send_plan_for_prepared_payment(
+            AccountId::from_uuid(uuid::Uuid::nil()),
+            &prepared,
+            target,
+            memo,
+            &submitter,
+        )?;
+
+        assert_eq!(
+            plan.target_expiry_height,
+            Some(BlockHeight::from(prepared.expiry_height))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unprocessable_settle_response_is_a_non_retryable_rejection() {
+        let outcome = map_settle_http_failure(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            r#"{"detail":"expiry mismatch","kind":"expiry_height_mismatch","retryable":false,"title":"Invalid Argument"}"#,
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(SubmitterError::RequestRejected { reason })
+                if reason == "expiry_height_mismatch: expiry mismatch"
+        ));
+    }
+
+    #[test]
+    fn malformed_settle_success_json_is_a_protocol_violation() {
+        assert!(matches!(
+            parse_settle_success_body("{"),
+            Err(SubmitterError::UnsupportedResponse {
+                response: "zpay settlement response JSON"
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_settle_outcome_kind_is_a_protocol_violation() {
+        let response = settlement_response("future_kind", None);
+        assert!(matches!(
+            zpay_outcome_to_submit_outcome(&response),
+            Err(SubmitterError::UnsupportedResponse {
+                response: "zpay BroadcastOutcome.kind"
+            })
+        ));
+    }
+
+    #[test]
+    fn successful_settle_outcome_requires_a_32_byte_hex_transaction_id() {
+        for transaction_id in [None, Some("not-hex"), Some("00")] {
+            let response = settlement_response("accepted", transaction_id);
+            assert!(matches!(
+                zpay_outcome_to_submit_outcome(&response),
+                Err(SubmitterError::UnsupportedResponse {
+                    response: "zpay success transaction_id"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn successful_settle_outcome_decodes_rpc_transaction_id_byte_order() {
+        const RPC_TRANSACTION_ID: &str =
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        const INTERNAL_TRANSACTION_ID: [u8; 32] = [
+            0x1f, 0x1e, 0x1d, 0x1c, 0x1b, 0x1a, 0x19, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
+            0x11, 0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
+            0x03, 0x02, 0x01, 0x00,
+        ];
+        let response = settlement_response("accepted", Some(RPC_TRANSACTION_ID));
+
+        assert!(matches!(
+            zpay_outcome_to_submit_outcome(&response),
+            Ok(zally_chain::SubmitOutcome::Accepted { tx_id })
+                if tx_id.as_bytes() == &INTERNAL_TRANSACTION_ID
+                    && tx_id.to_rpc_hex() == RPC_TRANSACTION_ID
+        ));
+    }
+
+    fn settlement_response(kind: &str, transaction_id: Option<&str>) -> SettlementResponseData {
+        SettlementResponseData {
+            payment_id: "payment-id".to_owned(),
+            broadcast_outcome: BroadcastOutcomeBody {
+                kind: kind.to_owned(),
+                transaction_id: transaction_id.map(str::to_owned),
+                upstream_message: None,
+            },
+            watch_id: None,
+        }
+    }
+
+    #[test]
+    fn source_never_logs_mnemonic_or_seed_material() {
+        let source = include_str!("main.rs");
+        let mnemonic_phrase_access = ["mnemonic", ".as_", "phrase()"].concat();
+        let mnemonic_log_field = ["mnemonic", " = ", "mnemonic"].concat();
+        let exposed_seed_access = ["expose_", "secret()"].concat();
+
+        assert!(!source.contains(&mnemonic_phrase_access));
+        assert!(!source.contains(&mnemonic_log_field));
+        assert!(!source.contains(&exposed_seed_access));
+    }
+
+    #[test]
+    fn source_never_logs_internal_transaction_id_bytes() {
+        let source = include_str!("main.rs");
+        let internal_transaction_id_log =
+            ["hex::encode(send_outcome.tx_id()", ".as_bytes())"].concat();
+
+        assert!(!source.contains(&internal_transaction_id_log));
     }
 }

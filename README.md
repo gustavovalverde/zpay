@@ -80,11 +80,11 @@ and disclosure-message postures.
 
 ## Quick start
 
-The reproducible path is the bundled Docker image. Compose brings up
-two containers, zpay and the zspend wallet runtime. Chain access comes
-from a [zinder](https://github.com/gustavovalverde/zinder) you run
-separately: the compose file reaches it as `http://zinder-query:9101`
-over a shared Docker network, and `ZPAY_CHAIN_SOURCE_URL` overrides
+Compose brings up two containers, zpay and the zspend wallet runtime. Chain
+access comes from a [zinder](https://github.com/gustavovalverde/zinder)
+wallet-serving stack you run separately: the compose file reaches its native
+WalletQuery service as `http://zinder-query:9102` over a shared Docker network,
+and `ZPAY_CHAIN_SOURCE_URL` overrides
 the address. Both networks in the file are `external: true` and belong
 to whichever stack creates them first; for standalone use, comment out
 the `networks:` blocks as the file's header describes.
@@ -95,20 +95,16 @@ curl -s http://127.0.0.1:8080/healthz
 # {"status":"alive"}
 ```
 
-The image bakes `etc/aether-demo.toml`, a sample payee config with a
-placeholder recipient address; the runtime refuses to start with the
-placeholder unless `ZPAY_ALLOW_DEMO_PAYEE=1` is explicitly set, so a
-production deploy that forgets to override the payees file fails loud
-at boot. The compose file sets that flag and additionally bind-mounts
-a developer-local `etc/aether-demo.local.toml` (gitignored) over the
-baked config, so a compose stack can pay a real testnet address.
+The image bakes `etc/aether-demo.toml`, and Compose bind-mounts the tracked
+`etc/aether-demo.testnet.toml`. Both contain a valid testnet receiver so the
+sample stack can exercise the complete settlement path. Production deploys
+replace the payee registry with their own receiver configuration.
 
 Cargo run for local development:
 
 ```bash
 ZPAY_NETWORK=testnet \
-ZPAY_ALLOW_DEMO_PAYEE=1 \
-ZPAY_PAYEES__CONFIG_PATH=$(pwd)/etc/aether-demo.toml \
+ZPAY_PAYEES__CONFIG_PATH=$(pwd)/etc/aether-demo.testnet.toml \
 cargo run --release --bin zpay-runtime
 ```
 
@@ -179,7 +175,7 @@ effects;
 
 PCZT extraction loads Sapling verifying parameters from the platform
 default ZcashParams directory; container stacks mount
-`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.local/share/ZcashParams}` into the
+`${ZCASH_PARAMS_HOST_DIR:-${HOME}/.zcash-params}` into the
 zpay runtime for that reason. Requests derived from `/zpay/v1/prepare`
 may include `extra.zpayPaymentId`; when present, `/x402/v2/settle`
 records the broadcast outcome against that lifecycle row. See
@@ -310,8 +306,8 @@ zpay/
                               /v1/payments/sign, single-use jti ledger,
                               revocation check, posture gate
   etc/
-    aether-demo.toml        placeholder payee config baked into the image
-    aether-demo.*.toml      network-specific and local overrides
+    aether-demo.toml        testnet sample payee config baked into the image
+    aether-demo.testnet.toml tracked testnet deployment config
   scripts/
     deploy-to-railway.sh    self-contained Railway uploader
     test-persistence.sh     end-to-end persistence probe
@@ -338,11 +334,11 @@ matrix, volume provisioning, and the cross-service wiring to zinder:
 ./scripts/deploy-to-railway.sh <zpay|zspend|zpay-demo|all>
 ```
 
-See [docs/runbooks/railway-deploy.md](docs/runbooks/railway-deploy.md)
-for the service matrix, first-deploy checklist, and rollback
-procedure. The per-service Dockerfiles are the source of truth for the
-builds; Docker Compose mirrors them locally with the dev-only
-`ZPAY_ALLOW_DEMO_PAYEE=1` flag flipped on.
+See [docs/runbooks/railway-deploy.md](docs/runbooks/railway-deploy.md) for the
+Zinder topology requirement, service matrix, first-deploy checklist, and
+rollback procedure. The per-service Dockerfiles are the source of truth for the
+builds; Docker Compose mirrors them locally with the tracked testnet payee
+registry mounted explicitly.
 
 ## Validation gate
 
@@ -389,7 +385,7 @@ Both upstreams are pinned by git rev in `Cargo.toml`; bump the rev to
 promote upstream changes into zpay. The pinned line tracks Ironwood,
 the NU6.3 network upgrade: Zebra is the only full validator past
 activation, `/settle` parses both current transaction formats (v5 and
-v6), and zinder stores below artifact schema 12 must be wiped and
+v6), and zinder stores below artifact schema 20 must be wiped and
 resynced. See
 [upstream platform binding](docs/architecture/upstream-platform-binding.md).
 

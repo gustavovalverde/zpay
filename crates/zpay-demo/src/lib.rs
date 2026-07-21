@@ -58,7 +58,7 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7410";
 const DEFAULT_ZPAY_URL: &str = "http://127.0.0.1:8080";
 const DEFAULT_ZPAY_OPS_URL: &str = "http://127.0.0.1:9295";
 const DEFAULT_ZSPEND_URL: &str = "http://127.0.0.1:8090";
-const DEFAULT_ZINDER_URL: &str = "http://127.0.0.1:19101";
+const DEFAULT_ZINDER_URL: &str = "http://127.0.0.1:19102";
 const DEFAULT_WALLET_DIR: &str = ".tmp/zpay-demo/wallet";
 const DEFAULT_ISSUER_KEY_FILE: &str = "dev-issuer-p256.pem";
 const DEFAULT_ISSUER_JWKS_FILE: &str = "dev-jwks.json";
@@ -588,11 +588,13 @@ async fn readiness_snapshot(state: &DemoState) -> ReadinessBody {
     let faucet = probe_http(&state.client, &state.config.fauzec_url).await;
     let zinder = match timeout(
         Duration::from_secs(PROBE_TIMEOUT_SECONDS),
-        state.chain.chain_tip(),
+        state.chain.current_epoch(),
     )
     .await
     {
-        Ok(Ok(height)) => DependencyBody::ready_with_height("ready", Some(height.as_u32())),
+        Ok(Ok(epoch)) => {
+            DependencyBody::ready_with_height("ready", Some(epoch.visible_tip().height.as_u32()))
+        }
         Ok(Err(err)) => DependencyBody::not_ready("zinder_unavailable", err.to_string(), true),
         Err(_) => DependencyBody::not_ready("zinder_timeout", "zinder probe timed out", true),
     };
@@ -1397,13 +1399,10 @@ async fn open_or_bootstrap_wallet(
     let storage = Sqlite::new(SqliteOptions::for_network(network, db_path));
 
     if bootstrap_needed {
-        let (wallet, account_id, mnemonic) = Wallet::builder(network, sealing, storage)
+        let (wallet, account_id, _) = Wallet::builder(network, sealing, storage)
             .create(chain, birthday)
             .await?;
-        warn!(
-            mnemonic = mnemonic.as_phrase(),
-            "fresh demo wallet created; back up this testnet mnemonic if you fund it"
-        );
+        warn!("fresh demo wallet created with sealed wallet material");
         return Ok((wallet, account_id));
     }
 
@@ -1736,25 +1735,16 @@ fn zpay_outcome_to_submit_outcome(
     let tx_id_hex = outcome
         .broadcast_outcome
         .transaction_id
-        .clone()
+        .as_deref()
         .unwrap_or_default();
-    let tx_id_bytes = decode_txid(&tx_id_hex)?;
-    let tx_id = TxId::from_bytes(tx_id_bytes);
+    let tx_id = TxId::from_rpc_hex(tx_id_hex).map_err(|err| SubmitterError::Unavailable {
+        reason: format!("zpay broadcast outcome txid is not valid RPC hex: {err}"),
+    })?;
     match kind {
         "accepted" => Ok(SubmitOutcome::Accepted { tx_id }),
         "duplicate" => Ok(SubmitOutcome::Duplicate { tx_id }),
         _ => unreachable!("non-success broadcast outcome rejected before txid decoding"),
     }
-}
-
-#[cfg(test)]
-fn decode_txid(tx_id_hex: &str) -> Result<[u8; 32], SubmitterError> {
-    let bytes = hex::decode(tx_id_hex).map_err(|err| SubmitterError::Unavailable {
-        reason: format!("zpay broadcast outcome txid not hex: {err}"),
-    })?;
-    bytes.try_into().map_err(|_| SubmitterError::Unavailable {
-        reason: "zpay broadcast outcome txid was not 32 bytes".to_owned(),
-    })
 }
 
 fn parse_demo_network(raw: &str) -> Result<Network, DemoError> {
@@ -1822,12 +1812,14 @@ async fn resolve_birthday_height(
     }
     let tip = timeout(
         Duration::from_secs(PROBE_TIMEOUT_SECONDS),
-        chain.chain_tip(),
+        chain.current_epoch(),
     )
     .await
     .map_err(|_| DemoError::unavailable("zinder_timeout", "zinder tip probe timed out"))?
     .map_err(DemoError::from)?;
     Ok(tip
+        .settled_tip()
+        .height
         .as_u32()
         .saturating_sub(DEFAULT_BIRTHDAY_LOOKBACK_BLOCKS))
 }
@@ -2028,6 +2020,31 @@ mod tests {
     }
 
     #[test]
+    fn accepted_settle_outcome_decodes_rpc_transaction_id_byte_order() {
+        const RPC_TRANSACTION_ID: &str =
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        const INTERNAL_TRANSACTION_ID: [u8; 32] = [
+            0x1f, 0x1e, 0x1d, 0x1c, 0x1b, 0x1a, 0x19, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
+            0x11, 0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
+            0x03, 0x02, 0x01, 0x00,
+        ];
+        let outcome = SettlementResponseBody {
+            broadcast_outcome: BroadcastOutcomeBody {
+                kind: "accepted".to_owned(),
+                transaction_id: Some(RPC_TRANSACTION_ID.to_owned()),
+                upstream_message: None,
+            },
+        };
+
+        assert!(matches!(
+            zpay_outcome_to_submit_outcome(&outcome),
+            Ok(SubmitOutcome::Accepted { tx_id })
+                if tx_id.as_bytes() == &INTERNAL_TRANSACTION_ID
+                    && tx_id.to_rpc_hex() == RPC_TRANSACTION_ID
+        ));
+    }
+
+    #[test]
     fn non_success_settle_outcome_is_refused() {
         let outcome = SettlementResponseBody {
             broadcast_outcome: BroadcastOutcomeBody {
@@ -2068,5 +2085,17 @@ mod tests {
             disclosure_message("01JZPAY-A"),
             b"zpay-demo-payment:01JZPAY-A"
         );
+    }
+
+    #[test]
+    fn source_never_logs_mnemonic_or_seed_material() {
+        let source = include_str!("lib.rs");
+        let mnemonic_phrase_access = ["mnemonic", ".as_", "phrase()"].concat();
+        let mnemonic_log_field = ["mnemonic", " = ", "mnemonic"].concat();
+        let exposed_seed_access = ["expose_", "secret()"].concat();
+
+        assert!(!source.contains(&mnemonic_phrase_access));
+        assert!(!source.contains(&mnemonic_log_field));
+        assert!(!source.contains(&exposed_seed_access));
     }
 }

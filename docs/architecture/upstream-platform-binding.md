@@ -21,10 +21,10 @@ zpay depends on:
 | `zally-wallet` | `zspend-runtime` | `Wallet`, `SyncDriver`, transaction proposal and signing. |
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
-Pin: workspace `Cargo.toml` pins one git rev for every zally crate,
-currently `6a8a7a4`. This revision provides payment-disclosure production and
-verification for ZIP-311 Draft1 Sapling and the Zally Ironwood extension, in
-addition to the chain-plane transaction expiry parser.
+Pin: workspace `Cargo.toml` pins one git rev for every zally crate, currently
+`345b370`. This revision provides payment-disclosure production and
+verification, epoch-pinned native WalletQuery reads, separate visible and
+settled tip semantics, and typed Zinder transaction submission.
 
 ## zinder
 
@@ -36,11 +36,9 @@ zpay depends on:
 
 | Crate | Used by | For |
 |-------|---------|-----|
-| `zinder-client` | `zpay-runtime` | `RemoteChainIndex::broadcast_transaction`, `ChainEvents`, tip reads, disclosure fetch. |
-| `zinder-proto` | `zpay-runtime` | the generated protobuf types. |
+| `zinder-client` | `zpay-runtime` | Native WalletQuery broadcast, chain epochs and events, transaction status, and disclosure fetches. |
 
-Pin: `zinder-client` and `zinder-proto` at git rev `c604ac3`. Bumps land in
-their own PR.
+Pin: `zinder-client` at git rev `2a4b982`. Bumps land in their own PR.
 
 Wallet deployments that claim Ironwood subtree-root coverage must observe the
 `wallet.read.subtree_roots_ironwood_v1` capability from zinder `ServerInfo`.
@@ -50,8 +48,13 @@ observation, tip reads, and disclosure transaction fetch. There is no separate
 fallback oracle. zpay reaches zinder directly in every supported deployment
 (see [ADR-0003](../adrs/0003-zinder-as-chain-plane.md)).
 
-**Store schema.** The pinned zinder is at artifact schema version 12
-(`CURRENT_ARTIFACT_SCHEMA_VERSION`). A zinder store written below schema 12 is
+The endpoint must be served by Zinder's native query process backed by a live
+projector and canonical ingest process. Zinder's current Railway target is
+ingest-only and is not a valid zpay chain source; no port substitution can make
+that topology wallet-serving.
+
+**Store schema.** The pinned zinder is at artifact schema version 20
+(`CURRENT_ARTIFACT_SCHEMA_VERSION`). A zinder store written below schema 20 is
 incompatible and must be wiped and resynced; follow zinder's own store-reset
 runbook.
 

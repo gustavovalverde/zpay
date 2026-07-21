@@ -11,7 +11,6 @@ mod rejecting_fetcher;
 mod tip_oracle;
 mod zinder_fetcher;
 mod zinder_oracle;
-mod zinder_submitter;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,7 +28,6 @@ use tip_oracle::{AnyTipOracle, StaticTipOracle, ZinderTipOracle};
 use zinder_client::{Network as ZinderNetwork, RemoteChainIndex, RemoteOpenOptions};
 use zinder_fetcher::ZinderTransactionFetcher;
 use zinder_oracle::ZinderConfirmationOracle;
-use zinder_submitter::ZinderSubmitter;
 use zpay_core::accepts::{AcceptsEntry, PayeeRegistry};
 use zpay_core::broadcast::BroadcastOutcome;
 use zpay_core::chain_status::{ChainStatusCache, ChainStatusView};
@@ -126,7 +124,7 @@ enum StartupError {
     #[error("invalid store backend {backend:?}: expected 'memory' or 'libsql'")]
     StoreBackendInvalid { backend: String },
     #[error(
-        "payee {payee_id:?} advertises the baked-in demo placeholder pay_to; refusing to start. \
+        "payee {payee_id:?} advertises a demo-placeholder-shaped pay_to; refusing to start. \
          Override the payees config (ZPAY_PAYEES__CONFIG_PATH) with a real receiver, or set \
          ZPAY_ALLOW_DEMO_PAYEE=1 to bypass for dev (never set this in production)."
     )]
@@ -925,8 +923,8 @@ fn build_broadcast_client(config: &ResolvedConfig) -> Result<AnySubmitter, Start
         );
         return Ok(AnySubmitter::Rejecting(zally_network));
     };
-    let client = ZinderSubmitter::new(
-        connect_configured_zinder_chain(endpoint, &config.network)?,
+    let client = zally_chain::ZinderSubmitter::from_chain_index(
+        Arc::new(connect_configured_zinder_chain(endpoint, &config.network)?),
         zally_network,
     );
     tracing::info!(
@@ -990,19 +988,19 @@ fn load_payee_registry(config: &ResolvedConfig) -> Result<PayeeRegistry, Startup
     Ok(registry)
 }
 
-/// Walk every registered payee and refuse to start when the baked-in
-/// demo placeholder `pay_to` is still present.
+/// Walk every registered payee and refuse to start when a demo-placeholder
+/// `pay_to` is present.
 ///
-/// The placeholder shipped in `etc/aether-demo.toml` is a long string
-/// of the form `utest1qqq…qqq` (Zcash testnet UA prefix followed by a
-/// run of `q` padding characters). The gate matches that *shape*, not
-/// the exact baked-in literal, so a slightly different placeholder
-/// (extra char, off-by-one length) still trips the gate. Any real UA
-/// has non-`q` characters in the data portion and passes through.
+/// A known demo placeholder is a long string of the form `utest1qqq…qqq`
+/// (Zcash testnet UA prefix followed by a run of `q` padding characters).
+/// The gate matches that *shape*, not an exact literal, so a slightly
+/// different placeholder (extra char, off-by-one length) still trips the
+/// gate. Any real UA has non-`q` characters in the data portion and passes
+/// through.
 ///
 /// When `allow_demo_payee` is true the gate emits a `WARN` per
-/// offending payee and proceeds; this is the dev / docker-compose
-/// escape hatch only and must never be set in production.
+/// offending payee and proceeds; this is a local-development escape hatch
+/// and must never be set in production.
 fn validate_payees(registry: &PayeeRegistry, allow_demo: bool) -> Result<(), StartupError> {
     for (payee_id, entries) in registry.iter() {
         for entry in entries {
@@ -1029,10 +1027,9 @@ fn validate_payees(registry: &PayeeRegistry, allow_demo: bool) -> Result<(), Sta
 const PLACEHOLDER_PAY_TO_PREFIX: &str = "utest1q";
 /// Minimum total length the shape check requires.
 ///
-/// The baked-in `etc/aether-demo.toml` placeholder is 133 chars; we
-/// leave a small floor below that so a typo (off by a few chars)
-/// still trips the gate without false-positive matches on short
-/// hand-typed addresses.
+/// The known placeholder is 133 chars; leave a small floor below that so a
+/// typo (off by a few chars) still trips the gate without false-positive
+/// matches on short hand-typed addresses.
 const PLACEHOLDER_PAY_TO_MIN_LEN: usize = 100;
 
 /// Match the demo placeholder by *shape*, not by full-string compare.
@@ -1107,7 +1104,7 @@ enum AnySubmitter {
     /// `RemoteChainIndex` carries a tonic `Endpoint` of several hundred
     /// bytes, while the `Rejecting` variant is unit-sized; clippy's
     /// `large_enum_variant` rule prefers indirection.
-    Zinder(Box<ZinderSubmitter>),
+    Zinder(Box<zally_chain::ZinderSubmitter>),
 }
 
 #[async_trait::async_trait]
@@ -1484,8 +1481,7 @@ struct ResolvedConfig {
     /// Operator-toggled escape hatch for the placeholder-payee gate.
     /// Read from `ZPAY_ALLOW_DEMO_PAYEE`. Off by default; set to a
     /// truthy value (`1`, `true`, `yes`, case-insensitive) only in
-    /// dev/compose stacks that intentionally ship the baked-in
-    /// `aether-demo` placeholder.
+    /// local development with an intentionally supplied demo placeholder.
     allow_demo_payee: bool,
     /// Per-`jkt` request budget per minute on the DPoP-authenticated routes.
     /// Read from `ZPAY_RATE_LIMIT__PER_JKT_PER_MINUTE`; `0` disables the
@@ -2071,9 +2067,8 @@ mod tests {
         Ok(())
     }
 
-    /// The literal `pay_to` baked into `etc/aether-demo.toml`.
-    /// Used by the placeholder-shape tests below so a future tweak to
-    /// the baked file does not silently invalidate the gate.
+    /// A known operator-supplied demo `pay_to` value used to exercise the
+    /// placeholder-shape gate.
     const DEMO_PLACEHOLDER_PAY_TO: &str = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
     fn placeholder_entry() -> AcceptsEntry {
@@ -2102,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_shape_matches_baked_file() {
+    fn placeholder_shape_matches_known_demo_value() {
         assert!(is_placeholder_pay_to(DEMO_PLACEHOLDER_PAY_TO));
     }
 

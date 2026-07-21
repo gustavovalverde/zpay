@@ -1,18 +1,27 @@
 # Railway deploy
 
-Operator reference for deploying the zpay stack to Railway. One Railway
-project (`zcash-faucet`) hosts three services built from this one
-repository, alongside the chain plane they consume:
+Operator reference for deploying the zpay stack to Railway.
+
+> **Deployment blocked.** Zinder-backed zpay is not currently a supported
+> Railway deployment. The existing `zinder-v12` Railway target runs only
+> `zinder-ingest`; it does not run the projector or native query service and
+> therefore does not expose WalletQuery on port 9102. Changing a client port
+> cannot supply that missing service. Resume this runbook only after a complete
+> externally hosted Zinder wallet-serving topology (ingest, projector, native
+> query, and compatibility service) has a reachable native WalletQuery URL.
+Once the Zinder topology gate is cleared, one Railway project (`zcash-faucet`) hosts three
+services built from this repository alongside the chain plane they consume:
 
 ```text
-zebra  <--  zinder-v12 (zinder-v12.railway.internal:9101)
-                ^                ^
-                |                |
-              zpay  <-------  zpay-demo  ------>  zspend
+zebra  <--  external Zinder wallet-serving topology
+                         ^       ^       ^
+                         |       |       |
+                       zpay <- zpay-demo -> zspend
           (8080, public)     (7410, public)   (8090, private)
 ```
 
-Every deploy goes through `scripts/deploy-to-railway.sh`. A raw
+After the deployment gates above are cleared, every deploy goes through
+`scripts/deploy-to-railway.sh`. A raw
 `railway up` from the repo root is unsupported: Railway always builds a
 `Dockerfile` it finds at the upload root, so any service deployed that
 way would get zpay's image.
@@ -73,7 +82,7 @@ this table carries the deployment values.
 | `ZPAY_STORE__BACKEND` | yes | `libsql` | Only `libsql` and `memory` recognised. |
 | `ZPAY_STORE__URL` | yes | `file:/var/lib/zpay/zpay.libsql` | `file:` URL on the mounted volume; `libsql://…` for Turso. |
 | `ZPAY_PAYEES_TOML` | yes (Railway) | TOML text | `docker/start.sh` writes it to `ZPAY_PAYEES__CONFIG_PATH` on every start. `etc/aether-demo.testnet.toml` is the tracked source of truth for the testnet value. |
-| `ZPAY_CHAIN_SOURCE_URL` | yes | `http://zinder-v12.railway.internal:9101` | Point at `zinder-v12`, not the older `zinder` service; `fauzec-runtime` already runs against it. |
+| `ZPAY_CHAIN_SOURCE_URL` | yes | `<native-wallet-query-url>` | Must target the native query service of a complete externally hosted Zinder wallet-serving topology. The ingest-only `zinder-v12` Railway service is invalid. |
 | `ZPAY_FINALITY_DEPTH` | optional | `3` | Default 3; bump for mainnet. |
 | `ZPAY_STORE__AUTH_TOKEN` | optional | `<turso-token>` | Turso only. |
 | `ZPAY_ALLOW_DEMO_PAYEE` | DEV ONLY | unset | Bypasses the placeholder-receiver boot gate. Never set in production. |
@@ -88,7 +97,7 @@ zspend stays private-network only; no public domain. The sealed seed at
 | `PORT` | `8090` | Healthcheck probe port. |
 | `ZSPEND_NETWORK` | `testnet` | |
 | `ZSPEND_PUBLIC_URL` | `http://zspend.railway.internal:8090` | Base of the sign URL the DPoP `htu` verification pins against; must match the caller's `ZPAY_DEMO_ZSPEND_PUBLIC_URL`. Unset emits a startup `WARN`. |
-| `ZSPEND_CHAIN_SOURCE_URL` | `http://zinder-v12.railway.internal:9101` | |
+| `ZSPEND_CHAIN_SOURCE_URL` | `<native-wallet-query-url>` | Same externally hosted native WalletQuery service as zpay. |
 | `ZSPEND_AUDIENCE` | deployment-chosen URN | Must match the issuer's audience claim. |
 | `ZSPEND_JWKS_JSON` + `ZSPEND_JWKS_FILE` | JWKS text + `/var/lib/zspend/dev-jwks.json` | `docker/start-zspend.sh` materializes the JSON to the file path on every start. |
 | `ZSPEND_BIRTHDAY_HEIGHT` | near-tip height | Set for fresh wallets so first-boot sync stays inside the healthcheck window. |
@@ -104,7 +113,7 @@ zspend stays private-network only; no public domain. The sealed seed at
 | `ZPAY_DEMO_ZPAY_PUBLIC_URL` | `https://zpay-production.up.railway.app` | URL encoded into zpay DPoP proofs; must match zpay's `ZPAY_EXPECTED_HOST` and scheme. |
 | `ZPAY_DEMO_ZPAY_OPS_URL` | `http://zpay.railway.internal:9295` | |
 | `ZPAY_DEMO_ZSPEND_URL` | `http://zspend.railway.internal:8090` | `ZPAY_DEMO_ZSPEND_PUBLIC_URL` defaults to this and must match zspend's `ZSPEND_PUBLIC_URL`. |
-| `ZPAY_DEMO_ZINDER_URL` | `http://zinder-v12.railway.internal:9101` | |
+| `ZPAY_DEMO_ZINDER_URL` | `<native-wallet-query-url>` | Same externally hosted native WalletQuery service as zpay and zspend. |
 | `ZPAY_DEMO_PAYEE_ID` | `aether-demo` | |
 | `ZPAY_DEMO_ISSUER_KEY_PEM` + `ZPAY_DEMO_ISSUER_KEY_PATH` | PEM text + `/var/lib/zpay-demo/wallet/dev-issuer-p256.pem` | `docker/start-zpay-demo.sh` materializes the PEM on every start. The matching JWKS is zspend's `ZSPEND_JWKS_JSON`. |
 | `ZPAY_DEMO_ISSUER_KID` | key id | Must match the `kid` in zspend's JWKS. |
@@ -135,15 +144,18 @@ CNAME first, then flip `ZPAY_EXPECTED_HOST` and
 
 ## First-deploy checklist
 
-1. Set every variable in the tables above (including `PORT`).
-2. Provision the volumes.
-3. `./scripts/deploy-to-railway.sh all --check` to validate the staged
+1. Confirm a complete externally hosted Zinder wallet-serving topology is
+   ready and record its native WalletQuery URL. Do not use the ingest-only
+   `zinder-v12` Railway service.
+2. Set every variable in the tables above (including `PORT`).
+3. Provision the volumes.
+4. `./scripts/deploy-to-railway.sh all --check` to validate the staged
    trees offline.
-4. `./scripts/deploy-to-railway.sh all` and watch the healthchecks.
-5. `https://<zpay-domain>/healthz`, then
+5. `./scripts/deploy-to-railway.sh all` and watch the healthchecks.
+6. `https://<zpay-domain>/healthz`, then
    `https://<zpay-domain>/zpay/v1/accepts?payee_id=<id>` from outside
    Railway.
-6. `https://<zpay-demo-domain>/demo/v1/readiness` reports zpay, zspend,
+7. `https://<zpay-demo-domain>/demo/v1/readiness` reports zpay, zspend,
    zinder, and faucet `ready`.
 
 ## Rollback
@@ -182,7 +194,7 @@ The runtimes emit structured `WARN` lines for posture issues to fix
 before production traffic:
 
 - `ZPAY_ALLOW_DEMO_PAYEE=1; running with placeholder payee <id>`: the
-  placeholder-receiver gate is bypassed; compose-only.
+  placeholder-receiver gate is bypassed; local-development only.
 - `ZPAY_EXPECTED_HOST unset; DPoP htu canonicalization uses inbound
   Host header.`: pin the host in production.
 - `ZSPEND_PUBLIC_URL unset; DPoP htu canonicalization uses
