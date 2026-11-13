@@ -22,9 +22,10 @@ zpay depends on:
 | `zally-testkit` | tests | fixtures and mock chain sources. |
 
 Pin: workspace `Cargo.toml` pins one git rev for every zally crate, currently
-`345b370`. This revision provides payment-disclosure production and
-verification, epoch-pinned native WalletQuery reads, separate visible and
-settled tip semantics, and typed Zinder transaction submission.
+`2e4ad39` (release v0.2.0). This release provides payment-disclosure
+production and verification, epoch-pinned native WalletQuery reads, separate
+visible and settled tip semantics, typed Zinder transaction submission, and a
+single-writer lock on each wallet database file.
 
 ## zinder
 
@@ -38,7 +39,11 @@ zpay depends on:
 |-------|---------|-----|
 | `zinder-client` | `zpay-runtime` | Native WalletQuery broadcast, chain epochs and events, transaction status, and disclosure fetches. |
 
-Pin: `zinder-client` at git rev `2a4b982`. Bumps land in their own PR.
+Pin: `zinder-client` 0.10.0 from crates.io, the same version zally v0.2.0
+resolves, so the `RemoteChainIndex` zpay hands to zally's `ZinderSubmitter` is
+one type. The pin tracks the native contract revision (8 at 0.10.0): the client
+refuses servers below its revision and older clients fail against newer
+servers, so cut zpay and zinder over together.
 
 Wallet deployments that claim Ironwood subtree-root coverage must observe the
 `wallet.read.subtree_roots_ironwood_v1` capability from zinder `ServerInfo`.
@@ -60,60 +65,18 @@ runbook.
 
 ## librustzcash family
 
-zpay pins the unreleased upstream librustzcash workspace
-(`github.com/zcash/librustzcash`, rev `8e6864a`) through `[patch.crates-io]`.
-Every librustzcash-internal crate is patched from the same commit so
-intra-workspace types stay coherent: `zcash_client_backend`,
-`zcash_client_sqlite`, `zcash_encoding`, `equihash`, `pczt`, `zcash_protocol`,
-`zcash_primitives`, `zcash_keys`, `zcash_address`, `zcash_transparent`,
-`zcash_proofs`, and `zip321`.
-
-The upstream commit carries the unreleased Ironwood/NU6.3 dependency family,
-target-expiry PCZT construction, and Ironwood wallet scanning and storage
-support.
-
-`orchard` is patched to `github.com/zcash/orchard` rev `475ef0f` because the
-pinned librustzcash commit depends on unreleased bundle-type APIs.
-
-Drop the patch set once upstream releases ship these APIs. `deny.toml` allows
-these sources under `[sources] allow-git`, alongside the zally and zinder
-sources.
-
-`shardtree` and `incrementalmerkletree` are pinned to the
-`github.com/gustavovalverde/incrementalmerkletree` fork at `48b5297`, matching
-zally's anchor-retention APIs.
-
-**Validator requirement.** Ironwood/NU6.3 is served by Zebra only; it is the
-only full validator past NU6.3. A zinder deployment behind zpay must index a
-Zebra node at that network upgrade.
-
-## fauzec
-
-[github.com/gustavovalverde/fauzec](https://github.com/gustavovalverde/fauzec)
-
-Role: Testnet faucet. No Rust dependency. The relationship is operational:
-the `zpay-e2e` validator claims TAZ from fauzec to fund agent-payment flows.
-
-## zentity
-
-[github.com/gustavovalverde/zentity](https://github.com/gustavovalverde/zentity)
-
-Role: Identity issuer. It mints the DPoP-bound `payment_authorization` access
-tokens the wallet runtime (`zspend-runtime`) verifies, and it is the sole
-spend-policy authority for the agent-signed path (Proposal-0003 D-1/D-2).
-
-`zpay-runtime` itself has no zentity dependency: it validates no PoH token and
-runs no JWKS client (see
-[ADR-0008](../adrs/0008-compliance-authority-placement.md)). The wallet
-runtime consumes zentity's JWKS and revocation delta endpoint; see
-`zspend-runtime`'s configuration.
+zpay uses the released librustzcash cohort that zally v0.2.0 resolves, pinned
+exactly in the workspace `Cargo.toml`: `zcash_keys 0.17.0`,
+`zcash_primitives 0.31.0`, `zcash_protocol 0.11.0`, `zcash_address 0.14.0`,
+`zcash_proofs 0.31.0`, `pczt 0.10.0`, `orchard 0.16.0`, `sapling-crypto 0.9`,
+and `zip32 0.3`. Advance the family together with zally so intra-workspace
+types stay coherent. There is no `[patch.crates-io]` section.
 
 ## Version-pinning policy
 
-- Sibling Rust workspaces (zally, zinder) pin by git rev in `Cargo.toml`.
+- zally pins by git rev in `Cargo.toml`; `deny.toml` allows only that source.
+  zinder-client and the librustzcash family pin by released crate version.
   Bumps land in their own PR citing the upstream change and the reason.
-- The unreleased librustzcash and Orchard pins live under `[patch.crates-io]`;
-  `deny.toml` allows their sources.
 - HTTP-only relationships (fauzec, zentity) carry no crate pin; they are
   configured by env var and asserted by integration tests.
 

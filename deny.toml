@@ -20,6 +20,21 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki name constraints (wildcard); libsql 0.9.30 path; clears when libsql lifts to hyper-rustls >=0.27" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parser panic; libsql 0.9.30 path; no operator-controlled CRL ingestion in zpay" },
 
+    # Transitive findings with no compatible fix in the pinned upstream stacks.
+    # libsql 0.9.30 -> tonic 0.11 / hyper-rustls 0.25 pins h2 0.3, rustls 0.22,
+    # and rustls-webpki 0.102; zpay connects out to an operator-pinned Turso URL
+    # and terminates no TLS itself.
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 unbounded empty DATA frames; libsql 0.9.30 path; client-only use against an operator-pinned Turso URL; clears when libsql lifts to hyper 1.x" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.22.4 Debug exposure of session values; libsql 0.9.30 path; zpay never logs libsql TLS session state" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.22.4 ServerHello downgrade; libsql 0.9.30 path; Turso endpoint is operator-pinned; clears when libsql lifts to rustls 0.23" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102.8 distrusted intermediates; libsql 0.9.30 path; clears when libsql lifts to rustls 0.23" },
+    # Zally's wallet stack (zcash_client_sqlite 0.23 -> rusqlite 0.37) pins libsqlite3-sys 0.35.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite page-cache disclosure needs a crafted wallet.db plus -wal pair; zpay opens only wallet files it creates on its own volume; clears when zcash_client_sqlite lifts to rusqlite 0.41" },
+    # p256 0.13 -> elliptic-curve 0.13 -> crypto-bigint 0.5 (DPoP ES256 in zpay-x402, zspend-core, and zspend-runtime).
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 constant-time findings; reached only through p256 0.13 (DPoP ES256), whose field and scalar arithmetic is its own; not confirmed reachable on secret values; revisit when p256 lifts to crypto-bigint 0.7" },
+    # age 0.10 build-time localization macro.
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained; compile-time only through age -> i18n-config; no runtime exposure" },
+
     # time 0.3.37 DoS on RFC 2822 parsing. Pinned through rusqlite 0.37,
     # jsonwebtoken 9.3, and the unreleased zcash_client_backend stack. zpay
     # does not parse RFC 2822 input; the only consumer surface is JWT iat/exp
@@ -77,18 +92,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # Upstream librustzcash commit carrying the unreleased Ironwood/NU6.3
-    # dependency family and target-expiry PCZT API; consumed via [patch.crates-io].
-    "https://github.com/zcash/librustzcash.git",
-    # Temporary Orchard patch required by the pinned librustzcash commit's
-    # bundle-type APIs.
-    "https://github.com/zcash/orchard",
-    # shardtree/incrementalmerkletree fork carrying anchor-retention APIs used
-    # by zally's Ironwood wallet sync stack.
-    "https://github.com/gustavovalverde/incrementalmerkletree",
     # Sibling library workspace consumed by pinned rev; bump in lockstep with
     # zpay-core when upstream changes the wallet surface.
     "https://github.com/gustavovalverde/zally",
-    # Sibling indexer workspace consumed by pinned rev; provides RemoteChainIndex.
-    "https://github.com/gustavovalverde/zinder",
 ]
