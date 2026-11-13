@@ -181,8 +181,8 @@ directory and runtime parameterisation carry that.
 zpay is the payments-protocol peer to
 [zally](https://github.com/gustavovalverde/zally) (Rust wallet library)
 and [zinder](https://github.com/gustavovalverde/zinder) (Zcash indexer).
-Both upstreams are consumed by pinned git rev; bumps land as their own PRs
-naming the upstream change in the body.
+zally is consumed by pinned git rev and zinder-client by released crates.io
+version; bumps land as their own PRs naming the upstream change in the body.
 
 ## When in doubt
 
