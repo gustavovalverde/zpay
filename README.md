@@ -381,8 +381,8 @@ zpay sits next to two sibling projects in the Zcash agent stack:
   index; zpay reads chain tip, fetches transactions, and broadcasts
   through its gRPC surface.
 
-Both upstreams are pinned by git rev in `Cargo.toml`; bump the rev to
-promote upstream changes into zpay. The pinned line tracks Ironwood,
+zally is pinned by git rev and zinder-client by released version in
+`Cargo.toml`; bump the pin to promote upstream changes into zpay. The pinned line tracks Ironwood,
 the NU6.3 network upgrade: Zebra is the only full validator past
 activation, `/settle` parses both current transaction formats (v5 and
 v6), and zinder stores below artifact schema 20 must be wiped and

@@ -259,13 +259,15 @@ mod tests {
         init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
-        let (_wallet, first_account_id, _chain) = bootstrap(inputs(
+        let (first_wallet, first_account_id, first_chain) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(mock),
             Some(DEFAULT_REGTEST_BIRTHDAY),
         ))
         .await?;
+        drop(first_wallet);
+        drop(first_chain);
 
         let warm_mock = Arc::new(MockChainSource::new(network));
         let (_wallet_again, second_account_id, _chain_again) = bootstrap(inputs(
@@ -291,14 +293,16 @@ mod tests {
         init::run(paths.sealed_seed.clone(), false, false, false).await?;
 
         let mock = Arc::new(MockChainSource::new(network));
-        let (_w1, first, _chain1) = bootstrap(inputs(
+        let (first_wallet, first, first_chain) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(Arc::clone(&mock) as Arc<dyn zally_chain::ChainSource>),
             Some(DEFAULT_REGTEST_BIRTHDAY),
         ))
         .await?;
-        let (_w2, second, _chain2) = bootstrap(inputs(
+        drop(first_wallet);
+        drop(first_chain);
+        let (_second_wallet, second, _second_chain) = bootstrap(inputs(
             &paths,
             network,
             ChainSourceFactory::Custom(Arc::clone(&mock) as Arc<dyn zally_chain::ChainSource>),

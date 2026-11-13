@@ -717,19 +717,20 @@ mod tests {
         })
     }
 
-    fn sapling_recipient(seed: u8) -> sapling::PaymentAddress {
+    fn sapling_recipient(seed: u8) -> Result<sapling::PaymentAddress, &'static str> {
         let spending_key =
-            zcash_keys::keys::sapling::spending_key(&[seed; 32], 1, zip32::AccountId::ZERO);
-        spending_key
+            zcash_keys::keys::sapling::spending_key(&[seed; 32], 1, zip32::AccountId::ZERO)
+                .ok_or("could not derive test Sapling spending key")?;
+        Ok(spending_key
             .to_diversifiable_full_viewing_key()
             .default_address()
-            .1
+            .1)
     }
 
     fn unified_address(recipient: sapling::PaymentAddress) -> Result<String, &'static str> {
-        let unified = UnifiedAddress::from_receivers(None, Some(recipient), None)
+        let unified = UnifiedAddress::from_receivers(None, Some(recipient), None, None, None)
             .ok_or("could not construct test Unified Address")?;
-        Ok(ParsedZcashAddress::Unified(unified)
+        Ok(ParsedZcashAddress::Unified(Box::new(unified))
             .encode(&zally_core::Network::Testnet.to_parameters()))
     }
 
@@ -747,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn verified_output_reconciles_the_expected_amount() -> TestResult {
-        let expected_recipient = sapling_recipient(7);
+        let expected_recipient = sapling_recipient(7)?;
         let response = verify(
             request(50_000, expected_recipient, b"merchant-challenge")?,
             zally_core::Network::Testnet,
@@ -776,8 +777,8 @@ mod tests {
 
     #[tokio::test]
     async fn same_amount_to_another_recipient_does_not_match() -> TestResult {
-        let expected_recipient = sapling_recipient(7);
-        let disclosed_recipient = sapling_recipient(8);
+        let expected_recipient = sapling_recipient(7)?;
+        let disclosed_recipient = sapling_recipient(8)?;
         let response = verify(
             request(50_000, expected_recipient, b"merchant-challenge")?,
             zally_core::Network::Testnet,
@@ -800,7 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_disclosure_message_does_not_match() -> TestResult {
-        let expected_recipient = sapling_recipient(7);
+        let expected_recipient = sapling_recipient(7)?;
         let response = verify(
             request(50_000, expected_recipient, b"another-challenge")?,
             zally_core::Network::Testnet,

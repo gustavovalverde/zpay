@@ -92,7 +92,7 @@ Negative:
 - zpay's reliability ceiling is set by zinder's. A zinder outage stalls
   every settlement; the zexplorer fallback partially mitigates by routing
   to a different deployment.
-- The pinned `zinder-client` git rev must be bumped in lockstep with
+- The pinned `zinder-client` version must be bumped in lockstep with
   zinder's wire-protocol changes (rare, but expensive when it happens).
 
 Neutral:

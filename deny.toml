@@ -77,18 +77,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # Upstream librustzcash commit carrying the unreleased Ironwood/NU6.3
-    # dependency family and target-expiry PCZT API; consumed via [patch.crates-io].
-    "https://github.com/zcash/librustzcash.git",
-    # Temporary Orchard patch required by the pinned librustzcash commit's
-    # bundle-type APIs.
-    "https://github.com/zcash/orchard",
-    # shardtree/incrementalmerkletree fork carrying anchor-retention APIs used
-    # by zally's Ironwood wallet sync stack.
-    "https://github.com/gustavovalverde/incrementalmerkletree",
     # Sibling library workspace consumed by pinned rev; bump in lockstep with
     # zpay-core when upstream changes the wallet surface.
     "https://github.com/gustavovalverde/zally",
-    # Sibling indexer workspace consumed by pinned rev; provides RemoteChainIndex.
-    "https://github.com/gustavovalverde/zinder",
 ]

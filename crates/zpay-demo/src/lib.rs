@@ -850,9 +850,9 @@ async fn settle_checkout(
         .wallet
         .propose_pczt(plan, Some(BlockHeight::from(stored.prepared.expiry_height)))
         .await?;
-    let proven_pczt = state.wallet.prove_pczt(unsigned_pczt).await?;
-    let signed_pczt = state.wallet.sign_pczt(proven_pczt).await?;
-    let wallet_transaction_id = state.wallet.extract_pczt(signed_pczt.clone()).await?;
+    let proven_pczt = state.wallet.prove_pczt(&unsigned_pczt).await?;
+    let signed_pczt = state.wallet.sign_pczt(&proven_pczt).await?;
+    let wallet_transaction_id = state.wallet.extract_pczt(&signed_pczt).await?;
     let pczt_base64 = URL_SAFE_NO_PAD.encode(signed_pczt.as_bytes());
     let transaction_id = settle_x402_pczt(state, &stored.prepared, &pczt_base64).await?;
     if transaction_id != wallet_transaction_id.to_rpc_hex() {

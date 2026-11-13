@@ -1278,7 +1278,7 @@ async fn sign_payment_inner(
         }
     };
 
-    let proven_pczt = match state.wallet.prove_pczt(unsigned_pczt).await {
+    let proven_pczt = match state.wallet.prove_pczt(&unsigned_pczt).await {
         Ok(pczt) => pczt,
         Err(err) => {
             release_reservation(state, &claims.jti).await;
@@ -1286,7 +1286,7 @@ async fn sign_payment_inner(
         }
     };
 
-    let signed_pczt = match state.wallet.sign_pczt(proven_pczt).await {
+    let signed_pczt = match state.wallet.sign_pczt(&proven_pczt).await {
         Ok(pczt) => pczt,
         Err(err) => {
             release_reservation(state, &claims.jti).await;
@@ -1297,7 +1297,7 @@ async fn sign_payment_inner(
     let capture = CaptureSubmitter::new(requested_network);
     let send_outcome = match state
         .wallet
-        .extract_and_submit_pczt(signed_pczt.clone(), &capture)
+        .extract_and_submit_pczt(&signed_pczt, &capture)
         .await
     {
         Ok(outcome) => outcome,
