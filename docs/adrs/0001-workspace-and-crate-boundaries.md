@@ -58,8 +58,9 @@ zpay-testkit --> zpay-core, zpay-store (dev-only consumers)
 
 External dependencies:
 
-- `zpay-core` depends on `zally-core`, `zally-wallet`, `zinder-client` (all
-  pinned by git rev in the workspace `Cargo.toml`).
+- `zpay-core` depends on `zally-core`, `zally-wallet`, `zinder-client` (zally
+  pinned by git rev, zinder-client by released version, in the workspace
+  `Cargo.toml`).
 - `zpay-compliance` (inside `zpay-core`) depends on `jsonwebtoken` and
   `reqwest` for SD-JWT-VC verification.
 - No crate depends on `tonic` directly. zpay does not expose a gRPC
