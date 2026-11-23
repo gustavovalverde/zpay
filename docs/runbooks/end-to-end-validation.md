@@ -9,6 +9,9 @@ Zcash lifecycle on testnet:
 4. zpay reports the payment as settled by zinder's chain authority.
 5. zexplorer shows the transaction.
 
+For the embedded Zally signer and public Testnet endpoint, follow the
+[Zspend payment walkthrough](zspend-testnet-payment.md).
+
 ## Prerequisites
 
 Local tools:
