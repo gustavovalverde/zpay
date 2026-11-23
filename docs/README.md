@@ -57,6 +57,8 @@ The docs are organised by lifecycle, not by topic:
 
 - [end-to-end-validation.md](runbooks/end-to-end-validation.md): local zpay
   lifecycle smoke test with zpay, zinder, fauzec, and zexplorer
+- [zspend-testnet-payment.md](runbooks/zspend-testnet-payment.md): fund an
+  embedded Zally wallet and track a signed payment through settlement
 - [demo-ui.md](runbooks/demo-ui.md): browser checkout demo for checkout and
   autopay Zcash flows
 - [railway-deploy.md](runbooks/railway-deploy.md): Railway deployment
